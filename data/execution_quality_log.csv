@@ -1,0 +1,1 @@
+timestamp,option_symbol,side,order_type,qty_requested,qty_filled,fill_ratio,expected_mid,fill_price,slippage_pct,bid_at_order,ask_at_order,spread_at_order_pct
