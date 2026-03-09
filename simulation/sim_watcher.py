@@ -48,6 +48,12 @@ SIM_CHANNEL_MAP = {
     "SIM09": 1477017498451705968,
     "SIM10": 1478200317035417641,
     "SIM11": 1478200298466971679,
+    "SIM12": 1480410929589129266,
+    "SIM13": 1480410951143522325,
+    "SIM14": 1480410977857175703,
+    "SIM15": 1480411008928579595,
+    "SIM16": 1480411067212632124,
+    "SIM17": 1480411143234392154,
 }
 
 _SIM_BOT = None
@@ -932,6 +938,8 @@ def _format_skip_reason(reason: str) -> str:
         "invalid_direction": "Signal direction invalid.",
         "no_contract": "No contract met selection rules.",
         "directional_exposure_limit": "Too many sims already open in this direction.",
+        "before_entry_window": "Before entry window start time.",
+        "regime_filter": "Current regime does not match required filter.",
     }
     return mapping.get(reason, "")
 
@@ -1144,6 +1152,8 @@ async def sim_entry_loop() -> None:
                                 "invalid_price",
                                 "invalid_direction",
                                 "no_contract",
+                                "before_entry_window",
+                                "regime_filter",
                             }:
                                 last_reason = _SIM_LAST_SKIP_REASON.get(sim_id)
                                 if last_reason != reason:

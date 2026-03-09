@@ -18,6 +18,8 @@ from pandas.errors import EmptyDataError
 from core.market_clock import market_is_open
 from core.data_service import get_market_dataframe
 from core.debug import debug_log
+from core.structured_logger import slog, slog_critical
+from core.reconciler import write_heartbeat
 from core.account_repository import save_account
 from core.session_scope import get_rth_session_view
 from core.data_integrity import validate_market_dataframe
@@ -1738,8 +1740,9 @@ async def forecast_watcher(bot, forecast_channel_id):
                 last_logged_slot = slot_time
 
             await asyncio.sleep(20)
-        except Exception:
+        except Exception as _fw_exc:
             logging.exception("forecast_watcher_error")
+            slog_critical("forecast_watcher_error", error=str(_fw_exc))
             await asyncio.sleep(60)
 
 
@@ -2025,4 +2028,6 @@ async def heart_monitor(bot, channel_id):
             await _send(channel, "⚠️ Health monitor encountered an error.")
             print("Health monitor error:", e)
 
+        # Write heartbeat so crash recovery can detect unclean shutdowns
+        write_heartbeat()
         await asyncio.sleep(60)

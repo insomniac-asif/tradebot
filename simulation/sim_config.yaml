@@ -316,3 +316,168 @@ SIM11:
   trailing_stop_trail_pct: 0.06
   zscore_window: 30
   iv_series_window: 200
+
+SIM12:
+  name: "Range-Only Mean Reversion"
+  horizon: "intraday"
+  signal_mode: "MEAN_REVERSION"
+  features_enabled: false
+  regime_filter: "RANGE_ONLY"
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 300
+  hold_max_seconds: 3600
+  cutoff_time_et: "15:00"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.25
+  profit_target_pct: 0.45
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+
+SIM13:
+  name: "Dual Momentum Surge"
+  horizon: "intraday"
+  signal_mode: "TREND_PULLBACK"
+  features_enabled: true
+  atr_expansion_min: 1.3
+  vol_z_min: 1.0
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.008
+  hold_min_seconds: 300
+  hold_max_seconds: 5400
+  cutoff_time_et: "15:00"
+  balance_start: 25000
+  risk_per_trade_pct: 0.01
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 1
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.30
+  profit_target_pct: 0.65
+  trailing_stop_activate_pct: 0.15
+  trailing_stop_trail_pct: 0.08
+  zscore_window: 30
+  iv_series_window: 200
+
+SIM14:
+  name: "Low IV Trend Entry"
+  horizon: "intraday"
+  signal_mode: "TREND_PULLBACK"
+  features_enabled: true
+  iv_rank_max: 0.30
+  dte_min: 1
+  dte_max: 3
+  otm_pct: 0.005
+  hold_min_seconds: 600
+  hold_max_seconds: 10800
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.35
+  profit_target_pct: 0.70
+  trailing_stop_activate_pct: 0.15
+  trailing_stop_trail_pct: 0.08
+  zscore_window: 30
+  iv_series_window: 200
+
+SIM15:
+  name: "VWAP Extreme Reversion"
+  horizon: "intraday"
+  signal_mode: "VWAP_REVERSION"
+  features_enabled: true
+  vwap_z_min: 2.0
+  entry_start_time_et: "10:00"
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 120
+  hold_max_seconds: 2700
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.25
+  profit_target_pct: 0.40
+  trailing_stop_activate_pct: 0.10
+  trailing_stop_trail_pct: 0.05
+  zscore_window: 30
+  iv_series_window: 200
+
+SIM16:
+  name: "Morning Momentum Breakout"
+  horizon: "scalp"
+  signal_mode: "BREAKOUT"
+  features_enabled: true
+  vol_z_min: 0.5
+  entry_start_time_et: "09:30"
+  dte_min: 0
+  dte_max: 0
+  otm_pct: 0.008
+  hold_min_seconds: 60
+  hold_max_seconds: 1800
+  cutoff_time_et: "10:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.005
+  daily_loss_limit_pct: 0.02
+  max_open_trades: 1
+  exposure_cap_pct: 0.10
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.25
+  profit_target_pct: 0.40
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+  zscore_window: 30
+  iv_series_window: 200
+
+SIM17:
+  name: "Z-Score Bounce"
+  horizon: "intraday"
+  signal_mode: "ZSCORE_BOUNCE"
+  features_enabled: true
+  close_z_min: 2.0
+  regime_filter: "RANGE_ONLY"
+  entry_start_time_et: "10:00"
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 120
+  hold_max_seconds: 3600
+  cutoff_time_et: "15:00"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.20
+  profit_target_pct: 0.35
+  trailing_stop_activate_pct: 0.10
+  trailing_stop_trail_pct: 0.05
+  zscore_window: 30
+  iv_series_window: 200

@@ -121,6 +121,9 @@ async def run_sim_entries(
                     "atr_expansion_min": profile.get("atr_expansion_min"),
                     "vol_z_min": profile.get("vol_z_min"),
                     "require_trend_bias": profile.get("require_trend_bias"),
+                    "iv_rank_max": profile.get("iv_rank_max"),
+                    "vwap_z_min": profile.get("vwap_z_min"),
+                    "close_z_min": profile.get("close_z_min"),
                 },
                 feature_snapshot=feature_snapshot,
             )
@@ -198,10 +201,23 @@ async def run_sim_entries(
             # ── 6. Continue with regime_filter, execution_mode, etc. ─
             regime_filter = sim.profile.get("regime_filter")
             if regime_filter is not None:
+                filtered_out = False
                 if isinstance(regime_filter, list):
-                    if regime not in regime_filter:
-                        continue
-                elif regime_filter == "TREND_ONLY" and regime != "TREND":
+                    filtered_out = regime not in regime_filter
+                elif regime_filter == "TREND_ONLY":
+                    filtered_out = regime != "TREND"
+                elif regime_filter == "RANGE_ONLY":
+                    filtered_out = regime != "RANGE"
+                elif regime_filter == "VOLATILE_ONLY":
+                    filtered_out = regime != "VOLATILE"
+                if filtered_out:
+                    results.append({
+                        "sim_id": sim_id,
+                        "status": "skipped",
+                        "reason": "regime_filter",
+                        "entry_context": entry_context,
+                        "signal_mode": signal_mode,
+                    })
                     continue
 
             execution_mode = sim.profile.get("execution_mode")

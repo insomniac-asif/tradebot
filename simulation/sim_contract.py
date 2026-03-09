@@ -14,9 +14,12 @@ except Exception:
 
 from analytics.contract_logger import log_contract_attempt
 from core.debug import debug_log
-from core.rate_limiter import rate_limit_sleep
+from core.rate_limiter import rate_limit_sleep, get_cache, get_breaker, get_bucket
 
 ALPACA_MIN_CALL_INTERVAL_SEC = float(os.getenv("ALPACA_MIN_CALL_INTERVAL_SEC", "0.5"))
+
+_CHAIN_CACHE_TTL = 30.0    # seconds — option chains don't change often
+_SNAPSHOT_CACHE_TTL = 10.0  # seconds — batch snapshot quotes
 
 # Track chain/snapshot errors for hourly health reporting
 _CHAIN_ERROR_EVENTS = deque()
@@ -323,16 +326,27 @@ def select_sim_contract_with_reason(
         chain = None
         feed_val = None
         try:
-            rate_limit_sleep("alpaca_option_chain", ALPACA_MIN_CALL_INTERVAL_SEC)
-            feed_val = _get_options_feed()
-            chain = client.get_option_chain(
-                OptionChainRequest(
-                    underlying_symbol="SPY",
-                    type=contract_type_enum,
-                    feed=feed_val,
-                    expiration_date=expiry_date
+            if not get_breaker().allow_request():
+                last_reason = "circuit_breaker_open"
+                break
+            _chain_cache_key = f"chain:{direction}:{expiry_date.isoformat()}"
+            chain = get_cache().get(_chain_cache_key)
+            if chain is not None:
+                pass  # cache hit — skip API call
+            else:
+                get_bucket().acquire_wait()
+                rate_limit_sleep("alpaca_option_chain", ALPACA_MIN_CALL_INTERVAL_SEC)
+                feed_val = _get_options_feed()
+                chain = client.get_option_chain(
+                    OptionChainRequest(
+                        underlying_symbol="SPY",
+                        type=contract_type_enum,
+                        feed=feed_val,
+                        expiration_date=expiry_date
+                    )
                 )
-            )
+                get_breaker().record_success()
+                get_cache().set(_chain_cache_key, chain, _CHAIN_CACHE_TTL)
             try:
                 sample_sym = None
                 if isinstance(chain, dict) and chain:
@@ -356,6 +370,7 @@ def select_sim_contract_with_reason(
                 pass
         except Exception as e:
             last_reason = "chain_error"
+            get_breaker().record_failure()
             try:
                 import logging
                 logging.warning("sim_contract_chain_error: %s", e)
@@ -451,17 +466,26 @@ def select_sim_contract_with_reason(
             try:
                 batch_symbols = [s for s, _ in symbol_candidates if s]
                 if batch_symbols:
-                    rate_limit_sleep("alpaca_option_snapshot", ALPACA_MIN_CALL_INTERVAL_SEC)
-                    debug_log(
-                        "sim_snapshot_request",
-                        symbols=batch_symbols[:5],
-                        count=len(batch_symbols),
-                        expiry=expiry_date.isoformat(),
-                        direction=direction,
-                    )
-                    snapshots = client.get_option_snapshot(
-                        _build_snapshot_request(batch_symbols, feed_override=feed_val)
-                    )
+                    if not get_breaker().allow_request():
+                        last_reason = "circuit_breaker_open"
+                        continue
+                    _snap_cache_key = f"snaps:{':'.join(batch_symbols[:3])}"
+                    snapshots = get_cache().get(_snap_cache_key)
+                    if snapshots is None:
+                        get_bucket().acquire_wait()
+                        rate_limit_sleep("alpaca_option_snapshot", ALPACA_MIN_CALL_INTERVAL_SEC)
+                        debug_log(
+                            "sim_snapshot_request",
+                            symbols=batch_symbols[:5],
+                            count=len(batch_symbols),
+                            expiry=expiry_date.isoformat(),
+                            direction=direction,
+                        )
+                        snapshots = client.get_option_snapshot(
+                            _build_snapshot_request(batch_symbols, feed_override=feed_val)
+                        )
+                        get_breaker().record_success()
+                        get_cache().set(_snap_cache_key, snapshots, _SNAPSHOT_CACHE_TTL)
                     _record_snapshot_probe(snapshots, batch_symbols)
                     try:
                         if isinstance(snapshots, dict) and len(snapshots) == 0:
@@ -549,6 +573,7 @@ def select_sim_contract_with_reason(
                             "vega": vega,
                         }, None
             except Exception as e:
+                get_breaker().record_failure()
                 _record_error("snapshot", f"batch_snapshot_error: {str(e)}")
 
         for symbol_item in symbol_loop:
@@ -562,6 +587,10 @@ def select_sim_contract_with_reason(
                     strike = symbol_item
                 if not symbol:
                     symbol = _build_occ(expiry_date, contract_type_char, strike)
+                if not get_breaker().allow_request():
+                    last_reason = "circuit_breaker_open"
+                    continue
+                get_bucket().acquire_wait()
                 rate_limit_sleep("alpaca_option_snapshot", ALPACA_MIN_CALL_INTERVAL_SEC)
                 debug_log(
                     "sim_snapshot_request_single",
@@ -570,9 +599,14 @@ def select_sim_contract_with_reason(
                     strike=strike,
                     direction=direction,
                 )
-                snapshots = client.get_option_snapshot(
-                    _build_snapshot_request([symbol], feed_override=feed_val)
-                )
+                try:
+                    snapshots = client.get_option_snapshot(
+                        _build_snapshot_request([symbol], feed_override=feed_val)
+                    )
+                    get_breaker().record_success()
+                except Exception as exc:
+                    get_breaker().record_failure()
+                    raise exc
                 _record_snapshot_probe(snapshots, [symbol])
                 if isinstance(snapshots, dict) and len(snapshots) == 0 and feed_val is None:
                     try:

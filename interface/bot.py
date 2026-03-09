@@ -46,6 +46,9 @@ from simulation.sim_watcher import (
     get_sim_last_skip_state,
 )
 from core.md_state import set_md_enabled, get_md_state, md_needs_warning, set_md_auto
+from core.api_resilience import resilience_stats
+from core.structured_logger import setup_structured_logging, slog_critical
+from core.backfill import run_backfill_async, backfill_status
 # -------- Core --------
 from core.market_clock import market_is_open
 from core.data_service import get_market_dataframe
@@ -104,6 +107,7 @@ from interface.fmt import (
 from research.train_ai import train_direction_model, train_edge_model
 from logs.recorder import start_recorder_background
 from core.startup_sync import perform_startup_broker_sync
+from core.reconciler import full_reconcile
 from simulation.sim_portfolio import SimPortfolio
 
 
@@ -259,6 +263,15 @@ class QQQBot(commands.Bot):
                 await asyncio.sleep(5)
 
     async def setup_hook(self):
+        setup_structured_logging()
+        # Seed SQLite trade journal from existing sim JSON files
+        try:
+            from core.trade_db import sync_from_sim_jsons, create_tables
+            create_tables()
+            synced = sync_from_sim_jsons()
+            print(f"Trade DB synced {synced} records from sim JSONs.")
+        except Exception as _tdb_exc:
+            logging.warning("trade_db_startup_sync_failed: %s", _tdb_exc)
         print("Launching background systems...")
 
         if not hasattr(self, "recorder_thread"):
@@ -291,7 +304,7 @@ class QQQBot(commands.Bot):
         except Exception as e:
             logging.exception("feature_file_init_error: %s", e)
 
-        await perform_startup_broker_sync(self)
+        await full_reconcile(self)
 
         self.loop.create_task(
             self.safe_task(auto_trader, self, PAPER_CHANNEL_ID)
@@ -1397,7 +1410,7 @@ async def help_command(ctx, command_name: str | int | None = None):
                 "title": "📙 Help — Page 3/3 (System + AI)",
                 "color": 0xF39C12,
                 "fields": [
-                    ("🖥 System", "`!system`, `!replay`, `!helpplan`"),
+                    ("🖥 System", "`!system`, `!ratelimit`, `!backfill`, `!query`, `!replay`, `!helpplan`"),
                     ("🧭 Momentum Decay", "`!md status`, `!md enable`, `!md disable`, `!md auto <low|medium|high>`"),
                     ("🤖 AI Coach", "`!ask`, `!askmore`"),
                     ("🧰 Maintenance", "`!conviction_fix`, `!features_reset`, `!pred_reset`"),
@@ -5043,6 +5056,140 @@ async def system(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.command()
+async def ratelimit(ctx):
+    """Show API rate-limiter / circuit-breaker / cache stats."""
+    stats = resilience_stats()
+    bucket = stats["bucket"]
+    cache = stats["cache"]
+    breaker = stats["breaker"]
+
+    cb_state = breaker["state"]
+    cb_color = 0x00CC44 if cb_state == "closed" else (0xFF8800 if cb_state == "half_open" else 0xFF3333)
+
+    age_str = ""
+    if breaker.get("opened_age_seconds") is not None:
+        age_str = f" (open {breaker['opened_age_seconds']}s ago)"
+
+    embed = discord.Embed(title="API Resilience Status", color=cb_color)
+    embed.add_field(
+        name="Token Bucket",
+        value=(
+            f"Available: **{bucket['tokens_available']}** / {int(bucket['max_tokens'])}\n"
+            f"Refill rate: {bucket['refill_rate']}/s"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Response Cache",
+        value=(
+            f"Valid entries: **{cache['cached_entries']}**\n"
+            f"Total slots: {cache['total_entries']}"
+        ),
+        inline=True,
+    )
+    cb_icon = "🟢" if cb_state == "closed" else ("🟡" if cb_state == "half_open" else "🔴")
+    embed.add_field(
+        name="Circuit Breaker",
+        value=(
+            f"{cb_icon} **{cb_state.upper()}**{age_str}\n"
+            f"Failures: {breaker['failures']} / {breaker['threshold']}"
+        ),
+        inline=False,
+    )
+    _append_footer(embed)
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def backfill(ctx, days: int = 30):
+    """Backfill historical 1m candles from Alpaca. Usage: !backfill [days]"""
+    if days < 1 or days > 365:
+        await _send_embed(ctx, "Days must be between 1 and 365.")
+        return
+
+    status = backfill_status()
+    embed = discord.Embed(
+        title=f"Backfilling {days} days of 1m candles…",
+        description=(
+            f"Current CSV: **{status['rows']:,}** rows\n"
+            f"Earliest: {status['earliest'] or 'N/A'}\n"
+            f"Latest: {status['latest'] or 'N/A'}\n\n"
+            "Running in background — this may take a minute."
+        ),
+        color=0x4444FF,
+    )
+    _append_footer(embed)
+    await ctx.send(embed=embed)
+
+    messages: list[str] = []
+
+    def progress(msg: str):
+        messages.append(msg)
+
+    result = await run_backfill_async(days_back=days, progress_cb=progress)
+
+    if result.get("ok"):
+        embed2 = discord.Embed(
+            title="Backfill Complete",
+            color=0x00CC44,
+        )
+        embed2.add_field(
+            name="Results",
+            value=(
+                f"Days fetched: **{result['fetched_days']}**\n"
+                f"Rows added: **{result['added_rows']:,}**\n"
+                f"Total rows: **{result['total_rows']:,}**\n"
+                f"Day-errors: {result['errors']}"
+            ),
+            inline=False,
+        )
+    else:
+        embed2 = discord.Embed(
+            title="Backfill Failed",
+            description=result.get("error", "unknown error"),
+            color=0xFF3333,
+        )
+    _append_footer(embed2)
+    await ctx.send(embed=embed2)
+
+
+@bot.command()
+async def query(ctx, sim_id: str = None, page: int = 1):
+    """Query trade journal DB. Usage: !query [SIM03] [page]"""
+    from core.trade_db import query_trades, trade_count
+
+    per_page = 10
+    offset = (max(1, page) - 1) * per_page
+    sid = sim_id.upper() if sim_id else None
+
+    trades = query_trades(sim_id=sid, limit=per_page, offset=offset)
+    total = trade_count(sim_id=sid)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    title = f"Trade Journal — {sid or 'ALL SIMS'} (page {page}/{total_pages})"
+    embed = discord.Embed(title=title, color=0x4444AA)
+    embed.description = f"Total records: **{total:,}**"
+
+    if not trades:
+        embed.description += "\nNo trades found."
+    else:
+        lines = []
+        for t in trades:
+            pnl = t.get("realized_pnl_dollars")
+            pnl_str = f"${pnl:+.2f}" if pnl is not None else "?"
+            sym = t.get("option_symbol") or "?"
+            xt = (t.get("exit_time") or "")[:16]
+            reason = t.get("exit_reason") or "?"
+            sim = t.get("sim_id") or "?"
+            lines.append(f"`{sim}` {sym} | {pnl_str} | {reason} | {xt}")
+        embed.add_field(name="Trades", value="\n".join(lines), inline=False)
+
+    if total_pages > 1:
+        embed.set_footer(text=f"Use !query {sim_id or ''} {page + 1} for next page")
+    else:
+        _append_footer(embed)
+    await ctx.send(embed=embed)
 
 
 @bot.command()

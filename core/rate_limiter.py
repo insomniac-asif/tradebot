@@ -4,6 +4,9 @@ import logging
 
 # Simple shared rate limiter for Alpaca REST calls.
 # Use rate_limit_wait() to get a suggested delay and optionally sleep.
+# Singleton accessors for the richer resilience primitives live in api_resilience.py;
+# re-exported here for convenience so callers only need one import.
+from core.api_resilience import get_bucket, get_cache, get_breaker, resilience_stats  # noqa: F401
 
 _LOCK = threading.Lock()
 _LAST_CALL = {}

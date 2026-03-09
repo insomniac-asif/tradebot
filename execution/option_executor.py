@@ -12,8 +12,10 @@ from alpaca.trading.enums import OrderSide, TimeInForce, PositionIntent, OrderSt
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
 from core.debug import debug_log
-from core.rate_limiter import rate_limit_sleep
+from core.rate_limiter import rate_limit_sleep, get_cache, get_breaker, get_bucket
 from analytics.execution_logger import log_execution
+
+_SNAPSHOT_CACHE_TTL = 10.0  # seconds — for ResponseCache (short-lived mid-fill quotes)
 
 ALPACA_MIN_CALL_INTERVAL_SEC = float(os.getenv("ALPACA_MIN_CALL_INTERVAL_SEC", "0.5"))
 _LAST_OPTION_QUOTES: dict[str, dict[str, float]] = {}
@@ -120,16 +122,22 @@ def _get_option_quote(api_key: str, secret_key: str, symbol: str):
     if not symbol or not isinstance(symbol, str) or len(symbol) < 15:
         debug_log("option_snapshot_invalid_symbol", symbol=symbol)
         return None
+    # Short-circuit if circuit breaker is open
+    if not get_breaker().allow_request():
+        cached = _get_cached_quote(symbol)
+        return cached
     client = OptionHistoricalDataClient(api_key, secret_key)
     last_err = None
     feed_val = _get_options_feed()
     for attempt in range(2):
         try:
+            get_bucket().acquire_wait()
             rate_limit_sleep("alpaca_option_snapshot", ALPACA_MIN_CALL_INTERVAL_SEC)
             debug_log("option_snapshot_request", symbol=symbol)
             req = _build_snapshot_request(symbol, feed_override=feed_val)
             start_ts = time.time()
             snapshots = client.get_option_snapshot(req)
+            get_breaker().record_success()
             elapsed_ms = int((time.time() - start_ts) * 1000)
             snap = _extract_snapshot(snapshots, symbol)
             if snap is None:
@@ -172,6 +180,7 @@ def _get_option_quote(api_key: str, secret_key: str, symbol: str):
             last_err = "no_quote"
         except Exception as e:
             last_err = str(e)
+            get_breaker().record_failure()
             debug_log("option_snapshot_error", symbol=symbol, error=str(e))
             time.sleep(0.2 * (attempt + 1))
     cached = _get_cached_quote(symbol)
@@ -559,13 +568,25 @@ def get_option_price(option_symbol: str):
         debug_log("option_snapshot_missing_keys", symbol=option_symbol)
         return None
     try:
+        if not get_breaker().allow_request(is_exit=False):
+            cached = _get_cached_quote(option_symbol)
+            if cached:
+                bid, ask = cached
+                return (bid + ask) / 2
+            return None
         client = OptionHistoricalDataClient(api_key, secret_key)
         last_err = None
         for attempt in range(2):
+            get_bucket().acquire_wait()
             rate_limit_sleep("alpaca_option_snapshot", ALPACA_MIN_CALL_INTERVAL_SEC)
             req = _build_snapshot_request(option_symbol)
             start_ts = time.time()
-            snapshots = client.get_option_snapshot(req)
+            try:
+                snapshots = client.get_option_snapshot(req)
+                get_breaker().record_success()
+            except Exception as exc:
+                get_breaker().record_failure()
+                raise exc
             elapsed_ms = int((time.time() - start_ts) * 1000)
             snap = _extract_snapshot(snapshots, option_symbol)
             if snap is None:

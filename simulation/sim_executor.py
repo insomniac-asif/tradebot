@@ -44,6 +44,18 @@ def sim_compute_risk_dollars(balance: float, profile: dict) -> float:
 
 def sim_should_trade_now(profile: dict) -> tuple[bool, str]:
     now_et = datetime.now(pytz.timezone("US/Eastern"))
+
+    # Optional start-of-window gate
+    entry_start = profile.get("entry_start_time_et")
+    if entry_start is not None:
+        try:
+            h, m = map(int, str(entry_start).split(":"))
+            start_time = now_et.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now_et < start_time:
+                return False, "before_entry_window"
+        except Exception:
+            pass
+
     try:
         h, m = map(int, profile["cutoff_time_et"].split(":"))
         cutoff = now_et.replace(hour=h, minute=m, second=0, microsecond=0)

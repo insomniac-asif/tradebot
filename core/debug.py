@@ -15,7 +15,13 @@ def debug_log(event, **fields):
 
     if not fields:
         print(f"[DEBUG] {event}")
-        return
+    else:
+        ordered = ", ".join(f"{k}={fields[k]}" for k in sorted(fields))
+        print(f"[DEBUG] {event} | {ordered}")
 
-    ordered = ", ".join(f"{k}={fields[k]}" for k in sorted(fields))
-    print(f"[DEBUG] {event} | {ordered}")
+    # Mirror to structured log (best-effort, never raises)
+    try:
+        from core.structured_logger import slog
+        slog(event, level="debug", **fields)
+    except Exception:
+        pass

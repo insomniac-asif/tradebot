@@ -249,6 +249,13 @@ class SimPortfolio:
 
         self.trade_log.append(trade_record)
 
+        # Persist to SQLite trade journal (best-effort, never raises)
+        try:
+            from core.trade_db import insert_trade
+            insert_trade(trade_record)
+        except Exception:
+            pass
+
     def update_open_trade_excursion(self, trade_id: str, current_price: float) -> None:
         try:
             trade = None

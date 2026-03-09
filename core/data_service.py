@@ -143,6 +143,13 @@ def get_market_dataframe():
     if df is None or len(df) == 0:
         return None
 
+    # Warn when dataset is sparse so callers know indicators may be unreliable
+    if len(df) < 200:
+        logging.warning(
+            "data_service_sparse_csv: only %d rows — run: python scripts/backfill_candles.py",
+            len(df),
+        )
+
     try:
         df.attrs["market_open"] = open_now
         df.attrs["market_status"] = "open" if open_now else "closed"

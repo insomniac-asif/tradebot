@@ -287,12 +287,128 @@ def _signal_opportunity(df, context: dict | None = None):
         return None, None, None
 
 
+def _signal_vwap_reversion(df, context: dict | None = None, feature_snapshot: dict | None = None) -> tuple:
+    try:
+        if feature_snapshot is None:
+            return None, None, {"reason": "features_required"}
+        close = feature_snapshot.get("close")
+        vwap_z = feature_snapshot.get("vwap_z")
+        rsi = feature_snapshot.get("rsi")
+        if close is None or vwap_z is None:
+            return None, None, {"reason": "vwap_z_unavailable"}
+        vwap_z_min = 2.0
+        if isinstance(context, dict) and context.get("vwap_z_min") is not None:
+            try:
+                vwap_z_min = float(context["vwap_z_min"])
+            except (TypeError, ValueError):
+                vwap_z_min = 2.0
+        vwap_z_val = float(vwap_z)
+        if vwap_z_val <= -vwap_z_min:
+            if rsi is not None:
+                try:
+                    if float(rsi) > 60:
+                        return None, None, {"reason": "rsi_conflict"}
+                except (TypeError, ValueError):
+                    pass
+            return "BULLISH", float(close), {
+                "reason": "vwap_reversion_long",
+                "vwap_z": vwap_z_val,
+                "entry_context": f"vwap_z={vwap_z_val:.2f} threshold={vwap_z_min}",
+            }
+        if vwap_z_val >= vwap_z_min:
+            if rsi is not None:
+                try:
+                    if float(rsi) < 40:
+                        return None, None, {"reason": "rsi_conflict"}
+                except (TypeError, ValueError):
+                    pass
+            return "BEARISH", float(close), {
+                "reason": "vwap_reversion_short",
+                "vwap_z": vwap_z_val,
+                "entry_context": f"vwap_z={vwap_z_val:.2f} threshold={vwap_z_min}",
+            }
+        return None, None, {"reason": "vwap_z_below_threshold"}
+    except Exception:
+        return None, None, {"reason": "vwap_reversion_error"}
+
+
+def _signal_zscore_bounce(df, context: dict | None = None, feature_snapshot: dict | None = None) -> tuple:
+    try:
+        if feature_snapshot is None:
+            return None, None, {"reason": "features_required"}
+        close = feature_snapshot.get("close")
+        close_z = feature_snapshot.get("close_z")
+        rsi = feature_snapshot.get("rsi")
+        ema_spread = feature_snapshot.get("ema_spread")
+        if close is None or close_z is None:
+            return None, None, {"reason": "close_z_unavailable"}
+        close_z_min = 2.0
+        if isinstance(context, dict) and context.get("close_z_min") is not None:
+            try:
+                close_z_min = float(context["close_z_min"])
+            except (TypeError, ValueError):
+                close_z_min = 2.0
+        close_z_val = float(close_z)
+        if close_z_val <= -close_z_min:
+            if rsi is not None:
+                try:
+                    if float(rsi) > 55:
+                        return None, None, {"reason": "rsi_divergence"}
+                except (TypeError, ValueError):
+                    pass
+            if ema_spread is not None:
+                try:
+                    if float(ema_spread) < -0.003:
+                        return None, None, {"reason": "strong_downtrend"}
+                except (TypeError, ValueError):
+                    pass
+            return "BULLISH", float(close), {
+                "reason": "zscore_bounce_long",
+                "close_z": close_z_val,
+                "entry_context": f"close_z={close_z_val:.2f} threshold={close_z_min}",
+            }
+        if close_z_val >= close_z_min:
+            if rsi is not None:
+                try:
+                    if float(rsi) < 45:
+                        return None, None, {"reason": "rsi_divergence"}
+                except (TypeError, ValueError):
+                    pass
+            if ema_spread is not None:
+                try:
+                    if float(ema_spread) > 0.003:
+                        return None, None, {"reason": "strong_uptrend"}
+                except (TypeError, ValueError):
+                    pass
+            return "BEARISH", float(close), {
+                "reason": "zscore_bounce_short",
+                "close_z": close_z_val,
+                "entry_context": f"close_z={close_z_val:.2f} threshold={close_z_min}",
+            }
+        return None, None, {"reason": "close_z_below_threshold"}
+    except Exception:
+        return None, None, {"reason": "zscore_bounce_error"}
+
+
 def derive_sim_signal(df, signal_mode, context: dict | None = None, feature_snapshot: dict | None = None):
     try:
         if signal_mode == "MEAN_REVERSION":
             return _signal_mean_reversion(df)
         elif signal_mode == "BREAKOUT":
-            return _signal_breakout(df)
+            direction, price = _signal_breakout(df)
+            if direction is None or price is None:
+                return None, None, None
+            vol_z_min = context.get("vol_z_min") if isinstance(context, dict) else None
+            if vol_z_min is not None:
+                if feature_snapshot is None:
+                    return None, None, {"reason": "features_required"}
+                vol_z = feature_snapshot.get("vol_z")
+                try:
+                    if vol_z is None or float(vol_z) < float(vol_z_min):
+                        return None, None, {"reason": "vol_z_filter"}
+                except Exception:
+                    return None, None, {"reason": "vol_z_invalid"}
+            return direction, price, {"reason": "breakout"}
         elif signal_mode == "TREND_PULLBACK":
             direction, price = _signal_trend_pullback(df)
             if direction is None or price is None:
@@ -307,6 +423,26 @@ def derive_sim_signal(df, signal_mode, context: dict | None = None, feature_snap
                         return None, None, {"reason": "atr_expansion_filter"}
                 except Exception:
                     return None, None, {"reason": "atr_expansion_invalid"}
+            vol_z_min = context.get("vol_z_min") if isinstance(context, dict) else None
+            if vol_z_min is not None:
+                if feature_snapshot is None:
+                    return None, None, {"reason": "features_required"}
+                vol_z = feature_snapshot.get("vol_z")
+                try:
+                    if vol_z is None or float(vol_z) < float(vol_z_min):
+                        return None, None, {"reason": "vol_z_filter"}
+                except Exception:
+                    return None, None, {"reason": "vol_z_invalid"}
+            iv_rank_max = context.get("iv_rank_max") if isinstance(context, dict) else None
+            if iv_rank_max is not None:
+                if feature_snapshot is None:
+                    return None, None, {"reason": "features_required"}
+                iv_rank = feature_snapshot.get("iv_rank_proxy")
+                try:
+                    if iv_rank is None or float(iv_rank) > float(iv_rank_max):
+                        return None, None, {"reason": "iv_rank_filter"}
+                except Exception:
+                    return None, None, {"reason": "iv_rank_invalid"}
             return direction, price, {"reason": "trend_pullback"}
         elif signal_mode == "SWING_TREND":
             return _signal_swing_trend(df)
@@ -319,6 +455,10 @@ def derive_sim_signal(df, signal_mode, context: dict | None = None, feature_snap
             if direction is None or price is None:
                 return None, None, {"reason": reason or "orb_no_signal"}
             return direction, price, {"reason": reason or "orb_break"}
+        elif signal_mode == "VWAP_REVERSION":
+            return _signal_vwap_reversion(df, context, feature_snapshot)
+        elif signal_mode == "ZSCORE_BOUNCE":
+            return _signal_zscore_bounce(df, context, feature_snapshot)
         else:
             return None, None
     except Exception:
