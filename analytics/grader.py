@@ -317,3 +317,40 @@ def update_edge_stats(graded):
 
     with open(EDGE_FILE, "w") as f:
         json.dump(stats, f, indent=4)
+
+
+def grade_trade(trade: dict) -> str:
+    """
+    Grade a completed trade A–F based on outcome quality.
+    Only grades closed trades (must have exit_price and realized_pnl_pct).
+    Returns '' for open/incomplete trades.
+    """
+    try:
+        if trade.get("exit_price") is None or trade.get("realized_pnl_pct") is None:
+            return ""
+
+        pnl_pct = float(trade.get("realized_pnl_pct") or 0) * 100  # e.g. 30.7
+        exit_reason = (trade.get("exit_reason") or "").lower()
+        mae = float(trade.get("mae_pct") or trade.get("mae") or 0)
+        mfe = float(trade.get("mfe_pct") or trade.get("mfe") or 0)
+
+        # Clean exit bonus: hit target or trailing stop (trade managed well)
+        clean_exit = exit_reason in ("take_profit", "trailing_stop", "target")
+        # Bad exit: stopped out at max loss
+        hard_stop = "stop" in exit_reason and "trailing" not in exit_reason
+
+        # MFE/MAE ratio — how much of the best move was captured
+        capture_ratio = (pnl_pct / (mfe * 100)) if mfe > 0.001 else None
+
+        if pnl_pct >= 25 or (pnl_pct >= 15 and clean_exit):
+            return "A"
+        elif pnl_pct >= 10 or (pnl_pct >= 5 and clean_exit):
+            return "B"
+        elif pnl_pct >= 0:
+            return "C"
+        elif pnl_pct >= -20 and not hard_stop:
+            return "D"
+        else:
+            return "F"
+    except Exception:
+        return ""

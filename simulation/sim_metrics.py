@@ -13,7 +13,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "simulation", "sim_config.yaml")
 def _load_profiles() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            raw = yaml.safe_load(f) or {}
+        return {k: v for k, v in raw.items() if str(k).upper().startswith("SIM") and isinstance(v, dict)}
     except Exception:
         return {}
 

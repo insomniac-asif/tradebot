@@ -5,6 +5,15 @@ _global:
 
 SIM00:
   name: "Vol Expansion Trend (LIVE)"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_PULLBACK"
   features_enabled: true
@@ -46,6 +55,15 @@ SIM00:
 
 SIM01:
   name: "0DTE Scalp Mean Reversion"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "scalp"
   signal_mode: "MEAN_REVERSION"
   features_enabled: false
@@ -70,6 +88,15 @@ SIM01:
 
 SIM02:
   name: "0DTE Scalp Breakout"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "scalp"
   signal_mode: "BREAKOUT"
   features_enabled: false
@@ -94,6 +121,15 @@ SIM02:
 
 SIM03:
   name: "Intraday Trend Pullback"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_PULLBACK"
   features_enabled: false
@@ -119,6 +155,15 @@ SIM03:
 
 SIM04:
   name: "Intraday Range Fade"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "MEAN_REVERSION"
   features_enabled: false
@@ -143,6 +188,15 @@ SIM04:
 
 SIM05:
   name: "1DTE Afternoon Continuation"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_PULLBACK"
   features_enabled: false
@@ -167,6 +221,15 @@ SIM05:
 
 SIM06:
   name: "7-10 DTE Short Swing"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "swing"
   signal_mode: "SWING_TREND"
   features_enabled: false
@@ -191,6 +254,15 @@ SIM06:
 
 SIM07:
   name: "14-21 DTE Swing Trend"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "swing"
   signal_mode: "SWING_TREND"
   features_enabled: false
@@ -215,6 +287,15 @@ SIM07:
 
 SIM08:
   name: "Regime Filter Agent"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_PULLBACK"
   features_enabled: false
@@ -240,6 +321,15 @@ SIM08:
 
 SIM09:
   name: "Opportunity Follower"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "adaptive"
   signal_mode: "OPPORTUNITY"
   features_enabled: false
@@ -264,6 +354,15 @@ SIM09:
 
 SIM10:
   name: "ORB Breakout"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "scalp"
   signal_mode: "ORB_BREAKOUT"
   features_enabled: true
@@ -293,6 +392,15 @@ SIM10:
 
 SIM11:
   name: "Vol Expansion Trend"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_PULLBACK"
   features_enabled: true
@@ -320,6 +428,15 @@ SIM11:
 
 SIM12:
   name: "Range-Only Mean Reversion"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "MEAN_REVERSION"
   features_enabled: false
@@ -345,6 +462,15 @@ SIM12:
 
 SIM13:
   name: "Dual Momentum Surge"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_PULLBACK"
   features_enabled: true
@@ -373,6 +499,15 @@ SIM13:
 
 SIM14:
   name: "Low IV Trend Entry"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_PULLBACK"
   features_enabled: true
@@ -400,6 +535,15 @@ SIM14:
 
 SIM15:
   name: "VWAP Extreme Reversion"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "VWAP_REVERSION"
   features_enabled: true
@@ -428,6 +572,15 @@ SIM15:
 
 SIM16:
   name: "Morning Momentum Breakout"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "scalp"
   signal_mode: "BREAKOUT"
   features_enabled: true
@@ -456,6 +609,15 @@ SIM16:
 
 SIM17:
   name: "Z-Score Bounce"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "ZSCORE_BOUNCE"
   features_enabled: true
@@ -485,6 +647,15 @@ SIM17:
 
 SIM18:
   name: "Failed Breakout Reversal"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "FAILED_BREAKOUT_REVERSAL"
   features_enabled: false
@@ -511,6 +682,15 @@ SIM18:
 
 SIM19:
   name: "VWAP Continuation"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "VWAP_CONTINUATION"
   features_enabled: false
@@ -538,6 +718,15 @@ SIM19:
 
 SIM20:
   name: "Opening Drive"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "scalp"
   signal_mode: "OPENING_DRIVE"
   features_enabled: false
@@ -564,6 +753,15 @@ SIM20:
 
 SIM21:
   name: "Afternoon Breakout"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "AFTERNOON_BREAKOUT"
   features_enabled: false
@@ -590,6 +788,15 @@ SIM21:
 
 SIM22:
   name: "Trend Reclaim"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "TREND_RECLAIM"
   features_enabled: false
@@ -618,6 +825,15 @@ SIM22:
 
 SIM23:
   name: "Extreme Extension Fade"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
   horizon: "intraday"
   signal_mode: "EXTREME_EXTENSION_FADE"
   features_enabled: true
@@ -645,3 +861,41 @@ SIM23:
   trailing_stop_trail_pct: 0.05
   zscore_window: 30
   iv_series_window: 200
+
+# ── Symbol Registry ────────────────────────────────────────────────────────
+# Each entry names the per-symbol 1-minute candle CSV and asset type.
+# Adding a new symbol here is the ONLY code change required — everything else
+# (chart gen, GPT prompts, dashboard filters, !ask) reads from this registry.
+symbols:
+  SPY:
+    type: etf
+    options: true
+    data_file: data/spy_1m.csv
+  QQQ:
+    type: etf
+    options: true
+    data_file: data/qqq_1m.csv
+  IWM:
+    type: etf
+    options: true
+    data_file: data/iwm_1m.csv
+  VXX:
+    type: etn
+    options: true
+    data_file: data/vxx_1m.csv
+  TSLA:
+    type: stock
+    options: true
+    data_file: data/tsla_1m.csv
+  AAPL:
+    type: stock
+    options: true
+    data_file: data/aapl_1m.csv
+  NVDA:
+    type: stock
+    options: true
+    data_file: data/nvda_1m.csv
+  MSFT:
+    type: stock
+    options: true
+    data_file: data/msft_1m.csv

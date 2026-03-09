@@ -507,19 +507,14 @@ def _get_option_client():
 
 
 def _parse_option_symbol(symbol):
-    # OCC format: SPYyymmddC/P######## (strike with 3 decimals)
+    # OCC format: {UNDERLYING}{YYMMDD}{C|P}{########} — underlying 1-6 chars
+    import re as _re_occ
     if not symbol or len(symbol) < 15:
         return None
-    if not symbol.startswith("SPY"):
+    m = _re_occ.match(r'^([A-Z]{1,6})(\d{6})([CP])(\d{8})$', symbol)
+    if not m:
         return None
-    tail = symbol[3:]
-    if len(tail) < 15:
-        return None
-    date_part = tail[:6]
-    cp = tail[6:7]
-    strike_part = tail[7:]
-    if not (date_part.isdigit() and strike_part.isdigit() and cp in {"C", "P"}):
-        return None
+    _und, date_part, cp, strike_part = m.groups()
     yy = int(date_part[0:2])
     mm = int(date_part[2:4])
     dd = int(date_part[4:6])
@@ -528,11 +523,12 @@ def _parse_option_symbol(symbol):
     return expiry, cp, strike
 
 
-def _select_option_contract(direction, underlying_price):
+def _select_option_contract(direction, underlying_price, symbol="SPY"):
     client = _get_option_client()
     if client is None or underlying_price is None:
         return None, None
 
+    underlying_sym = symbol.upper()
     eastern = pytz.timezone("US/Eastern")
     today = datetime.now(eastern).date()
     contract_type = ContractType.CALL if direction == "bullish" else ContractType.PUT
@@ -541,7 +537,7 @@ def _select_option_contract(direction, underlying_price):
     expiry_date = today if market_is_open() else None
 
     request = OptionChainRequest(
-        underlying_symbol="SPY",
+        underlying_symbol=underlying_sym,
         type=contract_type,
         expiration_date=expiry_date,
         strike_price_gte=underlying_price * 0.9,
@@ -552,7 +548,7 @@ def _select_option_contract(direction, underlying_price):
     chain = client.get_option_chain(request)
     if not chain:
         request = OptionChainRequest(
-            underlying_symbol="SPY",
+            underlying_symbol=underlying_sym,
             type=contract_type,
             expiration_date_gte=today,
             strike_price_gte=underlying_price * 0.9,
@@ -1092,7 +1088,11 @@ async def open_trade_if_valid(ctx=None):
         ctx
     )
     if option:
-        trade["underlying"] = "SPY"
+        import re as _re_und
+        _opt_sym = option.get("symbol") or ""
+        _und_match = _re_und.match(r'^([A-Z]{1,6})', _opt_sym)
+        trade["underlying"] = _und_match.group(1) if _und_match else "SPY"
+        trade["symbol"] = trade["underlying"]
         trade["option_symbol"] = option.get("symbol")
         trade["strike"] = option.get("strike")
         trade["expiry"] = option.get("expiry")
@@ -1127,9 +1127,10 @@ def build_execution_plan(
     direction,
     style,
     price,
-    setup_type
+    setup_type,
+    symbol="SPY",
 ):
-    option, selection_block = _select_option_contract(direction, price)
+    option, selection_block = _select_option_contract(direction, price, symbol=symbol)
     if selection_block:
         return {"block_reason": selection_block}
     if option is None:

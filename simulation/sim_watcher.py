@@ -81,7 +81,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "simulation", "sim_config.yaml")
 def _load_profiles() -> dict:
     try:
         with open(CONFIG_PATH, "r") as f:
-            return yaml.safe_load(f) or {}
+            raw = yaml.safe_load(f) or {}
+        return {k: v for k, v in raw.items() if str(k).upper().startswith("SIM") and isinstance(v, dict)}
     except Exception:
         return {}
 
@@ -279,13 +280,16 @@ async def _post_sim_event(sim_id: str, embed: "discord.Embed") -> None:
         return
     channel_id = SIM_CHANNEL_MAP.get(sim_id)
     if channel_id is None:
+        logging.warning("post_sim_event_no_channel: sim=%s", sim_id)
         return
     channel = _SIM_BOT.get_channel(channel_id)
     if channel is None:
+        logging.warning("post_sim_event_channel_not_found: sim=%s channel_id=%s", sim_id, channel_id)
         return
     try:
         await channel.send(embed=embed)
     except Exception:
+        logging.exception("post_sim_event_send_error: sim=%s", sim_id)
         return
 
 
@@ -650,7 +654,7 @@ def _build_entry_embed(sim_id: str, result: dict) -> "discord.Embed":
         strike = _parse_strike_from_symbol(option_symbol)
     call_put = "CALL" if str(direction).upper() == "BULLISH" else "PUT" if str(direction).upper() == "BEARISH" else None
     expiry_text = expiry[:10] if isinstance(expiry, str) and len(expiry) >= 10 else ""
-    contract_label = "SPY"
+    contract_label = (result.get("symbol") or "SPY").upper()
     if call_put:
         contract_label = f"{contract_label} {call_put}"
     if expiry_text:
@@ -743,14 +747,16 @@ def _build_entry_embed(sim_id: str, result: dict) -> "discord.Embed":
         ),
         inline=False
     )
+    _und_sym = (result.get("symbol") or "SPY").upper()
     try:
-        df = get_market_dataframe()
-        last_close = df.iloc[-1].get("close") if df is not None and len(df) else None
-        spy_price = float(last_close) if last_close is not None else None
+        from core.data_service import get_symbol_dataframe
+        _und_df = get_symbol_dataframe(_und_sym)
+        _und_close = _und_df.iloc[-1].get("close") if _und_df is not None and len(_und_df) else None
+        _und_price = float(_und_close) if _und_close is not None else None
     except Exception:
-        spy_price = None
-    if isinstance(spy_price, (int, float)):
-        embed.add_field(name="SPY Price", value=ab(A(f"${spy_price:.2f}", "white", bold=True)), inline=True)
+        _und_price = None
+    if isinstance(_und_price, (int, float)):
+        embed.add_field(name=f"{_und_sym} Price", value=ab(A(f"${_und_price:.2f}", "white", bold=True)), inline=True)
     footer_parts = []
     footer_parts.append(f"Time: {_format_et(_now_et())}")
     if _SIM_LAST_DATA_AGE:
@@ -782,7 +788,7 @@ def _build_exit_embed(sim_id: str, result: dict) -> "discord.Embed":
     strike = result.get("strike") or _parse_strike_from_symbol(option_symbol)
     call_put = "CALL" if str(direction).upper() == "BULLISH" else "PUT" if str(direction).upper() == "BEARISH" else None
     expiry_text = expiry[:10] if isinstance(expiry, str) and len(expiry) >= 10 else ""
-    contract_label = "SPY"
+    contract_label = (result.get("symbol") or "SPY").upper()
     if call_put:
         contract_label = f"{contract_label} {call_put}"
     if expiry_text:
@@ -861,14 +867,16 @@ def _build_exit_embed(sim_id: str, result: dict) -> "discord.Embed":
         ),
         inline=False
     )
+    _und_sym2 = (result.get("symbol") or "SPY").upper()
     try:
-        df = get_market_dataframe()
-        last_close = df.iloc[-1].get("close") if df is not None and len(df) else None
-        spy_price = float(last_close) if last_close is not None else None
+        from core.data_service import get_symbol_dataframe
+        _und_df2 = get_symbol_dataframe(_und_sym2)
+        _und_close2 = _und_df2.iloc[-1].get("close") if _und_df2 is not None and len(_und_df2) else None
+        _und_price2 = float(_und_close2) if _und_close2 is not None else None
     except Exception:
-        spy_price = None
-    if isinstance(spy_price, (int, float)):
-        embed.add_field(name="SPY Price", value=ab(A(f"${spy_price:.2f}", "white", bold=True)), inline=True)
+        _und_price2 = None
+    if isinstance(_und_price2, (int, float)):
+        embed.add_field(name=f"{_und_sym2} Price", value=ab(A(f"${_und_price2:.2f}", "white", bold=True)), inline=True)
     footer_parts = []
     footer_parts.append(f"Time: {_format_et(_now_et())}")
     if _SIM_LAST_DATA_AGE:
@@ -1221,7 +1229,7 @@ async def sim_entry_loop() -> None:
                             rec_embed.set_footer(text=f"Time: {_format_et(_now_et())}")
                             await _post_sim_event(sim_id, rec_embed)
                     except Exception:
-                        pass
+                        logging.exception("sim_entry_notify_error: sim=%s status=%s", result.get("sim_id"), result.get("status"))
         except Exception as e:
             logging.exception("sim_entry_loop_error: %s", e)
         elapsed = (datetime.now(eastern) - iter_start).total_seconds()

@@ -20,7 +20,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "simulation", "sim_config.yaml")
 def _load_profiles() -> dict:
     try:
         with open(CONFIG_PATH, "r") as f:
-            return yaml.safe_load(f) or {}
+            raw = yaml.safe_load(f) or {}
+        return {k: v for k, v in raw.items() if str(k).upper().startswith("SIM") and isinstance(v, dict)}
     except Exception:
         return {}
 
@@ -113,7 +114,8 @@ async def sim_live_router(sim_id, direction, price, ml_prediction=None, regime=N
         if capital_limit_val is None or capital_limit_val <= 0:
             return {"status": "error", "message": "invalid_capital_limit"}
 
-        contract, contract_reason = select_sim_contract_with_reason(direction, price_val, profile)
+        _trade_symbol = profile.get("symbol", "SPY")
+        contract, contract_reason = select_sim_contract_with_reason(direction, price_val, profile, symbol=_trade_symbol)
         if contract is None:
             return {"status": "error", "message": contract_reason or "no_contract"}
 

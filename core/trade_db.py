@@ -26,6 +26,7 @@ _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS sim_trades (
     trade_id          TEXT PRIMARY KEY,
     sim_id            TEXT,
+    symbol            TEXT,
     entry_time        TEXT,
     exit_time         TEXT,
     direction         TEXT,
@@ -46,6 +47,12 @@ CREATE TABLE IF NOT EXISTS sim_trades (
 _INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_sim_trades_sim_id ON sim_trades (sim_id);",
     "CREATE INDEX IF NOT EXISTS idx_sim_trades_exit_time ON sim_trades (exit_time);",
+    "CREATE INDEX IF NOT EXISTS idx_sim_trades_symbol ON sim_trades (symbol);",
+]
+
+_MIGRATE_SQL = [
+    # Idempotent: ADD COLUMN IF NOT EXISTS isn't supported by old SQLite — catch errors
+    "ALTER TABLE sim_trades ADD COLUMN symbol TEXT;",
 ]
 
 
@@ -65,6 +72,12 @@ def create_tables() -> None:
             conn.execute(_CREATE_SQL)
             for idx_sql in _INDEX_SQL:
                 conn.execute(idx_sql)
+            # Apply migrations idempotently (ignore errors for already-existing columns)
+            for sql in _MIGRATE_SQL:
+                try:
+                    conn.execute(sql)
+                except Exception:
+                    pass
             conn.commit()
     except Exception as exc:
         logging.error("trade_db_create_tables_failed: %s", exc)
@@ -75,7 +88,7 @@ def create_tables() -> None:
 # ---------------------------------------------------------------------------
 
 _KNOWN_COLS = {
-    "trade_id", "sim_id", "entry_time", "exit_time", "direction",
+    "trade_id", "sim_id", "symbol", "entry_time", "exit_time", "direction",
     "option_symbol", "qty", "entry_price", "exit_price",
     "realized_pnl_dollars", "realized_pnl_pct", "exit_reason",
     "regime", "setup", "signal",
@@ -108,9 +121,18 @@ def insert_trade(record: dict) -> bool:
                 return None
         return str(v)
 
+    # Derive symbol from option_symbol prefix if not explicitly set
+    import re as _re_td
+    _sym = record.get("symbol") or record.get("underlying")
+    if not _sym:
+        _opt = record.get("option_symbol") or ""
+        _m = _re_td.match(r'^([A-Z]{1,6})', str(_opt).upper())
+        _sym = _m.group(1) if _m else None
+
     row = (
         str(trade_id),
         _safe("sim_id"),
+        _sym,
         _safe("entry_time"),
         _safe("exit_time"),
         _safe("direction") or _safe("type"),
@@ -131,11 +153,11 @@ def insert_trade(record: dict) -> bool:
         with _connect() as conn:
             conn.execute(
                 """INSERT OR IGNORE INTO sim_trades
-                   (trade_id, sim_id, entry_time, exit_time, direction,
+                   (trade_id, sim_id, symbol, entry_time, exit_time, direction,
                     option_symbol, qty, entry_price, exit_price,
                     realized_pnl_dollars, realized_pnl_pct, exit_reason,
                     regime, setup, signal, extra_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             conn.commit()
@@ -151,41 +173,50 @@ def insert_trade(record: dict) -> bool:
 
 def query_trades(
     sim_id: Optional[str] = None,
+    symbol: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict]:
     """
     Return closed trades sorted by exit_time descending.
-    Optionally filtered by sim_id.
+    Optionally filtered by sim_id and/or symbol.
     """
     try:
         with _connect() as conn:
+            clauses, params = [], []
             if sim_id:
-                rows = conn.execute(
-                    "SELECT * FROM sim_trades WHERE sim_id=? ORDER BY exit_time DESC LIMIT ? OFFSET ?",
-                    (sim_id, limit, offset),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM sim_trades ORDER BY exit_time DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                ).fetchall()
+                clauses.append("sim_id=?")
+                params.append(sim_id)
+            if symbol:
+                clauses.append("symbol=?")
+                params.append(symbol.upper())
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            params.extend([limit, offset])
+            rows = conn.execute(
+                f"SELECT * FROM sim_trades {where} ORDER BY exit_time DESC LIMIT ? OFFSET ?",
+                params,
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception as exc:
         logging.error("trade_db_query_failed: %s", exc)
         return []
 
 
-def trade_count(sim_id: Optional[str] = None) -> int:
-    """Return total number of trades (optionally for one sim)."""
+def trade_count(sim_id: Optional[str] = None, symbol: Optional[str] = None) -> int:
+    """Return total number of trades (optionally filtered by sim_id and/or symbol)."""
     try:
         with _connect() as conn:
+            clauses, params = [], []
             if sim_id:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM sim_trades WHERE sim_id=?", (sim_id,)
-                ).fetchone()
-            else:
-                row = conn.execute("SELECT COUNT(*) FROM sim_trades").fetchone()
+                clauses.append("sim_id=?")
+                params.append(sim_id)
+            if symbol:
+                clauses.append("symbol=?")
+                params.append(symbol.upper())
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM sim_trades {where}", params
+            ).fetchone()
         return row[0] if row else 0
     except Exception:
         return 0

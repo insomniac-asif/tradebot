@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SPY Sim Classroom</title>
+<title>Trader Sim Classroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=VT323&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
@@ -19,7 +19,7 @@
     <span class="notice-text" id="bot-status-text">Loading…</span>
   </div>
   <div class="notice-center">
-    <span class="room-title">📚 SPY SIM CLASSROOM</span>
+    <span class="room-title">📚 TRADER SIM CLASSROOM</span>
   </div>
   <div class="notice-right">
     <span class="clock-badge" id="et-clock"></span>
@@ -33,23 +33,65 @@
 <div class="board-area">
   <div class="board-frame">
     <div class="chalkboard">
-      <div class="chalk-header">
-        <span class="chalk-title">SPY · 1-MIN CHART · LAST 60 BARS</span>
-        <div class="chalk-prediction" id="pred-badge">
-          <span class="chalk-label">AI SIGNAL →</span>
-          <span class="chalk-dir" id="pred-dir">——</span>
-          <span class="chalk-conf" id="pred-conf"></span>
-          <span class="chalk-meta" id="pred-meta"></span>
+
+      <!-- LIVE CHART VIEW — multi-symbol grid -->
+      <div id="chalk-live-view">
+        <div class="chalk-header">
+          <span class="chalk-title" id="chalk-overview-title">MARKET OVERVIEW · 1-MIN · LAST 60 BARS</span>
+          <button class="sym-all-btn hidden" id="sym-all-btn" onclick="unfocusSymbol()">⊞ All Symbols</button>
+          <span class="chalk-stat small" id="pred-checked"></span>
+        </div>
+        <div class="symbol-charts-grid" id="symbol-charts-grid">
+          <div class="sym-chart-loading">Loading market data…</div>
         </div>
       </div>
-      <div class="chalk-chart-area">
-        <div id="apex-chart"></div>
+
+      <!-- TRADE ANALYSIS VIEW (shown when Details clicked) -->
+      <div id="chalk-trade-view" class="hidden">
+        <div class="chalk-header">
+          <button class="chalk-back-btn" onclick="showLiveChart()">← Live Chart</button>
+          <span class="chalk-title" id="trade-chart-title">TRADE ANALYSIS</span>
+          <button class="chalk-narrate-btn" id="narrate-btn" onclick="requestNarrative()">✨ Analyze</button>
+        </div>
+        <div class="chalk-chart-area trade-chart-area">
+          <div class="trade-chart-loading hidden" id="trade-chart-loading">
+            <span class="chalk-loading-text">Rendering chart…</span>
+          </div>
+          <img id="trade-chart-img" src="" alt="Trade chart" class="trade-chart-img hidden"/>
+          <div id="trade-chart-error" class="chalk-error hidden">Chart unavailable</div>
+        </div>
+        <!-- NARRATIVE PANEL — inside trade view so it's always visible -->
+        <div id="narrative-panel" class="narrative-panel hidden">
+          <div class="narrative-loading hidden" id="narrative-loading">
+            <span class="narrative-spinner"></span> Generating AI analysis…
+          </div>
+          <div id="narrative-content" class="narrative-content hidden">
+            <div class="narrative-summary-bar" id="narr-summary"></div>
+            <div class="narrative-body">
+              <div class="narr-cards-row">
+                <div class="narr-card narr-entry">
+                  <div class="narr-card-label">📥 Entry Reasoning</div>
+                  <div class="narr-card-text" id="narr-entry-text"></div>
+                </div>
+                <div class="narr-card narr-exit">
+                  <div class="narr-card-label">📤 Exit Reasoning</div>
+                  <div class="narr-card-text" id="narr-exit-text"></div>
+                </div>
+                <div class="narr-card narr-outcome">
+                  <div class="narr-card-label">📊 Outcome Analysis</div>
+                  <div class="narr-card-text" id="narr-outcome-text"></div>
+                </div>
+              </div>
+              <div class="narr-footer-row">
+                <div class="narr-grade" id="narr-grade"></div>
+                <div class="narr-tags" id="narr-tags"></div>
+                <button class="narr-regen-btn" onclick="requestNarrative(true)">↻ Regenerate</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="chalk-footer">
-        <span class="chalk-stat"><span class="chalk-stat-label">PRICE</span> <span id="chart-price">——</span></span>
-        <span class="chalk-stat" id="chart-range"></span>
-        <span class="chalk-stat" id="pred-checked"></span>
-      </div>
+
     </div>
     <div class="board-tray">
       <div class="chalk-piece"></div>
@@ -65,6 +107,18 @@
 
 <!-- ══════════════════════════════════════ TEACHER'S DESK -->
 <div id="teacher-panel"></div>
+
+<!-- ══════════════════════════════════════ RECENT TRADES -->
+<div class="rt-panel-wrap recent-trades-panel">
+  <div class="rt-panel-toggle" onclick="toggleRtPanel()">
+    <span class="rt-toggle-title">Recent Trades</span>
+    <span class="rt-toggle-meta" id="rt-toggle-meta">loading…</span>
+    <span class="rt-toggle-chevron" id="rt-toggle-chevron">▶</span>
+  </div>
+  <div class="rt-panel-body" id="rt-panel-body">
+    <div id="recent-trades-panel"></div>
+  </div>
+</div>
 
 <!-- ══════════════════════════════════════ CLASSROOM FLOOR -->
 <div class="classroom-floor">

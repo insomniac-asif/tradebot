@@ -16,7 +16,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from core.market_clock import market_is_open
-from core.data_service import get_market_dataframe
+from core.data_service import get_market_dataframe, get_symbol_csv_path, get_symbol_dataframe, _load_symbol_registry
 from core.debug import debug_log
 from core.structured_logger import slog, slog_critical
 from core.reconciler import write_heartbeat
@@ -100,6 +100,23 @@ def _last_spy_price(df) -> float | None:
         last = df.iloc[-1]
         val = last.get("close")
         return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def _get_underlying_price(symbol: str) -> float | None:
+    """Return last close price for any symbol from its registry CSV."""
+    try:
+        csv_path = get_symbol_csv_path(symbol.upper())
+        if not csv_path or not os.path.exists(csv_path):
+            return None
+        df = pd.read_csv(csv_path, usecols=lambda c: c.lower() in ("close", "c"))
+        if df.empty:
+            return None
+        col = next((c for c in df.columns if c.lower() in ("close", "c")), None)
+        if col is None:
+            return None
+        return float(df[col].iloc[-1])
     except Exception:
         return None
 
@@ -462,9 +479,19 @@ async def preopen_check_loop(bot, channel_id: int):
                                 type_call = contract_type.CALL
                         except Exception:
                             type_call = None
+                        # Use first optionable symbol from registry for probe (SPY fallback)
+                        try:
+                            from core.data_service import _load_symbol_registry
+                            _reg = _load_symbol_registry()
+                            _probe_sym = next(
+                                (s for s, v in _reg.items() if v.get("options")),
+                                "SPY"
+                            )
+                        except Exception:
+                            _probe_sym = "SPY"
                         chain = client.get_option_chain(
                             OptionChainRequest(
-                                underlying_symbol="SPY",
+                                underlying_symbol=_probe_sym,
                                 type=type_call,
                                 feed=feed_val,
                                 expiration_date=expiry_date
@@ -1295,8 +1322,10 @@ async def auto_trader(bot, channel_id):
                 if option_sym:
                     contract_lines.append(A(option_sym, "white"))
                 open_embed.add_field(name="🧾 Contract", value=ab(*contract_lines), inline=False)
-                if isinstance(spy_price, (int, float)):
-                    open_embed.add_field(name="📈 SPY Price", value=ab(A(f"${spy_price:.2f}", "white", bold=True)), inline=True)
+                _und = (trade.get("symbol") or "SPY").upper()
+                _und_price = _get_underlying_price(_und)
+                if isinstance(_und_price, (int, float)):
+                    open_embed.add_field(name=f"📈 {_und} Price", value=ab(A(f"${_und_price:.2f}", "white", bold=True)), inline=True)
                 open_embed.set_footer(text=f"{_format_et(datetime.now(pytz.timezone('America/New_York')))}")
                 await _send(channel, embed=open_embed)
 
@@ -1344,8 +1373,10 @@ async def auto_trader(bot, channel_id):
                 if option_sym:
                     contract_lines.append(A(option_sym, "white"))
                 close_embed.add_field(name="🧾 Contract", value=ab(*contract_lines), inline=False)
-                if isinstance(spy_price, (int, float)):
-                    close_embed.add_field(name="📈 SPY Price", value=ab(A(f"${spy_price:.2f}", "white", bold=True)), inline=True)
+                _und = (trade.get("symbol") or "SPY").upper()
+                _und_price = _get_underlying_price(_und)
+                if isinstance(_und_price, (int, float)):
+                    close_embed.add_field(name=f"📈 {_und} Price", value=ab(A(f"${_und_price:.2f}", "white", bold=True)), inline=True)
             close_embed.set_footer(text=f"{_format_et(datetime.now(pytz.timezone('America/New_York')))}")
             await _send(channel, embed=close_embed)
 
@@ -1439,14 +1470,15 @@ async def conviction_watcher(bot, alert_channel_id):
     await bot.wait_until_ready()
     channel = bot.get_channel(alert_channel_id)
 
-    conviction_state = "LOW"
-    drift = detect_feature_drift()
+    conviction_states  = {}   # {symbol: tier}
+    last_upgrade_times = {}   # {symbol: datetime} — 30-min cooldown
+    last_decay_times   = {}   # {symbol: datetime} — 20-min cooldown
 
+    drift = detect_feature_drift()
     if drift:
         severity = drift["severity"]
         features = "\n".join(drift["features"])
-
-        await _send(channel, 
+        await _send(channel,
             f"⚠️ **Feature Drift Detected**\n\n"
             f"Severity: {severity}\n"
             f"{features}"
@@ -1463,127 +1495,134 @@ async def conviction_watcher(bot, alert_channel_id):
                 await asyncio.sleep(120)
                 continue
 
-            # ---------------------------------------
-            # Update Forward Expectancy Tracking
-            # ---------------------------------------
+            # ── SPY-specific tracking (logging, expectancy, setup stats) ──
             score, impulse, follow, direction = calculate_conviction(df)
             log_conviction_signal(df, direction, impulse, follow)
             update_expectancy(df)
-            update_blocked_outcomes(df)  # fill forward returns for blocked signals
-
+            update_blocked_outcomes(df)
             regime = get_regime(df)
             vol = volatility_state(df)
 
-            # ---------------------------------------
-            # Setup Expectancy Context
-            # ---------------------------------------
             setup_stats = calculate_setup_expectancy()
-
-            profitable_setups = []
-            negative_setups = []
-
+            profitable_setups, negative_setups = [], []
             if setup_stats:
-                for setup_name, stats in setup_stats.items():
+                for sn, ss in setup_stats.items():
+                    if ss["avg_R"] > 0.5:
+                        profitable_setups.append(sn)
+                    if ss["avg_R"] < 0:
+                        negative_setups.append(sn)
 
-                    if stats["avg_R"] > 0.5:
-                        profitable_setups.append(setup_name)
+            # ── Build per-symbol conviction data (SPY first, then registry) ──
+            _sym_data = [("SPY", df, score, impulse, follow, direction, regime, vol)]
+            try:
+                _registry = _load_symbol_registry()
+                for _sym, _ in _registry.items():
+                    if _sym.upper() == "SPY":
+                        continue
+                    try:
+                        _sym_df = get_symbol_dataframe(_sym)
+                        if _sym_df is None or len(_sym_df) < 30:
+                            continue
+                        _s, _i, _f, _d = calculate_conviction(_sym_df)
+                        _r = get_regime(_sym_df)
+                        _v = volatility_state(_sym_df)
+                        _sym_data.append((_sym.upper(), _sym_df, _s, _i, _f, _d, _r, _v))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
-                    if stats["avg_R"] < 0:
-                        negative_setups.append(setup_name)
+            now = datetime.now(pytz.timezone("America/New_York"))
+            _spy_decay_detected = False
 
-            # ---------------------------------------
-            # Tier Calculation
-            # ---------------------------------------
-            tier_score = score
+            for _sym, _sym_df, _sc, _imp, _fol, _dir, _reg, _vol in _sym_data:
 
-            if vol == "HIGH":
-                tier_score += 1
-
-            if regime == "TREND":
-                tier_score += 1
-
-            if tier_score >= 6:
-                tier = "HIGH"
-                emoji = "🔥"
-            elif tier_score >= 4:
-                tier = "MEDIUM"
-                emoji = "⚡"
-            else:
-                tier = "LOW"
-                emoji = "🟡"
-
-            # ---------------------------------------
-            # Tier Change Alert
-            # ---------------------------------------
-            if tier != conviction_state and tier in ["MEDIUM", "HIGH"]:
-                tier_color = 0xFF6B35 if tier == "HIGH" else 0xF39C12
-                direction_color_bar = "🟢" if direction == "bullish" else "🔴" if direction == "bearish" else "⚪"
-                conv_embed = discord.Embed(
-                    title=f"{emoji} Conviction Upgrade — {tier}",
-                    color=tier_color
-                )
-                conv_embed.add_field(name="📍 Direction", value=ab(dir_col(direction)), inline=True)
-                conv_embed.add_field(name="🔢 Score", value=ab(A(str(score), "yellow", bold=True)), inline=True)
-                conv_embed.add_field(name="🧭 Regime", value=ab(regime_col(regime)), inline=True)
-                conv_embed.add_field(name="⚡ Impulse", value=ab(A(f"{impulse:.2f}×", "green" if impulse >= 1 else "yellow", bold=True)), inline=True)
-                follow_color = "green" if follow >= 0.5 else "yellow" if follow >= 0.3 else "red"
-                conv_embed.add_field(name="🔗 Follow-Through", value=ab(A(f"{follow*100:.0f}%", follow_color, bold=True)), inline=True)
-                conv_embed.add_field(name="📊 Volatility", value=ab(vol_col(vol)), inline=True)
-                if profitable_setups:
-                    conv_embed.add_field(
-                        name="✅ Profitable Setups",
-                        value=ab(*[A(f"• {s}", "green") for s in profitable_setups]),
-                        inline=False
-                    )
-                if negative_setups:
-                    conv_embed.add_field(
-                        name="⚠️ Negative Expectancy Setups",
-                        value=ab(*[A(f"• {s}", "red") for s in negative_setups]),
-                        inline=False
-                    )
-                conv_embed.set_footer(text=f"Previous: {conviction_state} → {tier} | {_format_et(datetime.now(pytz.timezone('America/New_York')))}")
-                await _send(channel, embed=conv_embed)
-
-                conviction_state = tier
-
-            # ---------------------------------------
-            # Momentum Decay Detection
-            # ---------------------------------------
-            decay_detected = momentum_is_decaying(df)
-            current_tier = tier
-            md_state = evaluate_md_auto(decay_detected, current_tier)
-            if current_tier in ["MEDIUM", "HIGH"] and decay_detected:
-                md_state = record_md_decay(level=current_tier)
-                md_enabled = bool(md_state.get("enabled"))
-                md_mode = str(md_state.get("mode", "manual")).upper()
-                md_auto_level = str(md_state.get("auto_level", "medium")).upper()
-                decay_embed = discord.Embed(
-                    title="⚠️ Momentum Decay Detected",
-                    description="Impulse is weakening while conviction was elevated. Risk management action recommended.",
-                    color=0xE67E22
-                )
-                decay_embed.add_field(name="🧭 Regime", value=ab(regime_col(regime)), inline=True)
-                decay_embed.add_field(name="⚡ Volatility", value=ab(vol_col(vol)), inline=True)
-                decay_embed.add_field(name="📊 Conviction Level", value=ab(tier_col(current_tier)), inline=True)
-                md_text = A("ON", "green", bold=True) if md_enabled else A("OFF", "red", bold=True)
-                if md_mode == "AUTO":
-                    md_hint = A(f"AUTO {md_auto_level} mode", "yellow")
+                # ── Tier calculation ──
+                ts = _sc
+                if _vol == "HIGH":
+                    ts += 1
+                if _reg == "TREND":
+                    ts += 1
+                if ts >= 6:
+                    tier = "HIGH";   emoji = "🔥"
+                elif ts >= 4:
+                    tier = "MEDIUM"; emoji = "⚡"
                 else:
-                    md_hint = A("Use `!md enable` to tighten stops.", "yellow") if not md_enabled else A("MD strict mode is active.", "green")
-                decay_embed.add_field(name="🧰 MD Strict", value=ab(f"{md_text}  {md_hint}"), inline=False)
-                decay_embed.add_field(name="💡 Suggested Action", value=ab(A("Tighten stops, reduce size, or stand aside until impulse recovers.", "yellow")), inline=False)
-                decay_embed.set_footer(text=f"{_format_et(datetime.now(pytz.timezone('America/New_York')))}")
-                mention = f"<@{DISCORD_OWNER_ID}>" if DISCORD_OWNER_ID else None
-                await _send(channel, mention, embed=decay_embed)
+                    tier = "LOW";    emoji = "🟡"
 
-                conviction_state = "LOW"
+                prev_tier = conviction_states.get(_sym, "LOW")
 
-            # ---------------------------------------
-            # MD Turn-Off Suggestion (conditions cleared)
-            # ---------------------------------------
-            elif md_needs_warning():
+                # ── Conviction upgrade alert — only if improved AND 30-min cooldown passed ──
+                if tier != prev_tier and tier in ["MEDIUM", "HIGH"]:
+                    last_up = last_upgrade_times.get(_sym)
+                    if last_up is None or (now - last_up).total_seconds() >= 1800:
+                        tier_color = 0xFF6B35 if tier == "HIGH" else 0xF39C12
+                        sym_label = f"[{_sym}] " if _sym != "SPY" else ""
+                        conv_embed = discord.Embed(
+                            title=f"{emoji} {sym_label}Conviction Upgrade — {tier}",
+                            color=tier_color
+                        )
+                        conv_embed.add_field(name="📍 Direction", value=ab(dir_col(_dir)), inline=True)
+                        conv_embed.add_field(name="🔢 Score", value=ab(A(str(_sc), "yellow", bold=True)), inline=True)
+                        conv_embed.add_field(name="🧭 Regime", value=ab(regime_col(_reg)), inline=True)
+                        conv_embed.add_field(name="⚡ Impulse", value=ab(A(f"{_imp:.2f}×", "green" if _imp >= 1 else "yellow", bold=True)), inline=True)
+                        follow_color = "green" if _fol >= 0.5 else "yellow" if _fol >= 0.3 else "red"
+                        conv_embed.add_field(name="🔗 Follow-Through", value=ab(A(f"{_fol*100:.0f}%", follow_color, bold=True)), inline=True)
+                        conv_embed.add_field(name="📊 Volatility", value=ab(vol_col(_vol)), inline=True)
+                        if _sym == "SPY":
+                            if profitable_setups:
+                                conv_embed.add_field(name="✅ Profitable Setups", value=ab(*[A(f"• {s}", "green") for s in profitable_setups]), inline=False)
+                            if negative_setups:
+                                conv_embed.add_field(name="⚠️ Negative Expectancy Setups", value=ab(*[A(f"• {s}", "red") for s in negative_setups]), inline=False)
+                        conv_embed.set_footer(text=f"Previous: {prev_tier} → {tier} | {_format_et(now)}")
+                        await _send(channel, embed=conv_embed)
+                        last_upgrade_times[_sym] = now
+                    conviction_states[_sym] = tier
+
+                # ── Momentum decay alert — 20-min cooldown per symbol ──
+                decay_detected = momentum_is_decaying(_sym_df)
+                if _sym == "SPY":
+                    _spy_decay_detected = decay_detected
+                    evaluate_md_auto(decay_detected, tier)
+
+                if tier in ["MEDIUM", "HIGH"] and decay_detected:
+                    last_dec = last_decay_times.get(_sym)
+                    if last_dec is None or (now - last_dec).total_seconds() >= 1200:
+                        if _sym == "SPY":
+                            md_state = record_md_decay(level=tier)
+                            md_enabled = bool(md_state.get("enabled"))
+                            md_mode = str(md_state.get("mode", "manual")).upper()
+                            md_auto_level = str(md_state.get("auto_level", "medium")).upper()
+                        else:
+                            md_enabled = False; md_mode = "MANUAL"; md_auto_level = "MEDIUM"
+
+                        sym_label = f"[{_sym}] " if _sym != "SPY" else ""
+                        decay_embed = discord.Embed(
+                            title=f"⚠️ {sym_label}Momentum Decay Detected",
+                            description="Impulse is weakening while conviction was elevated. Risk management action recommended.",
+                            color=0xE67E22
+                        )
+                        decay_embed.add_field(name="🧭 Regime", value=ab(regime_col(_reg)), inline=True)
+                        decay_embed.add_field(name="⚡ Volatility", value=ab(vol_col(_vol)), inline=True)
+                        decay_embed.add_field(name="📊 Conviction Level", value=ab(tier_col(tier)), inline=True)
+                        if _sym == "SPY":
+                            md_text = A("ON", "green", bold=True) if md_enabled else A("OFF", "red", bold=True)
+                            if md_mode == "AUTO":
+                                md_hint = A(f"AUTO {md_auto_level} mode", "yellow")
+                            else:
+                                md_hint = A("Use `!md enable` to tighten stops.", "yellow") if not md_enabled else A("MD strict mode is active.", "green")
+                            decay_embed.add_field(name="🧰 MD Strict", value=ab(f"{md_text}  {md_hint}"), inline=False)
+                        decay_embed.add_field(name="💡 Suggested Action", value=ab(A("Tighten stops, reduce size, or stand aside until impulse recovers.", "yellow")), inline=False)
+                        decay_embed.set_footer(text=f"{_format_et(now)}")
+                        mention = f"<@{DISCORD_OWNER_ID}>" if (_sym == "SPY" and DISCORD_OWNER_ID) else None
+                        await _send(channel, mention, embed=decay_embed)
+                        last_decay_times[_sym] = now
+                    conviction_states[_sym] = "LOW"
+
+            # ── MD Turn-Off Suggestion (SPY global, once per day) ──
+            if not _spy_decay_detected and md_needs_warning():
                 global _MD_TURNOFF_SUGGESTED_DATE
-                today = datetime.now(pytz.timezone("America/New_York")).date()
+                today = now.date()
                 if _MD_TURNOFF_SUGGESTED_DATE != today:
                     _MD_TURNOFF_SUGGESTED_DATE = today
                     clear_embed = discord.Embed(
@@ -1592,9 +1631,10 @@ async def conviction_watcher(bot, alert_channel_id):
                         color=0x2ECC71,
                     )
                     clear_embed.add_field(name="💡 Suggested Action", value=ab(A("Use `!md disable` to restore normal trade filtering.", "green")), inline=False)
-                    clear_embed.set_footer(text=f"{_format_et(datetime.now(pytz.timezone('America/New_York')))}")
+                    clear_embed.set_footer(text=f"{_format_et(now)}")
                     mention = f"<@{DISCORD_OWNER_ID}>" if DISCORD_OWNER_ID else None
                     await _send(channel, mention, embed=clear_embed)
+
         except Exception:
             logging.exception("conviction_watcher_error")
         await asyncio.sleep(120)
@@ -1645,7 +1685,7 @@ async def forecast_watcher(bot, forecast_channel_id):
                 regime = get_regime(df)
                 vola = volatility_state(df)
 
-                log_prediction(pred, regime, vola)
+                log_prediction(pred, regime, vola, symbol="SPY")
                 try:
                     logging.info(
                         "prediction_logged",
@@ -1662,36 +1702,15 @@ async def forecast_watcher(bot, forecast_channel_id):
                 last_logged_slot = slot_time
 
                 last = df.iloc[-1]
-                session_recent = get_rth_session_view(df)
-                if session_recent is None or session_recent.empty:
-                    session_recent = df
-
-                high_price = session_recent["high"].max()
-                low_price = session_recent["low"].min()
-                high_time = session_recent["high"].idxmax()
-                low_time = session_recent["low"].idxmin()
-
-                high_time_str = high_time.strftime("%H:%M") if hasattr(high_time, "strftime") else str(high_time)
-                low_time_str = low_time.strftime("%H:%M") if hasattr(low_time, "strftime") else str(low_time)
 
                 direction = pred["direction"]
                 conf = pred["confidence"]
                 if direction == "bullish":
                     fcast_color = 0x2ECC71
-                    dir_emoji = "🟢"
                 elif direction == "bearish":
                     fcast_color = 0xE74C3C
-                    dir_emoji = "🔴"
                 else:
                     fcast_color = 0x95A5A6
-                    dir_emoji = "⚪"
-                # Confidence tier
-                if conf >= 0.65:
-                    conf_label = "🔥 High"
-                elif conf >= 0.52:
-                    conf_label = "⚡ Medium"
-                else:
-                    conf_label = "🟡 Low"
 
                 def _safe_price(val):
                     try:
@@ -1699,43 +1718,63 @@ async def forecast_watcher(bot, forecast_channel_id):
                     except (TypeError, ValueError):
                         return "N/A"
 
-                fcast_embed = discord.Embed(
-                    title=f"📊 30-Minute Forecast — {dir_emoji} {direction.upper()}",
+                # ── Collect predictions for all symbols (SPY first, then registry) ──
+                _all_preds = [("SPY", pred, regime, vola, last)]
+                try:
+                    _registry = _load_symbol_registry()
+                    for _sym, _sym_info in _registry.items():
+                        if _sym.upper() == "SPY":
+                            continue
+                        try:
+                            _sym_df = get_symbol_dataframe(_sym)
+                            if _sym_df is None or len(_sym_df) < 30:
+                                continue
+                            _sym_pred = make_prediction(30, _sym_df)
+                            if _sym_pred is None:
+                                continue
+                            _sym_regime = get_regime(_sym_df)
+                            _sym_vola = volatility_state(_sym_df)
+                            log_prediction(_sym_pred, _sym_regime, _sym_vola, symbol=_sym.upper())
+                            _all_preds.append((_sym.upper(), _sym_pred, _sym_regime, _sym_vola, _sym_df.iloc[-1]))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # ── Single unified forecast embed — all symbols same format ──
+                _dir_emojis = {"bullish": "🟢", "bearish": "🔴", "range": "⚪"}
+                overview_embed = discord.Embed(
+                    title="📊 30-Min Forecast",
                     color=fcast_color
                 )
-                fcast_embed.add_field(name="📍 Direction", value=ab(dir_col(direction)), inline=True)
-                fcast_embed.add_field(name="💡 Confidence", value=ab(conf_col(conf)), inline=True)
-                fcast_embed.add_field(name="🧭 Regime", value=ab(regime_col(regime)), inline=True)
-                fcast_embed.add_field(name="⚡ Volatility", value=ab(vol_col(vola)), inline=True)
-                _ph = f"${_safe_price(pred['high'])}"
-                _pl = f"${_safe_price(pred['low'])}"
-                _pc = f"${_safe_price(last.get('close'))}"
-                _pv = f"${_safe_price(last.get('vwap'))}"
-                _pe9 = f"${_safe_price(last.get('ema9'))}"
-                _pe20 = f"${_safe_price(last.get('ema20'))}"
-                _psh = f"${_safe_price(high_price)}"
-                _psl = f"${_safe_price(low_price)}"
-                fcast_embed.add_field(name="🎯 Predicted High", value=ab(A(_ph, "green", bold=True)), inline=True)
-                fcast_embed.add_field(name="🎯 Predicted Low", value=ab(A(_pl, "red", bold=True)), inline=True)
-                fcast_embed.add_field(
-                    name="📍 Market Snapshot",
-                    value=ab(
-                        f"{lbl('Price')} {A(_pc, 'white', bold=True)}",
-                        f"{lbl('VWAP')}  {A(_pv, 'cyan')}",
-                        f"{lbl('EMA9')}  {A(_pe9, 'yellow')}  {lbl('EMA20')} {A(_pe20, 'yellow')}",
-                    ),
-                    inline=False
-                )
-                fcast_embed.add_field(
-                    name="📈 Session Range",
-                    value=ab(
-                        f"{lbl('High')} {A(_psh, 'green')} @ {A(high_time_str, 'white')}",
-                        f"{lbl('Low')}  {A(_psl, 'red')} @ {A(low_time_str, 'white')}",
-                    ),
-                    inline=False
-                )
-                fcast_embed.set_footer(text=f"Forecast logged | {_format_et(datetime.now(pytz.timezone('America/New_York')))}")
-                await _send(channel, embed=fcast_embed)
+                for _s, _p, _r, _v, _last_row in _all_preds:
+                    _d = _p.get("direction", "range")
+                    _c = _p.get("confidence", 0)
+                    _emoji = _dir_emojis.get(_d, "⚪")
+                    _cur = f"${_safe_price(_last_row.get('close'))}"
+                    if _d == "bullish":
+                        _price_label = "High"
+                        _price_val = f"${_safe_price(_p.get('high'))}"
+                        _price_color = "green"
+                    elif _d == "bearish":
+                        _price_label = "Low"
+                        _price_val = f"${_safe_price(_p.get('low'))}"
+                        _price_color = "red"
+                    else:
+                        _price_label = "High"
+                        _price_val = f"${_safe_price(_p.get('high'))}"
+                        _price_color = "white"
+                    overview_embed.add_field(
+                        name=f"{_emoji} {_s}",
+                        value=ab(
+                            f"{lbl('Dir')}   {A(_d.upper(), 'white', bold=True)}  {lbl('Conf')} {conf_col(_c)}",
+                            f"{lbl('Reg')}   {A(_r or 'N/A', 'cyan')}  {lbl('Vol')}  {A(_v or 'N/A', 'yellow')}",
+                            f"{lbl(_price_label)} {A(_price_val, _price_color, bold=True)}  {lbl('Now')} {A(_cur, 'white')}",
+                        ),
+                        inline=True
+                    )
+                overview_embed.set_footer(text=f"Forecast | {_format_et(datetime.now(pytz.timezone('America/New_York')))}")
+                await _send(channel, embed=overview_embed)
 
                 last_logged_slot = slot_time
 

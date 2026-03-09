@@ -2,15 +2,18 @@
 'use strict';
 
 const POLL_INTERVAL = 30000; // 30s
-let apexChart = null;
+let symbolCharts = {};   // { SPY: ApexChartsInstance, ... }
+let _focusedSym = null;
+const FOCUSED_CHART_H = 300;
 let perfChart = null;
 let simsCache = [];
 let currentSimId = null;
+let _symbolRegistryCache = null;
 
 // ─────────────────────────────────────────────── INIT
-document.addEventListener('DOMContentLoaded', () => {
-  initWhiteboard();
+document.addEventListener('DOMContentLoaded', async () => {
   startClock();
+  await initSymbolCharts();
   refreshAll();
   setInterval(refreshAll, POLL_INTERVAL);
 });
@@ -20,6 +23,7 @@ async function refreshAll() {
     fetchStatus(),
     fetchSims(),
     fetchChartAndPredictions(),
+    fetchRecentTrades(),
   ]);
   updateRefreshTime();
 }
@@ -116,8 +120,6 @@ function renderTeacherDesk(sims) {
       <div class="teacher-desk-top">
         <div class="teacher-nameplate">INSTRUCTOR DESK · ACCOUNT SUMMARY</div>
         <div class="teacher-stats-row">
-          ${tdStat('Total Balance', '$' + fmt2(totalBal))}
-          ${tdStat('Total P&L', pnlSign + '$' + fmt2(totalPnl), pnlClass)}
           ${tdStat('Active Trades', activeCount + ' / ' + sims.length)}
           ${tdStat('Total Trades', totalTrades)}
           ${tdStat('Avg Win Rate', avgWr != null ? avgWr.toFixed(1) + '%' : '—')}
@@ -136,6 +138,203 @@ function tdStat(label, value, cls = '') {
     <div class="td-stat-label">${label}</div>
     <div class="td-stat-value ${cls}">${value}</div>
   </div>`;
+}
+
+// ─────────────────────────────────────────────── RECENT TRADES PANEL
+let _rtAllTrades = [];
+let _rtSims = [];
+let _rtSymbols = [];
+let _rtExpanded = false;
+const RT_DEFAULT_LIMIT = 10;
+
+let _rtPanelOpen = false;
+
+async function fetchRecentTrades() {
+  const panel = document.getElementById('recent-trades-panel');
+  if (!panel) return;
+  try {
+    const r = await fetch('/api/trades/recent?limit=200');
+    if (!r.ok) return;
+    const data = await r.json();
+    _rtAllTrades = data.trades || [];
+    _rtSims      = data.sims    || [];
+    _rtSymbols   = data.symbols || [];
+    // Update toggle header meta
+    const openCnt   = _rtAllTrades.filter(t => t.status === 'open').length;
+    const closedCnt = _rtAllTrades.filter(t => t.status === 'closed').length;
+    const metaEl = document.getElementById('rt-toggle-meta');
+    if (metaEl) metaEl.textContent = `${openCnt} open · ${closedCnt} closed`;
+    if (_rtPanelOpen) renderRecentTrades(panel);
+  } catch(e) {}
+}
+
+function toggleRtPanel() {
+  _rtPanelOpen = !_rtPanelOpen;
+  const body    = document.getElementById('rt-panel-body');
+  const chevron = document.getElementById('rt-toggle-chevron');
+  if (body)    body.classList.toggle('open', _rtPanelOpen);
+  if (chevron) chevron.textContent = _rtPanelOpen ? '▼' : '▶';
+  if (_rtPanelOpen) renderRecentTrades(document.getElementById('recent-trades-panel'));
+}
+
+function _rtFilteredTrades() {
+  const simF   = (document.getElementById('rt-f-sim')   || {}).value || '';
+  const symF   = (document.getElementById('rt-f-sym')   || {}).value || '';
+  const _maxEPRaw = ((document.getElementById('rt-f-maxep') || {}).value || '').trim();
+  const maxEP = _maxEPRaw !== '' && !isNaN(parseFloat(_maxEPRaw)) ? parseFloat(_maxEPRaw) : null;
+  const _minEPRaw = ((document.getElementById('rt-f-minep') || {}).value || '').trim();
+  const minEP = _minEPRaw !== '' && !isNaN(parseFloat(_minEPRaw)) ? parseFloat(_minEPRaw) : null;
+  return _rtAllTrades.filter(t => {
+    if (simF && t.sim_id !== simF) return false;
+    if (symF && t.symbol !== symF) return false;
+    if (maxEP != null && t.entry_price != null && parseFloat(t.entry_price) > maxEP) return false;
+    if (minEP != null && t.entry_price != null && parseFloat(t.entry_price) < minEP) return false;
+    return true;
+  });
+}
+
+function applyRtFilter() {
+  _rtExpanded = false;
+  renderRecentTrades(document.getElementById('recent-trades-panel'));
+}
+
+function toggleRtShowMore() {
+  _rtExpanded = !_rtExpanded;
+  renderRecentTrades(document.getElementById('recent-trades-panel'));
+}
+
+function renderRecentTrades(panel) {
+  if (!panel) return;
+  const filtered = _rtFilteredTrades();
+  const limit    = _rtExpanded ? filtered.length : RT_DEFAULT_LIMIT;
+  const visible  = filtered.slice(0, limit);
+  const openCnt  = filtered.filter(t => t.status === 'open').length;
+
+  const simOpts = _rtSims.map(s => `<option value="${s}">${s}</option>`).join('');
+  const symOpts = _rtSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
+
+  if (!filtered.length) {
+    panel.innerHTML = `<div class="rt-panel">
+      <div class="rt-header-row">
+        <div class="rt-title">RECENT TRADES <span class="rt-subtitle">no results</span></div>
+        ${_rtFilterBar(simOpts, symOpts)}
+      </div></div>`;
+    return;
+  }
+
+  const rows = visible.map((t, idx) => {
+    const pnl     = t.pnl != null ? parseFloat(t.pnl) : null;
+    const pnlPct  = t.pnl_pct != null ? (parseFloat(t.pnl_pct) * 100).toFixed(1) : null;
+    const pnlCls  = pnl > 0 ? 'pos' : pnl < 0 ? 'neg' : '';
+    const pnlSign = pnl > 0 ? '+' : '';
+    const pnlStr  = pnl != null ? pnlSign + '$' + fmt2(Math.abs(pnl)) : '—';
+    const dir     = (t.direction || '').toUpperCase();
+    const ct      = (t.contract_type || '').toUpperCase();
+    const ctShort = ct === 'CALL' ? 'C' : ct === 'PUT' ? 'P' : ct.charAt(0) || '?';
+    const strike  = t.strike != null ? '$' + parseFloat(t.strike).toFixed(0) : '—';
+    const expiry  = t.expiry ? t.expiry.slice(5) : '—';
+    const entryP  = t.entry_price != null ? '$' + fmt4(t.entry_price) : '—';
+    const exitP   = t.exit_price  != null ? '$' + fmt4(t.exit_price)  : '—';
+    const slStr   = t.sl_price != null ? '$' + fmt4(t.sl_price) : '—';
+    const tpStr   = t.tp_price != null ? '$' + fmt4(t.tp_price) : '—';
+    const isOpen  = t.status === 'open';
+    const exitTime  = t.exit_time  ? fmtTime(t.exit_time)  : isOpen ? '<span class="rt-open-badge">OPEN</span>' : '—';
+    const entryTime = t.entry_time ? fmtTime(t.entry_time) : '—';
+    const holdStr = (() => {
+      if (!t.entry_time) return null;
+      const end = t.exit_time ? new Date(t.exit_time) : new Date();
+      const secs = Math.max(0, Math.round((end - new Date(t.entry_time)) / 1000));
+      if (secs < 60) return `${secs}s`;
+      const m = Math.floor(secs / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+      if (d > 0) return `${d}d ${h % 24}h`;
+      if (h > 0) return `${h}h ${m % 60}m`;
+      return `${m}m`;
+    })();
+    const expandId  = `rt-expand-${idx}`;
+    const rowCls    = isOpen ? 'rt-row rt-row-open' : `rt-row ${pnlCls}`;
+    return `
+    <tr class="${rowCls}" onclick="toggleRtExpand('${expandId}', this)">
+      <td class="rt-sim">${t.sim_id}</td>
+      <td><span class="sym-badge sym-${t.symbol}">${t.symbol}</span></td>
+      <td><span class="dir-badge ${dir}">${dir || '—'}</span></td>
+      <td class="rt-contract">${strike} ${ctShort} ${expiry}</td>
+      <td class="rt-price">${entryP}</td>
+      <td class="rt-price">${exitP}</td>
+      <td class="rt-pnl ${pnlCls}">${isOpen ? '<span style="color:var(--dim);font-style:italic">open</span>' : pnlStr}</td>
+      <td class="rt-time">${exitTime}</td>
+      <td class="rt-chevron">▶</td>
+    </tr>
+    <tr class="rt-expand-row hidden" id="${expandId}">
+      <td colspan="9">
+        <div class="rt-expand-grid">
+          <div class="rt-expand-item"><span class="rt-el">SL</span><span class="rt-ev neg">${slStr}</span></div>
+          <div class="rt-expand-item"><span class="rt-el">TP</span><span class="rt-ev pos">${tpStr}</span></div>
+          ${pnlPct != null ? `<div class="rt-expand-item"><span class="rt-el">P&L%</span><span class="rt-ev ${pnlCls}">${pnlSign}${pnlPct}%</span></div>` : ''}
+          <div class="rt-expand-item"><span class="rt-el">Entry Time</span><span class="rt-ev">${entryTime}</span></div>
+          ${holdStr ? `<div class="rt-expand-item"><span class="rt-el">Held</span><span class="rt-ev">${holdStr}</span></div>` : ''}
+          <div class="rt-expand-item"><span class="rt-el">Qty</span><span class="rt-ev">${t.qty ?? '—'}</span></div>
+          ${t.regime ? `<div class="rt-expand-item"><span class="rt-el">Regime</span><span class="rt-ev">${t.regime}</span></div>` : ''}
+          ${!isOpen ? `<div class="rt-expand-item"><span class="rt-el">Exit Reason</span><span class="rt-ev">${t.exit_reason || '—'}</span></div>` : ''}
+          ${t.exit_context ? `<div class="rt-expand-item rt-expand-wide"><span class="rt-el">Detail</span><span class="rt-ev">${t.exit_context}</span></div>` : ''}
+          ${t.signal_mode ? `<div class="rt-expand-item"><span class="rt-el">Strategy</span><span class="rt-ev">${t.signal_mode}</span></div>` : ''}
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  const remaining = filtered.length - visible.length;
+  const showMoreBtn = filtered.length > RT_DEFAULT_LIMIT ? `
+    <button class="rt-show-more-btn" onclick="toggleRtShowMore()">
+      ${_rtExpanded ? '▲ Show less' : `▼ Show ${remaining} more`}
+    </button>` : '';
+
+  const subtitle = `${openCnt > 0 ? `${openCnt} open · ` : ''}${filtered.length} total`;
+
+  panel.innerHTML = `
+    <div class="rt-panel">
+      <div class="rt-header-row">
+        <div class="rt-title">RECENT TRADES <span class="rt-subtitle">${subtitle}</span></div>
+        ${_rtFilterBar(simOpts, symOpts)}
+      </div>
+      <div class="rt-scroll">
+        <table class="rt-table">
+          <thead><tr>
+            <th>Sim</th><th>Symbol</th><th>Dir</th><th>Contract</th>
+            <th>Entry</th><th>Exit</th><th>P&L</th><th>Time</th><th></th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${showMoreBtn}
+    </div>`;
+}
+
+function _rtFilterBar(simOpts, symOpts) {
+  const curSim   = (document.getElementById('rt-f-sim')   || {}).value || '';
+  const curSym   = (document.getElementById('rt-f-sym')   || {}).value || '';
+  const curMinEP = (document.getElementById('rt-f-minep') || {}).value || '';
+  const curMaxEP = (document.getElementById('rt-f-maxep') || {}).value || '';
+  return `<div class="rt-filters">
+    <select id="rt-f-sim" class="rt-filter-sel" onchange="applyRtFilter()">
+      <option value="">All Sims</option>${simOpts}
+    </select>
+    <select id="rt-f-sym" class="rt-filter-sel" onchange="applyRtFilter()">
+      <option value="">All Symbols</option>${symOpts}
+    </select>
+    <input id="rt-f-minep" type="text" inputmode="decimal" class="rt-filter-input" placeholder="Min entry $"
+           value="${curMinEP}" onchange="applyRtFilter()" onkeydown="if(event.key==='Enter')applyRtFilter()"/>
+    <input id="rt-f-maxep" type="text" inputmode="decimal" class="rt-filter-input" placeholder="Max entry $"
+           value="${curMaxEP}" onchange="applyRtFilter()" onkeydown="if(event.key==='Enter')applyRtFilter()"/>
+  </div>`;
+}
+
+function toggleRtExpand(expandId, rowEl) {
+  const expandRow = document.getElementById(expandId);
+  if (!expandRow) return;
+  const isOpen = !expandRow.classList.contains('hidden');
+  expandRow.classList.toggle('hidden', isOpen);
+  const chevron = rowEl.querySelector('.rt-chevron');
+  if (chevron) chevron.textContent = isOpen ? '▶' : '▼';
 }
 
 // ─────────────────────────────────────────────── CLASSROOM RENDERING
@@ -226,7 +425,6 @@ function buildSeat(sim) {
   const bubbleText  = buildBubbleText(sim);
 
   const seat = document.createElement('div');
-  // Restore selected class if this was previously selected
   const wasSelected = currentSimId === sim.sim_id;
   seat.className = 'seat' + (active ? ' active' : '') + (wasSelected ? ' selected' : '');
   seat.dataset.simId = sim.sim_id;
@@ -234,17 +432,34 @@ function buildSeat(sim) {
 
   const notebookClass = 'notebook ' + (sim.pnl_dollars > 0 ? 'profit' : sim.pnl_dollars < 0 ? 'loss' : '');
 
+  const streakBadge = (() => {
+    const s = sim.streak;
+    if (!s || s.count < 1) return '';
+    const n = s.count;
+    if (s.type === 'win') {
+      const FLAME_COLORS = ['#ff2222','#ff6600','#ffdd00','#44ee44','#3399ff','#bb44ff','#111111','#888888','#ffffff'];
+      const color = FLAME_COLORS[Math.min(n - 1, FLAME_COLORS.length - 1)];
+      return `<div class="streak-badge" style="color:${color};text-shadow:0 0 6px ${color}88" title="${n}-win streak">🔥${n > 1 ? `<span class="streak-num">${n}</span>` : ''}</div>`;
+    } else {
+      const STORM_COLORS = ['#88aaff','#4477ff','#2255dd','#7733cc','#440088','#220044','#555555','#888888','#aaaaaa'];
+      const color = STORM_COLORS[Math.min(n - 1, STORM_COLORS.length - 1)];
+      return `<div class="streak-badge" style="color:${color};text-shadow:0 0 6px ${color}88" title="${n}-loss streak">⛈️${n > 1 ? `<span class="streak-num">${n}</span>` : ''}</div>`;
+    }
+  })();
+
   seat.innerHTML = `
     <div class="student-area">
       <div class="speech-bubble">${bubbleText}</div>
       ${studentSVG(sim.sim_id, mood, colorIdx, personality, active)}
     </div>
+    ${streakBadge}
     <div class="seat-info">
       <div class="seat-info-row">
         <span class="desk-id">${sim.sim_id}</span>
         <span class="desk-pnl ${pnlClass}">${pnlSign}$${fmt2(sim.pnl_dollars)}</span>
       </div>
       <div class="desk-footer">${shortName(sim.signal_mode || '')}</div>
+      ${sim.symbols && sim.symbols.length ? `<div class="desk-symbols">${sim.symbols.join(' · ')}</div>` : ''}
     </div>
   `;
   return seat;
@@ -427,37 +642,62 @@ function shortName(mode) {
   return map[mode] || mode.replace(/_/g, ' ').toLowerCase();
 }
 
-// ─────────────────────────────────────────────── WHITEBOARD CHART
-function initWhiteboard() {
-  const options = {
+// ─────────────────────────────────────────────── MULTI-SYMBOL CHARTS
+
+// Convert any timestamp to a "fake UTC" epoch whose UTC wall-clock values equal ET (America/New_York).
+// ApexCharts renders x-axis in UTC mode, so labels show the correct ET hour:minute.
+function toETMs(t) {
+  const d = new Date(typeof t === 'number' ? t : t);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  const p = {};
+  fmt.formatToParts(d).forEach(({ type, value }) => { p[type] = value; });
+  const h = p.hour === '24' ? 0 : +p.hour;
+  return Date.UTC(+p.year, +p.month - 1, +p.day, h, +p.minute, +p.second);
+}
+
+function _makeApexOptions(sym, height) {
+  return {
     chart: {
-      type: 'candlestick',
-      height: window.innerWidth <= 480 ? 160 : window.innerWidth <= 640 ? 200 : 260,
+      type: 'line',
+      height,
       background: 'transparent',
       toolbar: { show: false },
       animations: { enabled: false },
       foreColor: '#99bb99',
+      sparkline: { enabled: false },
     },
-    series: [{ data: [] }],
+    series: [
+      { name: 'price',      type: 'candlestick', data: [] },
+      { name: 'pred_cur',   type: 'line',        data: [] },
+      { name: 'pred_prev',  type: 'line',        data: [] },
+    ],
+    stroke: { width: [1, 1.5, 1.5], dashArray: [0, 4, 4], curve: 'straight' },
+    colors: ['transparent', '#4499ff', '#aa66ff'],
     xaxis: {
       type: 'datetime',
       labels: {
-        style: { colors: '#88aa88', fontSize: '10px' },
+        datetimeUTC: true,
+        style: { colors: '#88aa88', fontSize: '9px' },
         datetimeFormatter: { hour: 'HH:mm', minute: 'HH:mm' },
       },
-      axisBorder: { color: 'rgba(160,210,140,0.2)' },
-      axisTicks: { color: 'rgba(160,210,140,0.2)' },
+      axisBorder: { color: 'rgba(160,210,140,0.15)' },
+      axisTicks:  { color: 'rgba(160,210,140,0.15)' },
     },
     yaxis: {
-      tooltip: { enabled: true },
+      tooltip: { enabled: false },
       labels: {
-        style: { colors: '#88aa88', fontSize: '10px' },
+        style: { colors: '#88aa88', fontSize: '9px' },
         formatter: v => v ? v.toFixed(2) : '',
       },
     },
     grid: {
-      borderColor: 'rgba(140,200,120,0.12)',
+      borderColor: 'rgba(140,200,120,0.1)',
       strokeDashArray: 4,
+      padding: { left: 4, right: 4, top: 0, bottom: 0 },
     },
     plotOptions: {
       candlestick: {
@@ -465,88 +705,202 @@ function initWhiteboard() {
         wick: { useFillColor: true },
       },
     },
+    markers: {
+      size: [0, 5, 5],
+      strokeWidth: 0,
+      hover: { size: 6 },
+    },
+    legend: { show: false },
     tooltip: {
       theme: 'dark',
       x: { format: 'HH:mm' },
+      shared: false,
+      custom: ({ seriesIndex, dataPointIndex, w }) => {
+        if (seriesIndex === 0) return ''; // let ApexCharts default handle candles
+        const s = w.config.series[seriesIndex];
+        const pt = s.data[dataPointIndex];
+        if (!pt) return '';
+        const label = seriesIndex === 1 ? 'Pred (cur)' : 'Pred (prev)';
+        const color = seriesIndex === 1 ? '#4499ff' : '#aa66ff';
+        return `<div style="padding:4px 8px;font-size:10px;color:#fff">${label}: <b>$${parseFloat(pt.y).toFixed(2)}</b></div>`;
+      },
     },
   };
-  apexChart = new ApexCharts(document.getElementById('apex-chart'), options);
-  apexChart.render();
+}
+
+function focusSymbol(sym) {
+  if (_focusedSym === sym) { unfocusSymbol(); return; }
+  _focusedSym = sym;
+  const grid = document.getElementById('symbol-charts-grid');
+  if (grid) grid.classList.add('sym-focused-mode');
+  document.querySelectorAll('.sym-chart-card').forEach(card => {
+    card.classList.toggle('sym-focused', card.id === `sym-card-${sym}`);
+  });
+  const allBtn = document.getElementById('sym-all-btn');
+  if (allBtn) allBtn.classList.remove('hidden');
+  const titleEl = document.getElementById('chalk-overview-title');
+  if (titleEl) titleEl.textContent = `${sym} · 1-MIN · LAST 60 BARS`;
+  if (symbolCharts[sym]) symbolCharts[sym].updateOptions({ chart: { height: FOCUSED_CHART_H } }, false, false);
+}
+
+function unfocusSymbol() {
+  const prev = _focusedSym;
+  _focusedSym = null;
+  const grid = document.getElementById('symbol-charts-grid');
+  if (grid) grid.classList.remove('sym-focused-mode');
+  document.querySelectorAll('.sym-chart-card').forEach(card => card.classList.remove('sym-focused'));
+  const allBtn = document.getElementById('sym-all-btn');
+  if (allBtn) allBtn.classList.add('hidden');
+  const titleEl = document.getElementById('chalk-overview-title');
+  if (titleEl) titleEl.textContent = 'MARKET OVERVIEW · 1-MIN · LAST 60 BARS';
+  const chartH = window.innerWidth <= 480 ? 90 : window.innerWidth <= 900 ? 110 : 130;
+  if (prev && symbolCharts[prev]) symbolCharts[prev].updateOptions({ chart: { height: chartH } }, false, false);
+}
+
+async function initSymbolCharts() {
+  // Load symbol registry
+  let registry = {};
+  try {
+    const r = await fetch('/api/symbols');
+    if (r.ok) registry = await r.json();
+  } catch {}
+  _symbolRegistryCache = registry;
+
+  const symbols = Object.keys(registry);
+  if (!symbols.length) {
+    // Fallback: just SPY
+    symbols.push('SPY');
+    registry['SPY'] = {};
+  }
+
+  const grid = document.getElementById('symbol-charts-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+
+  const chartH = window.innerWidth <= 480 ? 90 : window.innerWidth <= 900 ? 110 : 130;
+
+  symbols.forEach(sym => {
+    const card = document.createElement('div');
+    card.className = 'sym-chart-card';
+    card.id = `sym-card-${sym}`;
+    card.innerHTML = `
+      <div class="sym-card-header" onclick="focusSymbol('${sym}')">
+        <span class="sym-badge sym-${sym} sym-card-name">${sym}</span>
+        <span class="sym-card-price" id="sym-price-${sym}">—</span>
+        <span class="sym-card-change" id="sym-change-${sym}"></span>
+        <div class="sym-card-pred" id="sym-pred-${sym}"></div>
+      </div>
+      <div id="sym-apex-${sym}"></div>
+    `;
+    grid.appendChild(card);
+
+    const chart = new ApexCharts(
+      document.getElementById(`sym-apex-${sym}`),
+      _makeApexOptions(sym, chartH)
+    );
+    chart.render();
+    symbolCharts[sym] = chart;
+  });
 }
 
 async function fetchChartAndPredictions() {
+  const symbols = Object.keys(_symbolRegistryCache || {});
+  if (!symbols.length) return;
+
   try {
-    const [chartRes, predRes] = await Promise.all([
-      fetch('/api/chart?bars=60'),
-      fetch('/api/predictions'),
+    const fetches = symbols.flatMap(sym => [
+      fetch(`/api/chart?symbol=${sym}&bars=60`).then(r => r.json()).catch(() => ({ candles: [], symbol: sym })),
+      fetch(`/api/predictions?symbol=${sym}`).then(r => r.json()).catch(() => ({ predictions: [], latest: null })),
     ]);
-    const chartData = await chartRes.json();
-    const predData  = await predRes.json();
+    const results = await Promise.all(fetches);
 
-    updateWhiteboard(chartData.candles || []);
-    updatePredictionBadge(predData.latest);
+    // Compute shared x-axis window in ET epoch-ms
+    let commonStart = 0, commonEnd = 0;
+    for (let i = 0; i < symbols.length; i++) {
+      const candles = results[i * 2].candles || [];
+      if (!candles.length) continue;
+      const t0 = toETMs(candles[0].t);
+      const t1 = toETMs(candles[candles.length - 1].t);
+      commonStart = commonStart ? Math.max(commonStart, t0) : t0;
+      commonEnd   = commonEnd   ? Math.max(commonEnd,  t1) : t1;
+    }
+
+    for (let i = 0; i < symbols.length; i++) {
+      const sym      = symbols[i];
+      const chartData = results[i * 2];
+      const predData  = results[i * 2 + 1];
+      _updateSymbolCard(sym, chartData.candles || [], predData.predictions || [], commonStart || undefined, commonEnd || undefined);
+    }
   } catch (e) {
-    console.warn('chart/pred fetch error', e);
+    console.warn('symbol chart fetch error', e);
   }
 }
 
-function updateWhiteboard(candles) {
-  if (!candles.length) return;
+function _updateSymbolCard(sym, candles, preds, xMin, xMax) {
+  const chart = symbolCharts[sym];
+  if (!chart) return;
 
-  const series = candles.map(c => ({
-    x: new Date(c.t).getTime(),
-    y: [c.o, c.h, c.l, c.c],
-  }));
+  const PRED_DUR = 30 * 60 * 1000; // 30 min in ms
 
-  apexChart.updateSeries([{ data: series }], true);
+  // Sort predictions newest-first; prev must be ≥30 min older than latest
+  const sorted = [...(preds || [])].sort((a, b) => new Date(b.time) - new Date(a.time));
+  const latestPred = sorted[0] || null;
+  const THIRTY_MIN_MS = 30 * 60 * 1000;
+  const prevPred = latestPred
+    ? (sorted.find(p => new Date(latestPred.time) - new Date(p.time) >= THIRTY_MIN_MS) || null)
+    : null;
 
-  const last = candles[candles.length - 1];
-  const first = candles[0];
-  const priceEl = document.getElementById('chart-price');
-  const rangeEl = document.getElementById('chart-range');
+  function predSegment(p) {
+    if (!p) return [];
+    const dir = (p.direction || '').toUpperCase();
+    const priceVal = dir === 'BULLISH' ? p.high : dir === 'BEARISH' ? p.low : null;
+    if (priceVal == null) return [];
+    const t0 = toETMs(p.time);
+    const t1 = t0 + PRED_DUR;
+    const y = parseFloat(priceVal);
+    return [{ x: t0, y }, { x: t1, y }];
+  }
 
-  if (last) {
-    const change = last.c - first.o;
+  const candleSeries = candles.map(c => ({ x: toETMs(c.t), y: [c.o, c.h, c.l, c.c] }));
+  const curSeg  = predSegment(latestPred);
+  const prevSeg = predSegment(prevPred);
+
+  chart.updateSeries([
+    { name: 'price',     type: 'candlestick', data: candleSeries },
+    { name: 'pred_cur',  type: 'line',        data: curSeg },
+    { name: 'pred_prev', type: 'line',        data: prevSeg },
+  ], true);
+
+  if (xMin && xMax) {
+    chart.updateOptions({ xaxis: { min: xMin, max: xMax + 60000 } }, false, false);
+  }
+
+  if (candles.length) {
+    const last  = candles[candles.length - 1];
+    const first = candles[0];
+    const change    = last.c - first.o;
     const changePct = (change / first.o * 100).toFixed(2);
-    const sign = change >= 0 ? '+' : '';
-    priceEl.textContent = `$${last.c.toFixed(2)}`;
-    priceEl.style.color = change >= 0 ? 'var(--green)' : 'var(--red)';
-    rangeEl.textContent = `${sign}${change.toFixed(2)} (${sign}${changePct}%)  H: ${last.h.toFixed(2)}  L: ${last.l.toFixed(2)}`;
-  }
-}
-
-function updatePredictionBadge(latest) {
-  const dirEl  = document.getElementById('pred-dir');
-  const confEl = document.getElementById('pred-conf');
-  const metaEl = document.getElementById('pred-meta');
-  const chkEl  = document.getElementById('pred-checked');
-
-  if (!latest) {
-    dirEl.textContent = '—';
-    dirEl.className = 'pred-dir flat';
-    confEl.textContent = '';
-    metaEl.textContent = 'No prediction';
-    return;
+    const sign      = change >= 0 ? '+' : '';
+    const priceEl  = document.getElementById(`sym-price-${sym}`);
+    const changeEl = document.getElementById(`sym-change-${sym}`);
+    if (priceEl)  { priceEl.textContent = `$${last.c.toFixed(2)}`; priceEl.style.color = change >= 0 ? 'var(--green)' : 'var(--red)'; }
+    if (changeEl) { changeEl.textContent = `${sign}${changePct}%`; changeEl.style.color = change >= 0 ? 'var(--green)' : 'var(--red)'; }
   }
 
-  const dir  = (latest.direction || '').toUpperCase();
-  const conf = latest.confidence != null ? `${(latest.confidence * 100).toFixed(0)}%` : '';
-  const regime = latest.regime || '';
-  const session = latest.session || '';
-  const checked = latest.checked;
-  const correct = latest.correct;
-
-  dirEl.textContent = dir === 'UP' ? '▲ UP' : dir === 'DOWN' ? '▼ DOWN' : dir || '—';
-  dirEl.className = 'pred-dir ' + (dir === 'UP' ? 'up' : dir === 'DOWN' ? 'down' : 'flat');
-  confEl.textContent = conf;
-  metaEl.textContent = [regime, session].filter(Boolean).join(' · ');
-
-  if (checked) {
-    chkEl.textContent = correct ? '✓ Correct' : '✗ Incorrect';
-    chkEl.style.color = correct ? 'var(--green)' : 'var(--red)';
+  // Update prediction badge (uses latest prediction)
+  const predEl = document.getElementById(`sym-pred-${sym}`);
+  if (latestPred) {
+    const dir    = (latestPred.direction || '').toUpperCase();
+    const conf   = latestPred.confidence != null ? `${(latestPred.confidence * 100).toFixed(0)}%` : '';
+    const isBull = dir === 'BULLISH';
+    const isBear = dir === 'BEARISH';
+    const dirClass = isBull ? 'up' : isBear ? 'down' : 'flat';
+    const arrow    = isBull ? '▲' : isBear ? '▼' : '—';
+    const priceVal = isBull ? latestPred.high : isBear ? latestPred.low : null;
+    const priceStr = priceVal != null ? ` $${parseFloat(priceVal).toFixed(2)}` : '';
+    if (predEl) predEl.innerHTML = `<span class="sym-pred-dir ${dirClass}">${arrow}${priceStr} <span class="pred-conf">${conf}</span></span>`;
   } else {
-    chkEl.textContent = 'Pending';
-    chkEl.style.color = 'var(--muted)';
+    if (predEl) predEl.innerHTML = '';
   }
 }
 
@@ -624,7 +978,44 @@ function populateDrawer(d) {
 
   // ── OVERVIEW TAB ──
   const ov = document.getElementById('dpanel-overview');
+  // Per-symbol breakdown rows
+  const symStats = stats.symbol_stats || {};
+  const symRows = Object.entries(symStats).sort((a,b) => b[1].trades - a[1].trades).map(([sym, ss]) => {
+    const pc = ss.pnl > 0 ? 'pos' : ss.pnl < 0 ? 'neg' : '';
+    const sign = ss.pnl > 0 ? '+' : '';
+    const wr = ss.win_rate != null ? ss.win_rate + '%' : '—';
+    return `<tr class="sym-row">
+      <td><span class="sym-badge sym-${sym}">${sym}</span></td>
+      <td>${ss.trades}</td>
+      <td class="${pc}">${sign}$${fmt2(ss.pnl)}</td>
+      <td>${wr}</td>
+    </tr>`;
+  }).join('');
+  const symTable = symRows ? `
+    <div class="sym-breakdown">
+      <div class="sym-breakdown-title">By Symbol</div>
+      <table class="sym-table"><thead><tr><th>Symbol</th><th>Trades</th><th>P&L</th><th>WR</th></tr></thead>
+      <tbody>${symRows}</tbody></table>
+    </div>` : '';
+
+  const sess = stats.session || {};
+  const sessPnlCls = sess.pnl > 0 ? 'pos' : sess.pnl < 0 ? 'neg' : '';
+  const sessPnlSign = sess.pnl > 0 ? '+' : '';
+  const sessSection = `
+    <div class="session-section">
+      <div class="session-label">TODAY'S SESSION</div>
+      <div class="drawer-stats-grid session-grid">
+        ${dStat('Trades',   (sess.trades ?? 0) + (sess.open ? ` <span class="sess-open">(${sess.open} open)</span>` : ''), '', '')}
+        ${dStat('P&L',      sess.trades > 0 || sess.open > 0 ? sessPnlSign + '$' + fmt2(sess.pnl) : '—', '', sessPnlCls)}
+        ${dStat('Win Rate', sess.win_rate != null ? sess.win_rate + '%' : '—')}
+        ${sess.best  != null ? dStat('Best',  '+$' + fmt2(sess.best),  '', 'pos') : ''}
+        ${sess.worst != null ? dStat('Worst', '$'  + fmt2(sess.worst), '', sess.worst < 0 ? 'neg' : '') : ''}
+      </div>
+    </div>`;
+
   ov.innerHTML = `
+    ${sessSection}
+    <div class="session-label" style="padding:0 0 6px 2px;margin-top:12px">ALL TIME</div>
     <div class="drawer-stats-grid">
       ${dStat('Balance',   '$' + fmt2(stats.balance),          `Start: $${fmt2(stats.balance_start)}`)}
       ${dStat('P&L',       pnlSign + '$' + fmt2(stats.pnl_dollars), pnlSign + fmt2(stats.pnl_pct) + '%', pnlCls)}
@@ -638,48 +1029,48 @@ function populateDrawer(d) {
               stats.worst_trade < 0 ? 'neg' : '')}
       ${dStat('Daily P&L', '$' + fmt2(stats.daily_loss), '', stats.daily_loss < 0 ? 'neg' : '')}
     </div>
+    ${symTable}
     <div class="drawer-chart-wrap"><canvas id="perf-chart"></canvas></div>
   `;
   setTimeout(() => renderPerfChart(d.balance_history || [], stats.balance_start), 60);
 
   // ── ACTIVE TRADE TAB ──
-  const ot  = stats.open_trade;
+  const openTrades = d.open_trades && d.open_trades.length ? d.open_trades
+    : stats.open_trades && stats.open_trades.length ? stats.open_trades
+    : stats.open_trade ? [stats.open_trade] : [];
   const tradePanel = document.getElementById('dpanel-trade');
-  if (ot) {
-    tradePanel.innerHTML = `
+  const _slPct = parseFloat(profile.stop_loss_pct) || 0;
+  const _tpPct = parseFloat(profile.profit_target_pct) || 0;
+  if (openTrades.length > 0) {
+    tradePanel.innerHTML = openTrades.map(ot => {
+      const op = parseOptionSymbol(ot.option_symbol);
+      const symLabel = ot.symbol || (op ? op.ticker : null) || '—';
+      const ep = ot.entry_price;
+      const slPrice = (ep && _slPct) ? '$' + fmt4(ep * (1 - _slPct)) : '—';
+      const tpPrice = (ep && _tpPct) ? '$' + fmt4(ep * (1 + _tpPct)) : '—';
+      return `
       <div class="d-open-trade">
-        <div class="d-open-trade-title">🟢 Open Position</div>
+        <div class="d-open-trade-title">🟢 Open Position · ${symLabel}</div>
         <div class="d-open-trade-grid">
-          ${(()=>{const op=parseOptionSymbol(ot.option_symbol); return `
           ${dOtItem('Direction', `<span class="dir-badge ${ot.direction}">${ot.direction || '—'}</span>`)}
-          ${dOtItem('Ticker',  op ? op.ticker : (ot.option_symbol || '—'))}
           ${dOtItem('Strike',  op ? '$' + op.strike : (ot.strike || '—'))}
           ${dOtItem('Type',    op ? op.type : '—')}
           ${dOtItem('Expiry',  op ? op.expiry : (ot.expiry || '—'))}
-          ${dOtItem('Entry',   ot.entry_price != null ? '$' + fmt4(ot.entry_price) : '—')}
+          ${dOtItem('Entry',   ep != null ? '$' + fmt4(ep) : '—')}
+          ${dOtItem('SL',      slPrice, 'neg')}
+          ${dOtItem('TP',      tpPrice, 'pos')}
           ${dOtItem('Qty',     ot.qty ?? '—')}
-          ${dOtItem('Regime',  ot.regime || '—')}
-          ${dOtItem('Bucket',  ot.time_bucket || '—')}
-          ${dOtItem('Score',   ot.structure_score ?? '—')}
-          `;})()}
+          ${dOtItem('Regime',  ot.regime || ot.regime_at_entry || '—')}
+          ${dOtItem('Bucket',  ot.time_bucket || ot.time_of_day_bucket || '—')}
         </div>
-      </div>
-    `;
+      </div>`;
+    }).join('');
   } else {
     tradePanel.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">No open position</div>';
   }
 
   // ── HISTORY TAB ──
-  const trades = d.recent_trades || [];
-  const histPanel = document.getElementById('dpanel-history');
-  histPanel.innerHTML = `
-    <div class="history-header">
-      <span class="history-title">TRADE LOG</span>
-      <span class="history-count">${trades.length} trades</span>
-    </div>
-    <div class="trade-accordion" id="trade-accordion"></div>
-  `;
-  renderTradeAccordion(trades, document.getElementById('trade-accordion'));
+  renderHistoryTab(d.sim_id, d.recent_trades || []);
 
   // ── PROFILE TAB ──
   const profPanel = document.getElementById('dpanel-profile');
@@ -858,10 +1249,10 @@ function dStat(label, value, sub = '', cls = '') {
   </div>`;
 }
 
-function dOtItem(label, val) {
+function dOtItem(label, val, cls = '') {
   return `<div class="d-ot-item">
     <div class="d-ot-label">${label}</div>
-    <div class="d-ot-val">${val}</div>
+    <div class="d-ot-val${cls ? ' ' + cls : ''}">${val}</div>
   </div>`;
 }
 
@@ -889,3 +1280,332 @@ function fmtTime(iso) {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeDrawer();
 });
+
+// ─────────────────────────────────────────────── HISTORY TAB (enhanced)
+let _histSimId = null;
+let _histPage  = 1;
+let _histTotal = 0;
+let _histFilters = { direction: 'ALL', result: 'all', date: '' };
+let _selectedTradeId = null;
+let _symbolRegistry = {};
+
+async function _loadSymbolRegistry() {
+  if (Object.keys(_symbolRegistry).length > 0) return _symbolRegistry;
+  try {
+    const r = await fetch('/api/symbols');
+    if (r.ok) _symbolRegistry = await r.json();
+  } catch {}
+  return _symbolRegistry;
+}
+
+async function renderHistoryTab(simId, seedTrades) {
+  _histSimId = simId;
+  _histPage  = 1;
+  const histPanel = document.getElementById('dpanel-history');
+
+  // Load symbol registry to populate dropdown
+  const syms = await _loadSymbolRegistry();
+  const symOptions = Object.keys(syms).map(s =>
+    `<option value="${s}">${s}</option>`).join('');
+
+  histPanel.innerHTML = `
+    <div class="history-header">
+      <span class="history-title">TRADE LOG</span>
+      <span class="history-count" id="hist-count">loading…</span>
+    </div>
+    <div class="hist-filters">
+      <input  type="date" id="hist-date" class="hist-filter-input"
+              onchange="applyHistFilter()" title="Filter by entry date"/>
+      <select id="hist-dir" class="hist-filter-select" onchange="applyHistFilter()">
+        <option value="ALL">All Directions</option>
+        <option value="BULLISH">Calls</option>
+        <option value="BEARISH">Puts</option>
+      </select>
+      <select id="hist-result" class="hist-filter-select" onchange="applyHistFilter()">
+        <option value="all">All Results</option>
+        <option value="win">Wins</option>
+        <option value="loss">Losses</option>
+      </select>
+      ${symOptions ? `<select id="hist-symbol" class="hist-filter-select" onchange="applyHistFilter()">
+        <option value="">All Symbols</option>
+        ${symOptions}
+      </select>` : ''}
+    </div>
+    <div class="trade-accordion" id="trade-accordion"></div>
+    <div class="hist-pagination" id="hist-pagination"></div>
+  `;
+  // Try to load from dedicated endpoint; fall back to seedTrades
+  loadHistoryPage(1, seedTrades);
+}
+
+async function loadHistoryPage(page, seedTrades) {
+  _histPage = page;
+  if (!_histSimId) return;
+
+  const dateVal = (document.getElementById('hist-date')   || {}).value || '';
+  const dirVal  = (document.getElementById('hist-dir')    || {}).value || 'ALL';
+  const resVal  = (document.getElementById('hist-result') || {}).value || 'all';
+  const symVal  = (document.getElementById('hist-symbol') || {}).value || '';
+
+  let trades = [], total = 0;
+  try {
+    let url = `/api/trades/${_histSimId}/history?page=${page}&per_page=50`;
+    if (dateVal) url += `&date=${dateVal}`;
+    if (dirVal  !== 'ALL')  url += `&direction=${dirVal}`;
+    if (resVal  !== 'all')  url += `&result=${resVal}`;
+    if (symVal)             url += `&symbol=${symVal}`;
+    const r = await fetch(url);
+    if (r.ok) {
+      const data = await r.json();
+      trades = data.trades || [];
+      total  = data.total  || 0;
+    } else if (seedTrades && seedTrades.length) {
+      trades = seedTrades; total = seedTrades.length;
+    }
+  } catch {
+    trades = seedTrades || []; total = trades.length;
+  }
+
+  _histTotal = total;
+  const countEl = document.getElementById('hist-count');
+  if (countEl) countEl.textContent = `${total} trade${total !== 1 ? 's' : ''}`;
+
+  const container = document.getElementById('trade-accordion');
+  if (container) renderTradeAccordionWithDetails(trades, container, _histSimId);
+
+  // Pagination
+  const pgEl = document.getElementById('hist-pagination');
+  if (pgEl) {
+    const totalPages = Math.ceil(total / 50);
+    pgEl.innerHTML = totalPages > 1 ? `
+      <button class="hist-pg-btn" onclick="loadHistoryPage(${page-1})"
+              ${page <= 1 ? 'disabled' : ''}>← Prev</button>
+      <span class="hist-pg-label">Page ${page} / ${totalPages}</span>
+      <button class="hist-pg-btn" onclick="loadHistoryPage(${page+1})"
+              ${page >= totalPages ? 'disabled' : ''}>Next →</button>
+    ` : '';
+  }
+}
+
+function applyHistFilter() { loadHistoryPage(1); }
+
+// ─────────────────────────────────────────────── TRADE CARDS WITH DETAILS BUTTON
+function renderTradeAccordionWithDetails(trades, container, simId) {
+  if (!trades.length) {
+    container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:12px">No trades</div>';
+    return;
+  }
+  let _lastDate = null;
+  container.innerHTML = trades.map((t, idx) => {
+    const pnl     = t.pnl != null ? parseFloat(t.pnl) : null;
+    const pnlPct  = t.pnl_pct != null ? (parseFloat(t.pnl_pct) * 100).toFixed(1) : null;
+    const pnlCls  = pnl > 0 ? 'win' : pnl < 0 ? 'loss' : '';
+    const pnlSign = pnl > 0 ? '+' : '';
+    const pnlStr  = pnl != null ? pnlSign + '$' + fmt2(Math.abs(pnl)) : '—';
+    const dir     = (t.direction || '').toUpperCase();
+    const opt     = parseOptionSymbol(t.option_symbol);
+    const symDisp = opt ? `${opt.ticker} $${opt.strike} ${opt.type}` : (t.option_symbol || '—');
+    const isSelected = t.trade_id && t.trade_id === _selectedTradeId;
+    const undSym  = t.symbol || (opt ? opt.ticker : '');
+    const symBadge = undSym ? `<span class="sym-badge sym-${undSym}">${undSym}</span>` : '';
+
+    // Date separator
+    const tsStr = t.exit_time || t.entry_time || '';
+    const dateStr = tsStr.slice(0, 10);
+    let dateSep = '';
+    if (dateStr && dateStr !== _lastDate) {
+      _lastDate = dateStr;
+      const d = new Date(dateStr + 'T12:00:00');
+      const label = isNaN(d) ? dateStr : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      dateSep = `<div class="tr-date-sep">${label}</div>`;
+    }
+
+    return dateSep + `
+      <div class="trade-row-item ${pnlCls}${isSelected ? ' tr-selected' : ''}" id="tr-${idx}">
+        <div class="trade-row-summary" onclick="toggleTradeRow(${idx})">
+          <span class="tr-time">${fmtTime(t.exit_time || t.entry_time)}</span>
+          <span class="tr-dir"><span class="dir-badge ${dir}">${dir || '—'}</span></span>
+          ${symBadge}
+          <span class="tr-sym">${symDisp}</span>
+          <span class="tr-pnl ${pnlCls}">${pnl != null ? (pnlSign + '$' + fmt2(Math.abs(pnl))) : '—'}</span>
+          ${t.grade ? `<span class="tr-grade grade-badge grade-${t.grade.toLowerCase()}">${t.grade}</span>` : '<span class="tr-grade"></span>'}
+          <span class="tr-toggle">▼</span>
+        </div>
+        <div class="trade-row-detail">
+          <div class="trade-detail-grid">
+            ${tdDetail('Expiry',      opt ? opt.expiry : (t.expiry || '—'))}
+            ${tdDetail('Strike',      opt ? '$' + opt.strike : (t.strike ? '$' + t.strike : '—'))}
+            ${tdDetail('Type',        opt ? opt.type : (t.contract_type === 'C' ? 'Call' : t.contract_type === 'P' ? 'Put' : dir))}
+            ${tdDetail('Entry',       t.entry_price != null ? '$' + fmt4(t.entry_price) : '—')}
+            ${tdDetail('Exit',        t.exit_price  != null ? '$' + fmt4(t.exit_price)  : '—')}
+            ${t.sl_price != null ? tdDetail('SL', '$' + fmt4(t.sl_price), 'neg') : ''}
+            ${t.tp_price != null ? tdDetail('TP', '$' + fmt4(t.tp_price), 'pos') : ''}
+            ${tdDetail('P&L $',       pnl != null ? (pnlSign + '$' + fmt2(Math.abs(pnl))) : '—',  pnlCls)}
+            ${tdDetail('P&L %',       pnlPct != null ? (pnlSign + pnlPct + '%') : '—',            pnlCls)}
+            ${tdDetail('Exit Reason', t.exit_reason || '—')}
+            ${t.exit_context ? tdDetail('Detail', t.exit_context) : ''}
+            ${t.regime ? tdDetail('Regime', t.regime) : ''}
+          </div>
+          ${t.trade_id ? `
+          <button class="tr-details-btn${isSelected ? ' tr-details-btn-active' : ''}"
+                  onclick="openTradeDetails('${simId}','${t.trade_id}',${idx},event)">
+            ${isSelected ? '✓ Viewing' : '[Details]'}
+          </button>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ─────────────────────────────────────────────── CHALKBOARD TRADE ANALYSIS
+async function openTradeDetails(simId, tradeId, rowIdx, e) {
+  if (e) e.stopPropagation();
+  _selectedTradeId = tradeId;
+
+  // Re-render accordion to update selected highlight
+  const container = document.getElementById('trade-accordion');
+  if (container) {
+    container.querySelectorAll('.trade-row-item').forEach((el, i) => {
+      el.classList.toggle('tr-selected', i === rowIdx);
+    });
+    const btn = container.querySelector(`#tr-${rowIdx} .tr-details-btn`);
+    if (btn) { btn.textContent = '✓ Viewing'; btn.classList.add('tr-details-btn-active'); }
+  }
+
+  // Switch chalkboard to trade analysis mode
+  showTradeChart(simId, tradeId);
+
+  // If on mobile, close drawer so chalkboard is visible
+  if (window.innerWidth < 768) closeDrawer();
+}
+
+function showTradeChart(simId, tradeId) {
+  document.getElementById('chalk-live-view').classList.add('hidden');
+  document.getElementById('chalk-trade-view').classList.remove('hidden');
+
+  const img     = document.getElementById('trade-chart-img');
+  const loading = document.getElementById('trade-chart-loading');
+  const errEl   = document.getElementById('trade-chart-error');
+  const narBtn  = document.getElementById('narrate-btn');
+
+  img.classList.add('hidden');
+  errEl.classList.add('hidden');
+  loading.classList.remove('hidden');
+
+  // Store for narrate button
+  document._currentTradeSimId = simId;
+  document._currentTradeId    = tradeId;
+  if (narBtn) narBtn.textContent = '✨ Analyze';
+
+  // Update title
+  const titleEl = document.getElementById('trade-chart-title');
+  if (titleEl) titleEl.textContent = `${simId} · TRADE ANALYSIS`;
+
+  const src = `/api/trades/${simId}/${encodeURIComponent(tradeId)}/chart?t=${Date.now()}`;
+  img.onload  = () => { loading.classList.add('hidden'); img.classList.remove('hidden'); };
+  img.onerror = () => { loading.classList.add('hidden'); errEl.classList.remove('hidden'); };
+  img.src = src;
+
+  // Check for cached narrative
+  loadCachedNarrative(simId, tradeId);
+}
+
+function showLiveChart() {
+  document.getElementById('chalk-live-view').classList.remove('hidden');
+  document.getElementById('chalk-trade-view').classList.add('hidden');
+  document.getElementById('narrative-panel').classList.add('hidden');
+  _selectedTradeId = null;
+}
+
+async function loadCachedNarrative(simId, tradeId) {
+  const panel = document.getElementById('narrative-panel');
+  try {
+    const r = await fetch(`/api/trades/${simId}/${encodeURIComponent(tradeId)}/narrative`);
+    if (r.ok) {
+      const narr = await r.json();
+      renderNarrative(narr);
+      const btn = document.getElementById('narrate-btn');
+      if (btn) btn.textContent = '↻ Re-analyze';
+    } else {
+      panel.classList.remove('hidden');
+      document.getElementById('narrative-loading').classList.add('hidden');
+      document.getElementById('narrative-content').classList.add('hidden');
+    }
+  } catch { /* no narrative yet */ }
+}
+
+async function requestNarrative(force = false) {
+  const simId   = document._currentTradeSimId;
+  const tradeId = document._currentTradeId;
+  if (!simId || !tradeId) return;
+
+  const panel   = document.getElementById('narrative-panel');
+  const loading = document.getElementById('narrative-loading');
+  const content = document.getElementById('narrative-content');
+  const btn     = document.getElementById('narrate-btn');
+
+  panel.classList.remove('hidden');
+  loading.classList.remove('hidden');
+  content.classList.add('hidden');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+
+  try {
+    const url = `/api/trades/${simId}/${encodeURIComponent(tradeId)}/narrate${force ? '?force=true' : ''}`;
+    const r   = await fetch(url, { method: 'POST' });
+    if (r.ok) {
+      const narr = await r.json();
+      renderNarrative(narr);
+      // Re-fetch chart with new S/R lines
+      if (force) showTradeChart(simId, tradeId);
+      if (btn) { btn.disabled = false; btn.textContent = '↻ Re-analyze'; }
+    } else {
+      loading.classList.add('hidden');
+      content.innerHTML = '<div style="padding:12px;color:var(--loss-text)">Analysis failed — check OPENAI_API_KEY.</div>';
+      content.classList.remove('hidden');
+      if (btn) { btn.disabled = false; btn.textContent = '✨ Analyze'; }
+    }
+  } catch(e) {
+    loading.classList.add('hidden');
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Analyze'; }
+  }
+}
+
+function renderNarrative(narr) {
+  const loading = document.getElementById('narrative-loading');
+  const content = document.getElementById('narrative-content');
+  const panel   = document.getElementById('narrative-panel');
+
+  const _unavailMsgs = [
+    'Analysis unavailable — GPT service unreachable or API key not set.',
+    'Analysis unavailable — OpenAI API key invalid or expired. Update OPENAI_API_KEY in .env',
+  ];
+  if (!narr || _unavailMsgs.includes(narr.entry_reasoning)) {
+    loading.classList.add('hidden');
+    const msg = (narr && narr.entry_reasoning && narr.entry_reasoning.includes('invalid or expired'))
+      ? 'AI analysis unavailable — OpenAI API key invalid or expired.'
+      : 'AI analysis unavailable — OPENAI_API_KEY not set in .env';
+    content.innerHTML = `<div style="padding:12px;color:var(--loss-text);font-size:12px">${msg}</div>`;
+    content.classList.remove('hidden');
+    panel.classList.remove('hidden');
+    return;
+  }
+
+  document.getElementById('narr-summary').textContent  = narr.strategy_summary || '';
+  document.getElementById('narr-entry-text').textContent  = narr.entry_reasoning  || '—';
+  document.getElementById('narr-exit-text').textContent   = narr.exit_reasoning   || '—';
+  document.getElementById('narr-outcome-text').textContent = narr.outcome_analysis || '—';
+
+  // Grade
+  const gradeEl = document.getElementById('narr-grade');
+  const grade   = narr.grade || '';
+  const gradeCls = {A:'grade-a',B:'grade-b',C:'grade-c',D:'grade-d',F:'grade-f'}[grade] || '';
+  gradeEl.innerHTML = grade ? `<span class="grade-badge ${gradeCls}">${grade}</span>` : '';
+
+  // Tags
+  const tagsEl = document.getElementById('narr-tags');
+  const tags   = narr.tags || [];
+  tagsEl.innerHTML = tags.map(t => `<span class="narr-tag">${t}</span>`).join('');
+
+  loading.classList.add('hidden');
+  content.classList.remove('hidden');
+  panel.classList.remove('hidden');
+}

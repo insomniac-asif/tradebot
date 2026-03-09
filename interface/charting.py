@@ -1,6 +1,7 @@
 # interface/charting.py
 
 import os
+import time as _time_mod
 import pandas as pd
 from typing import cast
 import pandas_ta as ta
@@ -27,21 +28,24 @@ API_KEY = os.getenv("APCA_API_KEY_ID")
 SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
 
 DATA_FILE = os.path.join(DATA_DIR, "qqq_1m.csv")
-from core.data_service import get_client
+from core.data_service import get_client, get_symbol_csv_path
 
 client = get_client()
 
-def generate_chart():
-
+def generate_chart(symbol: str = "SPY"):
+    symbol = symbol.upper()
     df = None
-    if os.path.exists(DATA_FILE):
+
+    # Try per-symbol CSV first (via registry), then SPY default CSV
+    csv_path = get_symbol_csv_path(symbol) or (DATA_FILE if symbol == "SPY" else None)
+    if csv_path and os.path.exists(csv_path):
         try:
-            df = pd.read_csv(DATA_FILE)
+            df = pd.read_csv(csv_path)
         except Exception:
             df = None
 
     if df is None or df.empty:
-        # FIX: fallback to Alpaca data via data_service if CSV is missing/unreadable
+        # Fallback to Alpaca via data_service (works for SPY)
         df = get_market_dataframe()
         if df is None or df.empty:
             print("No data available (CSV missing + Alpaca fallback failed)")
@@ -96,7 +100,11 @@ def generate_chart():
     df = df.tail(200)
 
     os.makedirs(CHART_DIR, exist_ok=True)
-    filepath = os.path.join(CHART_DIR, "chart.png")
+    filepath = os.path.join(CHART_DIR, f"chart_{symbol.lower()}.png")
+
+    # Return cached file if < 30 min old
+    if os.path.exists(filepath) and _time_mod.time() - os.path.getmtime(filepath) < 1800:
+        return filepath
 
     apds = []
 
@@ -127,8 +135,8 @@ def generate_chart():
 
     return filepath
 
-def generate_live_chart():
-
+def generate_live_chart(symbol: str = "SPY"):
+    symbol = symbol.upper()
     eastern = pytz.timezone("US/Eastern")
     now = datetime.now(eastern)
 
@@ -146,7 +154,7 @@ def generate_live_chart():
         return False
 
     request = StockBarsRequest(
-        symbol_or_symbols="SPY",
+        symbol_or_symbols=symbol,
         timeframe=TimeFrame(1, TimeFrameUnit("Min")),
         start=start_utc,
         end=end_utc,
@@ -226,7 +234,7 @@ def generate_live_chart():
     ax2.set_ylabel("Volume")
     ax2.grid(True, axis='y', linestyle='--', alpha=0.3)
 
-    ax1.set_title("SPY Live Session (Alpaca)")
+    ax1.set_title(f"{symbol} Live Session (Alpaca)")
 
     # =====================
     # FINAL PLOTTING
@@ -252,7 +260,13 @@ def generate_live_chart():
 
     plt.tight_layout()
     os.makedirs(CHART_DIR, exist_ok=True)
-    filepath = os.path.join(CHART_DIR, "live.png")
+    filepath = os.path.join(CHART_DIR, f"live_{symbol.lower()}.png")
+
+    # Return cached if < 30 min old
+    if os.path.exists(filepath) and _time_mod.time() - os.path.getmtime(filepath) < 1800:
+        plt.close()
+        return filepath
+
     plt.savefig(filepath)
     plt.close()
     return filepath

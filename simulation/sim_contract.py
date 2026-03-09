@@ -220,7 +220,8 @@ def select_sim_contract_with_reason(
     direction: str,
     underlying_price: float,
     profile: dict,
-    now_et: datetime | None = None
+    now_et: datetime | None = None,
+    symbol: str | None = None,
 ) -> tuple[dict | None, str | None]:
     if direction not in {"BULLISH", "BEARISH"}:
         return None, "invalid_direction"
@@ -233,6 +234,9 @@ def select_sim_contract_with_reason(
     if now_et is None:
         now_et = datetime.now(pytz.timezone("US/Eastern"))
     today = now_et.date()
+
+    # Resolve underlying symbol: explicit param > profile key > default SPY
+    underlying_sym = (symbol or profile.get("symbol") or "SPY").upper()
 
     dte_min = int(profile["dte_min"])
     dte_max = int(profile["dte_max"])
@@ -266,8 +270,8 @@ def select_sim_contract_with_reason(
         except Exception:
             pass
     contract_type_char = "C" if direction == "BULLISH" else "P"
-    # SPY options only have whole-number strikes — round to nearest integer
-    # and probe ATM-2 through ATM+2 from the OTM-adjusted base.
+    # Round to nearest integer strike and probe ATM-2 through ATM+2.
+    # Works for SPY/QQQ/IWM (whole-dollar strikes); chain walk below handles finer granularity.
     if direction == "BULLISH":
         base_strike = underlying_price * (1 + otm_pct)
         base_whole = round(base_strike)
@@ -292,7 +296,7 @@ def select_sim_contract_with_reason(
     def _build_occ(expiry_date, contract_type_char: str, strike: float) -> str:
         date_str = expiry_date.strftime("%y%m%d")
         strike_int = int(round(strike * 1000))
-        return f"SPY{date_str}{contract_type_char}{strike_int:08d}"
+        return f"{underlying_sym}{date_str}{contract_type_char}{strike_int:08d}"
 
     def _is_chain_empty(chain_obj) -> bool:
         if chain_obj is None:
@@ -329,7 +333,7 @@ def select_sim_contract_with_reason(
             if not get_breaker().allow_request():
                 last_reason = "circuit_breaker_open"
                 break
-            _chain_cache_key = f"chain:{direction}:{expiry_date.isoformat()}"
+            _chain_cache_key = f"chain:{underlying_sym}:{direction}:{expiry_date.isoformat()}"
             chain = get_cache().get(_chain_cache_key)
             if chain is not None:
                 pass  # cache hit — skip API call
@@ -339,7 +343,7 @@ def select_sim_contract_with_reason(
                 feed_val = _get_options_feed()
                 chain = client.get_option_chain(
                     OptionChainRequest(
-                        underlying_symbol="SPY",
+                        underlying_symbol=underlying_sym,
                         type=contract_type_enum,
                         feed=feed_val,
                         expiration_date=expiry_date
@@ -768,12 +772,14 @@ def select_sim_contract(
     direction: str,
     underlying_price: float,
     profile: dict,
-    now_et: datetime | None = None
+    now_et: datetime | None = None,
+    symbol: str | None = None,
 ) -> dict | None:
     contract, _reason = select_sim_contract_with_reason(
         direction,
         underlying_price,
         profile,
-        now_et=now_et
+        now_et=now_et,
+        symbol=symbol
     )
     return contract

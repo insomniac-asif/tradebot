@@ -15,10 +15,23 @@ data/trade_journal.db
 data/trade_journal.db-wal
 data/trade_journal.db-shm
 data/md_state.json
-data/sims/*.json
+data/sims/
 data/predictions.csv
 data/conviction_expectancy.csv
-data/qqq_1m.csv
+data/career_stats.json
+data/edge_stats.json
+data/signal_log.csv
+data/blocked_signals.csv
+data/contract_selection_log.csv
+data/execution_quality_log.csv
+data/trade_features.csv
+data/trade_charts/
+data/trade_narratives/
+data/*_1m.csv
+
+# ── Generated chart images ────────────────────────────────────────
+charts/*.png
+charts/*.jpg
 
 # ── Cloudflare tunnel binary ──────────────────────────────────────
 cloudflared

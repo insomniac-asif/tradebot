@@ -11,6 +11,7 @@ from signals.session_classifier import classify_session
 PRED_FILE = os.path.join(DATA_DIR, "predictions.csv")
 PRED_HEADERS = [
     "time",
+    "symbol",
     "timeframe",
     "direction",
     "confidence",
@@ -70,7 +71,7 @@ def ensure_prediction_file():
         writer = csv.writer(f)
         writer.writerow(PRED_HEADERS)
 
-def log_prediction(pred, regime, volatility):
+def log_prediction(pred, regime, volatility, symbol="SPY"):
 
     if pred is None:
         return
@@ -94,6 +95,7 @@ def log_prediction(pred, regime, volatility):
 
         writer.writerow([
             pred_time,
+            symbol.upper(),
             pred["timeframe"],
             pred["direction"],
             pred["confidence"],

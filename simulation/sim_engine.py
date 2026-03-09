@@ -18,6 +18,7 @@ from simulation.sim_ml import predict_sim_trade, record_sim_trade_close
 from analytics.sim_features import compute_sim_features
 from core.md_state import is_md_enabled
 from signals.volatility import volatility_state
+from core.data_service import get_symbol_dataframe
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,7 +28,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "simulation", "sim_config.yaml")
 def _load_profiles() -> dict:
     try:
         with open(CONFIG_PATH, "r") as f:
-            return yaml.safe_load(f) or {}
+            raw = yaml.safe_load(f) or {}
+        return {k: v for k, v in raw.items() if str(k).upper().startswith("SIM") and isinstance(v, dict)}
     except Exception:
         return {}
 
@@ -49,9 +51,10 @@ def _trade_grade(tr) -> float | None:
     return max(candidates) if candidates else None
 
 
-def _count_directional_exposure(direction: str) -> int:
-    """Count how many sims currently have open trades in the given direction."""
+def _count_directional_exposure(direction: str, symbol: str | None = None) -> int:
+    """Count how many sims have open trades in the given direction (optionally per symbol)."""
     count = 0
+    sym_upper = symbol.upper() if symbol else None
     for sid, prof in _PROFILES.items():
         if str(sid).startswith("_"):
             continue
@@ -59,7 +62,9 @@ def _count_directional_exposure(direction: str) -> int:
             s = SimPortfolio(sid, prof)
             s.load()
             for t in s.open_trades:
-                if isinstance(t, dict) and t.get("direction") == direction:
+                if not isinstance(t, dict) or t.get("direction") != direction:
+                    continue
+                if sym_upper is None or (t.get("symbol") or "").upper() == sym_upper:
                     count += 1
                     break
         except Exception:
@@ -67,9 +72,10 @@ def _count_directional_exposure(direction: str) -> int:
     return count
 
 
-def _count_family_directional_exposure(family: str, direction: str) -> int:
-    """Count sims in the same strategy family that have an open trade in the given direction."""
+def _count_family_directional_exposure(family: str, direction: str, symbol: str | None = None) -> int:
+    """Count sims in the same strategy family with an open trade in the given direction (optionally per symbol)."""
     count = 0
+    sym_upper = symbol.upper() if symbol else None
     for sid, prof in _PROFILES.items():
         if str(sid).startswith("_"):
             continue
@@ -80,7 +86,9 @@ def _count_family_directional_exposure(family: str, direction: str) -> int:
             s = SimPortfolio(sid, prof)
             s.load()
             for t in s.open_trades:
-                if isinstance(t, dict) and t.get("direction") == direction:
+                if not isinstance(t, dict) or t.get("direction") != direction:
+                    continue
+                if sym_upper is None or (t.get("symbol") or "").upper() == sym_upper:
                     count += 1
                     break
         except Exception:
@@ -97,6 +105,28 @@ async def run_sim_entries(
     if not _PROFILES:
         return [{"sim_id": None, "status": "error", "reason": "no_profiles_loaded"}]
     time_of_day_bucket = _get_time_of_day_bucket()
+
+    # ── Pre-fetch each unique symbol's df ONCE (avoids 24x repeated blocking calls) ──
+    _all_syms: set[str] = set()
+    for _pid, _prof in _PROFILES.items():
+        if str(_pid).startswith("_"):
+            continue
+        _syms = _prof.get("symbols")
+        if _syms and isinstance(_syms, list):
+            _all_syms.update(str(s).upper() for s in _syms)
+        elif _prof.get("symbol"):
+            _all_syms.add(str(_prof["symbol"]).upper())
+    _sym_df_cache: dict = {"SPY": df}
+    for _sym in _all_syms:
+        if _sym == "SPY":
+            continue
+        try:
+            _cached = get_symbol_dataframe(_sym)
+            if _cached is not None and len(_cached) > 30:
+                _sym_df_cache[_sym] = _cached
+        except Exception:
+            pass
+
     for sim_id, profile in _PROFILES.items():
         if str(sim_id).startswith("_"):
             continue
@@ -105,14 +135,8 @@ async def run_sim_entries(
             sim.load()
 
             signal_mode = sim.profile.get("signal_mode", "TREND_PULLBACK")
-            trade_count = len(sim.trade_log) if isinstance(sim.trade_log, list) else 0
-            signal_meta = None
-            direction = None
-            underlying_price = None
 
-            effective_profile = dict(profile)
-
-            # ── 0. Blocked-session gate ────────────────────────────────
+            # ── 0. Blocked-session gate (sim-level, checked once) ─────────
             blocked_sessions = profile.get("blocked_sessions")
             if blocked_sessions and time_of_day_bucket:
                 if isinstance(blocked_sessions, list) and time_of_day_bucket in blocked_sessions:
@@ -121,276 +145,368 @@ async def run_sim_entries(
                         "status": "skipped",
                         "reason": "blocked_session",
                         "session": time_of_day_bucket,
-                        "signal_mode": profile.get("signal_mode"),
-                    })
-                    continue
-
-            # ── 1. Derive signal FIRST ──────────────────────────────
-            feature_snapshot = None
-            if profile.get("features_enabled"):
-                try:
-                    feature_snapshot = compute_sim_features(
-                        df,
-                        {
-                            "direction": None,
-                            "price": None,
-                            "regime": regime,
-                            "signal_mode": signal_mode,
-                            "horizon": effective_profile.get("horizon", profile.get("horizon")),
-                            "dte_min": effective_profile.get("dte_min"),
-                            "dte_max": effective_profile.get("dte_max"),
-                            "orb_minutes": effective_profile.get("orb_minutes", profile.get("orb_minutes", 15)),
-                            "zscore_window": effective_profile.get("zscore_window", profile.get("zscore_window", 30)),
-                            "iv_series": get_iv_series(profile.get("iv_series_window", 200)),
-                        },
-                    )
-                except Exception:
-                    feature_snapshot = None
-
-            sig = derive_sim_signal(
-                df,
-                signal_mode,
-                {
-                    "trade_count": trade_count,
-                    "atr_expansion_min": profile.get("atr_expansion_min"),
-                    "vol_z_min": profile.get("vol_z_min"),
-                    "require_trend_bias": profile.get("require_trend_bias"),
-                    "iv_rank_max": profile.get("iv_rank_max"),
-                    "vwap_z_min": profile.get("vwap_z_min"),
-                    "close_z_min": profile.get("close_z_min"),
-                },
-                feature_snapshot=feature_snapshot,
-                profile=profile,
-            )
-            if isinstance(sig, tuple):
-                if len(sig) >= 2:
-                    direction = sig[0]
-                    underlying_price = sig[1]
-                if len(sig) >= 3:
-                    signal_meta = sig[2]
-
-            # ── 2. Apply signal_meta overrides ──────────────────────
-            if isinstance(signal_meta, dict):
-                for k in [
-                    "dte_min",
-                    "dte_max",
-                    "hold_min_seconds",
-                    "hold_max_seconds",
-                    "horizon",
-                    "orb_minutes",
-                    "zscore_window",
-                ]:
-                    if signal_meta.get(k) is not None:
-                        effective_profile[k] = signal_meta.get(k)
-
-            # ── 3. Build entry_context AFTER signal_meta ────────────
-            entry_context = f"signal_mode={signal_mode} | regime={regime or 'N/A'} | bucket={time_of_day_bucket or 'N/A'}"
-            if isinstance(signal_meta, dict) and signal_meta.get("entry_context"):
-                entry_context = f"{entry_context} | {signal_meta.get('entry_context')}"
-            if isinstance(signal_meta, dict) and signal_meta.get("reason"):
-                entry_context = f"{entry_context} | reason={signal_meta.get('reason')}"
-
-            # ── 4. Early exit if no signal ─────────────────────────
-            if direction is None or underlying_price is None:
-                if isinstance(signal_meta, dict) and signal_meta.get("reason"):
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": signal_meta.get("reason"),
-                        "entry_context": entry_context,
-                        "signal_mode": signal_mode,
-                    })
-                continue
-
-            # ── Cross-sim directional exposure guard ─────────────────
-            global_config = _PROFILES.get("_global", {})
-            if global_config.get("cross_sim_guard_enabled", False):
-                try:
-                    max_dir_sims = int(global_config.get("max_directional_sims", 4))
-                except (TypeError, ValueError):
-                    max_dir_sims = 4
-                current_dir_count = _count_directional_exposure(direction)
-                if current_dir_count >= max_dir_sims:
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": "directional_exposure_limit",
-                        "direction": direction,
-                        "current_count": current_dir_count,
-                        "max_allowed": max_dir_sims,
-                        "entry_context": entry_context,
                         "signal_mode": signal_mode,
                     })
                     continue
 
-            # ── Cross-sim family crowding guard ───────────────────────
-            if global_config.get("cross_sim_guard_enabled", False):
-                max_family_concurrent = None
-                try:
-                    v = global_config.get("max_family_concurrent")
-                    if v is not None:
-                        max_family_concurrent = int(v)
-                except (TypeError, ValueError):
-                    pass
-                if max_family_concurrent is not None:
-                    sig_family = get_signal_family(str(signal_mode).upper())
-                    if sig_family not in ("unknown", "adaptive"):
-                        family_count = _count_family_directional_exposure(sig_family, direction)
-                        if family_count >= max_family_concurrent:
-                            results.append({
-                                "sim_id": sim_id,
-                                "status": "skipped",
-                                "reason": "family_crowding_limit",
-                                "family": sig_family,
-                                "direction": direction,
-                                "family_count": family_count,
-                                "max_allowed": max_family_concurrent,
-                                "entry_context": entry_context,
-                                "signal_mode": signal_mode,
-                            })
-                            continue
+            # ── Determine symbol list for this sim ───────────────────────
+            _sim_symbols = profile.get("symbols")
+            if not _sim_symbols or not isinstance(_sim_symbols, list):
+                _fallback = profile.get("symbol", "SPY")
+                _sim_symbols = [_fallback] if _fallback else ["SPY"]
 
-            # ── 5. ML prediction with real direction/price ─────────
-            ml_context = {
-                "direction": direction,
-                "price": underlying_price,
-                "regime": regime,
-                "horizon": effective_profile.get("horizon"),
-                "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-            }
-            ml_prediction = predict_sim_trade(df, ml_context)
+            # ── Loop over each symbol this sim trades ────────────────────
+            for _trade_symbol in _sim_symbols:
+                _trade_symbol = str(_trade_symbol).upper()
 
-            # ── 6. Continue with regime_filter, execution_mode, etc. ─
-            regime_filter = sim.profile.get("regime_filter")
-            if regime_filter is not None:
-                filtered_out = False
-                if isinstance(regime_filter, list):
-                    filtered_out = regime not in regime_filter
-                elif regime_filter == "TREND_ONLY":
-                    filtered_out = regime != "TREND"
-                elif regime_filter == "RANGE_ONLY":
-                    filtered_out = regime != "RANGE"
-                elif regime_filter == "VOLATILE_ONLY":
-                    filtered_out = regime != "VOLATILE"
-                if filtered_out:
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": "regime_filter",
-                        "entry_context": entry_context,
-                        "signal_mode": signal_mode,
-                    })
-                    continue
+                # Reload sim state so open_trades reflects any entries made
+                # earlier in this symbol loop iteration
+                sim.load()
+                trade_count = len(sim.trade_log) if isinstance(sim.trade_log, list) else 0
 
-            execution_mode = sim.profile.get("execution_mode")
-            if execution_mode == "live":
-                # Graduation gate: this sim activates only after a source sim
-                # (e.g. SIM03) has logged enough closed paper trades.
-                source_sim_id = sim.profile.get("source_sim")
-                min_source_trades = 0
-                try:
-                    min_source_trades = int(sim.profile.get("min_source_trades", 0))
-                except (TypeError, ValueError):
-                    min_source_trades = 0
-                if source_sim_id and min_source_trades > 0:
-                    src_trade_count = 0
+                # ── Load this symbol's df from pre-fetched cache ─────────
+                sim_df = _sym_df_cache.get(_trade_symbol, df)
+
+                signal_meta = None
+                direction = None
+                underlying_price = None
+                effective_profile = dict(profile)
+
+                # ── 1. Derive signal FIRST ──────────────────────────────
+                feature_snapshot = None
+                if profile.get("features_enabled"):
                     try:
-                        src_profile = _PROFILES.get(source_sim_id, {})
-                        src_sim = SimPortfolio(source_sim_id, src_profile)
-                        src_sim.load()
-                        src_trade_count = len(src_sim.trade_log) if isinstance(src_sim.trade_log, list) else 0
+                        feature_snapshot = compute_sim_features(
+                            sim_df,
+                            {
+                                "direction": None,
+                                "price": None,
+                                "regime": regime,
+                                "signal_mode": signal_mode,
+                                "horizon": effective_profile.get("horizon", profile.get("horizon")),
+                                "dte_min": effective_profile.get("dte_min"),
+                                "dte_max": effective_profile.get("dte_max"),
+                                "orb_minutes": effective_profile.get("orb_minutes", profile.get("orb_minutes", 15)),
+                                "zscore_window": effective_profile.get("zscore_window", profile.get("zscore_window", 30)),
+                                "iv_series": get_iv_series(profile.get("iv_series_window", 200)),
+                            },
+                        )
                     except Exception:
-                        src_trade_count = 0
-                    if src_trade_count < min_source_trades:
+                        feature_snapshot = None
+
+                sig = derive_sim_signal(
+                    sim_df,
+                    signal_mode,
+                    {
+                        "trade_count": trade_count,
+                        "atr_expansion_min": profile.get("atr_expansion_min"),
+                        "vol_z_min": profile.get("vol_z_min"),
+                        "require_trend_bias": profile.get("require_trend_bias"),
+                        "iv_rank_max": profile.get("iv_rank_max"),
+                        "vwap_z_min": profile.get("vwap_z_min"),
+                        "close_z_min": profile.get("close_z_min"),
+                    },
+                    feature_snapshot=feature_snapshot,
+                    profile=profile,
+                )
+                if isinstance(sig, tuple):
+                    if len(sig) >= 2:
+                        direction = sig[0]
+                        underlying_price = sig[1]
+                    if len(sig) >= 3:
+                        signal_meta = sig[2]
+
+                # ── 2. Apply signal_meta overrides ──────────────────────
+                if isinstance(signal_meta, dict):
+                    for k in [
+                        "dte_min",
+                        "dte_max",
+                        "hold_min_seconds",
+                        "hold_max_seconds",
+                        "horizon",
+                        "orb_minutes",
+                        "zscore_window",
+                    ]:
+                        if signal_meta.get(k) is not None:
+                            effective_profile[k] = signal_meta.get(k)
+
+                # ── 3. Build entry_context AFTER signal_meta ────────────
+                entry_context = f"signal_mode={signal_mode} | regime={regime or 'N/A'} | bucket={time_of_day_bucket or 'N/A'}"
+                if isinstance(signal_meta, dict) and signal_meta.get("entry_context"):
+                    entry_context = f"{entry_context} | {signal_meta.get('entry_context')}"
+                if isinstance(signal_meta, dict) and signal_meta.get("reason"):
+                    entry_context = f"{entry_context} | reason={signal_meta.get('reason')}"
+
+                # ── 4. Early exit if no signal ─────────────────────────
+                if direction is None or underlying_price is None:
+                    if isinstance(signal_meta, dict) and signal_meta.get("reason"):
                         results.append({
                             "sim_id": sim_id,
                             "status": "skipped",
-                            "reason": "insufficient_trade_history",
-                            "trade_count": src_trade_count,
-                            "min_trades_for_live": min_source_trades,
+                            "reason": signal_meta.get("reason"),
+                            "entry_context": entry_context,
+                            "signal_mode": signal_mode,
+                        })
+                    continue
+
+                # ── Cross-sim directional exposure guard ─────────────────
+                global_config = _PROFILES.get("_global", {})
+                if global_config.get("cross_sim_guard_enabled", False):
+                    try:
+                        max_dir_sims = int(global_config.get("max_directional_sims", 4))
+                    except (TypeError, ValueError):
+                        max_dir_sims = 4
+                    current_dir_count = _count_directional_exposure(direction, _trade_symbol)
+                    if current_dir_count >= max_dir_sims:
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "skipped",
+                            "reason": "directional_exposure_limit",
+                            "direction": direction,
+                            "symbol": _trade_symbol,
+                            "current_count": current_dir_count,
+                            "max_allowed": max_dir_sims,
                             "entry_context": entry_context,
                             "signal_mode": signal_mode,
                         })
                         continue
 
-                # ── Circuit breaker: continuous performance check ──
-                cb_config = sim.profile.get("circuit_breaker")
-                if isinstance(cb_config, dict) and cb_config.get("enabled"):
-                    cb_source_id = cb_config.get("source_sim")
-                    cb_window = int(cb_config.get("rolling_window", 20))
-                    cb_min_wr = float(cb_config.get("min_win_rate", 0.35))
-                    cb_min_exp = float(cb_config.get("min_expectancy", -50.0))
-                    cb_recover_wr = float(cb_config.get("recovery_win_rate", 0.45))
-                    cb_recover_exp = float(cb_config.get("recovery_expectancy", 0.0))
+                # ── Cross-sim family crowding guard ───────────────────────
+                if global_config.get("cross_sim_guard_enabled", False):
+                    max_family_concurrent = None
+                    try:
+                        v = global_config.get("max_family_concurrent")
+                        if v is not None:
+                            max_family_concurrent = int(v)
+                    except (TypeError, ValueError):
+                        pass
+                    if max_family_concurrent is not None:
+                        sig_family = get_signal_family(str(signal_mode).upper())
+                        if sig_family not in ("unknown", "adaptive"):
+                            family_count = _count_family_directional_exposure(sig_family, direction, _trade_symbol)
+                            if family_count >= max_family_concurrent:
+                                results.append({
+                                    "sim_id": sim_id,
+                                    "status": "skipped",
+                                    "reason": "family_crowding_limit",
+                                    "family": sig_family,
+                                    "direction": direction,
+                                    "family_count": family_count,
+                                    "max_allowed": max_family_concurrent,
+                                    "entry_context": entry_context,
+                                    "signal_mode": signal_mode,
+                                })
+                                continue
 
-                    if cb_source_id:
+                # ── 5. ML prediction with real direction/price ─────────
+                ml_context = {
+                    "direction": direction,
+                    "price": underlying_price,
+                    "regime": regime,
+                    "horizon": effective_profile.get("horizon"),
+                    "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+                }
+                ml_prediction = predict_sim_trade(df, ml_context)
+
+                # ── 6. Continue with regime_filter, execution_mode, etc. ─
+                regime_filter = sim.profile.get("regime_filter")
+                if regime_filter is not None:
+                    filtered_out = False
+                    if isinstance(regime_filter, list):
+                        filtered_out = regime not in regime_filter
+                    elif regime_filter == "TREND_ONLY":
+                        filtered_out = regime != "TREND"
+                    elif regime_filter == "RANGE_ONLY":
+                        filtered_out = regime != "RANGE"
+                    elif regime_filter == "VOLATILE_ONLY":
+                        filtered_out = regime != "VOLATILE"
+                    if filtered_out:
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "skipped",
+                            "reason": "regime_filter",
+                            "entry_context": entry_context,
+                            "signal_mode": signal_mode,
+                        })
+                        continue
+
+                execution_mode = sim.profile.get("execution_mode")
+                if execution_mode == "live":
+                    # Graduation gate: this sim activates only after a source sim
+                    # (e.g. SIM03) has logged enough closed paper trades.
+                    source_sim_id = sim.profile.get("source_sim")
+                    min_source_trades = 0
+                    try:
+                        min_source_trades = int(sim.profile.get("min_source_trades", 0))
+                    except (TypeError, ValueError):
+                        min_source_trades = 0
+                    if source_sim_id and min_source_trades > 0:
+                        src_trade_count = 0
                         try:
-                            cb_src_profile = _PROFILES.get(cb_source_id, {})
-                            cb_src_sim = SimPortfolio(cb_source_id, cb_src_profile)
-                            cb_src_sim.load()
-                            cb_log = cb_src_sim.trade_log if isinstance(cb_src_sim.trade_log, list) else []
-                            cb_recent = cb_log[-cb_window:] if len(cb_log) >= cb_window else cb_log
-
-                            if len(cb_recent) >= cb_window:
-                                cb_wins = 0
-                                cb_pnl_total = 0.0
-                                for t in cb_recent:
-                                    pnl = t.get("realized_pnl_dollars")
-                                    if pnl is None:
-                                        continue
-                                    try:
-                                        pnl_f = float(pnl)
-                                    except (TypeError, ValueError):
-                                        continue
-                                    cb_pnl_total += pnl_f
-                                    if pnl_f > 0:
-                                        cb_wins += 1
-                                cb_wr = cb_wins / len(cb_recent) if cb_recent else 0
-                                cb_exp = cb_pnl_total / len(cb_recent) if cb_recent else 0
-
-                                was_tripped = sim.profile.get("_circuit_breaker_tripped", False)
-
-                                if not was_tripped:
-                                    if cb_wr < cb_min_wr or cb_exp < cb_min_exp:
-                                        results.append({
-                                            "sim_id": sim_id,
-                                            "status": "circuit_breaker_tripped",
-                                            "reason": "source_performance_degraded",
-                                            "source_sim": cb_source_id,
-                                            "source_wr": round(cb_wr, 3),
-                                            "source_exp": round(cb_exp, 2),
-                                            "threshold_wr": cb_min_wr,
-                                            "threshold_exp": cb_min_exp,
-                                            "window": cb_window,
-                                        })
-                                        sim.profile["_circuit_breaker_tripped"] = True
-                                        continue
-                                else:
-                                    if cb_wr >= cb_recover_wr and cb_exp >= cb_recover_exp:
-                                        results.append({
-                                            "sim_id": sim_id,
-                                            "status": "circuit_breaker_recovered",
-                                            "source_sim": cb_source_id,
-                                            "source_wr": round(cb_wr, 3),
-                                            "source_exp": round(cb_exp, 2),
-                                        })
-                                        sim.profile["_circuit_breaker_tripped"] = False
-                                    else:
-                                        results.append({
-                                            "sim_id": sim_id,
-                                            "status": "circuit_breaker_held",
-                                            "reason": "source_still_degraded",
-                                            "source_sim": cb_source_id,
-                                            "source_wr": round(cb_wr, 3),
-                                            "source_exp": round(cb_exp, 2),
-                                        })
-                                        continue
+                            src_profile = _PROFILES.get(source_sim_id, {})
+                            src_sim = SimPortfolio(source_sim_id, src_profile)
+                            src_sim.load()
+                            src_trade_count = len(src_sim.trade_log) if isinstance(src_sim.trade_log, list) else 0
                         except Exception:
-                            logging.exception("circuit_breaker_check_error")
+                            src_trade_count = 0
+                        if src_trade_count < min_source_trades:
+                            results.append({
+                                "sim_id": sim_id,
+                                "status": "skipped",
+                                "reason": "insufficient_trade_history",
+                                "trade_count": src_trade_count,
+                                "min_trades_for_live": min_source_trades,
+                                "entry_context": entry_context,
+                                "signal_mode": signal_mode,
+                            })
+                            continue
 
-                if not sim.profile.get("enabled"):
-                    results.append({"sim_id": sim_id, "status": "skipped", "reason": "live_disabled"})
+                    # ── Circuit breaker: continuous performance check ──
+                    cb_config = sim.profile.get("circuit_breaker")
+                    if isinstance(cb_config, dict) and cb_config.get("enabled"):
+                        cb_source_id = cb_config.get("source_sim")
+                        cb_window = int(cb_config.get("rolling_window", 20))
+                        cb_min_wr = float(cb_config.get("min_win_rate", 0.35))
+                        cb_min_exp = float(cb_config.get("min_expectancy", -50.0))
+                        cb_recover_wr = float(cb_config.get("recovery_win_rate", 0.45))
+                        cb_recover_exp = float(cb_config.get("recovery_expectancy", 0.0))
+
+                        if cb_source_id:
+                            try:
+                                cb_src_profile = _PROFILES.get(cb_source_id, {})
+                                cb_src_sim = SimPortfolio(cb_source_id, cb_src_profile)
+                                cb_src_sim.load()
+                                cb_log = cb_src_sim.trade_log if isinstance(cb_src_sim.trade_log, list) else []
+                                cb_recent = cb_log[-cb_window:] if len(cb_log) >= cb_window else cb_log
+
+                                if len(cb_recent) >= cb_window:
+                                    cb_wins = 0
+                                    cb_pnl_total = 0.0
+                                    for t in cb_recent:
+                                        pnl = t.get("realized_pnl_dollars")
+                                        if pnl is None:
+                                            continue
+                                        try:
+                                            pnl_f = float(pnl)
+                                        except (TypeError, ValueError):
+                                            continue
+                                        cb_pnl_total += pnl_f
+                                        if pnl_f > 0:
+                                            cb_wins += 1
+                                    cb_wr = cb_wins / len(cb_recent) if cb_recent else 0
+                                    cb_exp = cb_pnl_total / len(cb_recent) if cb_recent else 0
+
+                                    was_tripped = sim.profile.get("_circuit_breaker_tripped", False)
+
+                                    if not was_tripped:
+                                        if cb_wr < cb_min_wr or cb_exp < cb_min_exp:
+                                            results.append({
+                                                "sim_id": sim_id,
+                                                "status": "circuit_breaker_tripped",
+                                                "reason": "source_performance_degraded",
+                                                "source_sim": cb_source_id,
+                                                "source_wr": round(cb_wr, 3),
+                                                "source_exp": round(cb_exp, 2),
+                                                "threshold_wr": cb_min_wr,
+                                                "threshold_exp": cb_min_exp,
+                                                "window": cb_window,
+                                            })
+                                            sim.profile["_circuit_breaker_tripped"] = True
+                                            continue
+                                    else:
+                                        if cb_wr >= cb_recover_wr and cb_exp >= cb_recover_exp:
+                                            results.append({
+                                                "sim_id": sim_id,
+                                                "status": "circuit_breaker_recovered",
+                                                "source_sim": cb_source_id,
+                                                "source_wr": round(cb_wr, 3),
+                                                "source_exp": round(cb_exp, 2),
+                                            })
+                                            sim.profile["_circuit_breaker_tripped"] = False
+                                        else:
+                                            results.append({
+                                                "sim_id": sim_id,
+                                                "status": "circuit_breaker_held",
+                                                "reason": "source_still_degraded",
+                                                "source_sim": cb_source_id,
+                                                "source_wr": round(cb_wr, 3),
+                                                "source_exp": round(cb_exp, 2),
+                                            })
+                                            continue
+                            except Exception:
+                                logging.exception("circuit_breaker_check_error")
+
+                    if not sim.profile.get("enabled"):
+                        results.append({"sim_id": sim_id, "status": "skipped", "reason": "live_disabled"})
+                        continue
+                    ok, reason = sim_should_trade_now(effective_profile)
+                    if not ok:
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "skipped",
+                            "reason": reason,
+                            "entry_context": entry_context,
+                            "signal_mode": signal_mode,
+                        })
+                        continue
+                    ok, reason = sim.can_trade()
+                    if not ok:
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "skipped",
+                            "reason": reason,
+                            "entry_context": entry_context,
+                            "signal_mode": signal_mode,
+                        })
+                        continue
+                    elapsed = _time.monotonic() - _LAST_CHAIN_CALL_TS
+                    if elapsed < _CHAIN_CALL_MIN_INTERVAL:
+                        await asyncio.sleep(_CHAIN_CALL_MIN_INTERVAL - elapsed)
+                    _LAST_CHAIN_CALL_TS = _time.monotonic()
+                    live_result = await sim_live_router(
+                        sim_id=sim_id,
+                        direction=direction,
+                        price=underlying_price,
+                        ml_prediction=ml_prediction,
+                        regime=regime,
+                        time_of_day_bucket=time_of_day_bucket,
+                        signal_mode=signal_mode,
+                        entry_context=entry_context,
+                        feature_snapshot=feature_snapshot,
+                    )
+                    if not isinstance(live_result, dict) or live_result.get("status") != "success":
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "error",
+                            "reason": (live_result or {}).get("message", "live_order_failed")
+                        })
+                        continue
+                    results.append({
+                        "sim_id": sim_id,
+                        "status": "live_submitted",
+                        "option_symbol": live_result.get("option_symbol"),
+                        "qty": live_result.get("qty"),
+                        "fill_price": live_result.get("fill_price"),
+                        "entry_price": live_result.get("fill_price"),
+                        "direction": direction,
+                        "risk_dollars": live_result.get("risk_dollars"),
+                        "strike": live_result.get("strike"),
+                        "expiry": live_result.get("expiry"),
+                        "dte": live_result.get("dte"),
+                        "spread_pct": live_result.get("spread_pct"),
+                        "regime": regime,
+                        "time_bucket": time_of_day_bucket,
+                        "mode": "LIVE",
+                        "balance": live_result.get("balance_after"),
+                        "entry_context": live_result.get("entry_context") or entry_context,
+                        "signal_mode": live_result.get("signal_mode") or signal_mode,
+                        "predicted_direction": live_result.get("predicted_direction") or ml_prediction.get("predicted_direction"),
+                        "prediction_confidence": live_result.get("prediction_confidence") or ml_prediction.get("prediction_confidence"),
+                        "edge_prob": live_result.get("edge_prob") or ml_prediction.get("edge_prob"),
+                        "direction_prob": live_result.get("direction_prob") or ml_prediction.get("direction_prob"),
+                    })
                     continue
+
                 ok, reason = sim_should_trade_now(effective_profile)
                 if not ok:
                     results.append({
@@ -401,6 +517,7 @@ async def run_sim_entries(
                         "signal_mode": signal_mode,
                     })
                     continue
+
                 ok, reason = sim.can_trade()
                 if not ok:
                     results.append({
@@ -411,215 +528,153 @@ async def run_sim_entries(
                         "signal_mode": signal_mode,
                     })
                     continue
+
                 elapsed = _time.monotonic() - _LAST_CHAIN_CALL_TS
                 if elapsed < _CHAIN_CALL_MIN_INTERVAL:
                     await asyncio.sleep(_CHAIN_CALL_MIN_INTERVAL - elapsed)
                 _LAST_CHAIN_CALL_TS = _time.monotonic()
-                live_result = await sim_live_router(
-                    sim_id=sim_id,
-                    direction=direction,
-                    price=underlying_price,
-                    ml_prediction=ml_prediction,
-                    regime=regime,
-                    time_of_day_bucket=time_of_day_bucket,
-                    signal_mode=signal_mode,
-                    entry_context=entry_context,
-                    feature_snapshot=feature_snapshot,
-                )
-                if not isinstance(live_result, dict) or live_result.get("status") != "success":
+
+                contract, contract_reason = select_sim_contract_with_reason(direction, underlying_price, {**effective_profile, "sim_id": sim_id}, symbol=_trade_symbol)
+                if contract is None:
                     results.append({
                         "sim_id": sim_id,
-                        "status": "error",
-                        "reason": (live_result or {}).get("message", "live_order_failed")
+                        "status": "skipped",
+                        "reason": contract_reason or "no_contract",
+                        "entry_context": entry_context,
+                        "signal_mode": signal_mode,
                     })
                     continue
+
+                bid = contract["bid"]
+                ask = contract["ask"]
+
+                fill_result, err = sim_try_fill(
+                    contract["option_symbol"],
+                    qty=1,
+                    bid=bid,
+                    ask=ask,
+                    profile=profile,
+                    side="entry"
+                )
+                if err or fill_result is None:
+                    results.append({
+                        "sim_id": sim_id,
+                        "status": "skipped",
+                        "reason": err,
+                        "entry_context": entry_context,
+                        "signal_mode": signal_mode,
+                    })
+                    continue
+
+                fill_price = fill_result["fill_price"]
+                risk_dollars = sim_compute_risk_dollars(sim.balance, profile)
+                qty = max(1, math.floor(risk_dollars / (fill_price * 100)))
+
+                fill_result, err = sim_try_fill(
+                    contract["option_symbol"],
+                    qty=qty,
+                    bid=bid,
+                    ask=ask,
+                    profile=profile,
+                    side="entry"
+                )
+                if err or fill_result is None:
+                    results.append({"sim_id": sim_id, "status": "skipped", "reason": err})
+                    continue
+
+                # Extract underlying symbol from OCC option_symbol (alphabetic prefix)
+                import re as _re
+                _opt_sym = contract["option_symbol"] or ""
+                _underlying = (_re.match(r'^([A-Z]{1,6})', _opt_sym) or [None,''])[1] or 'SPY'
+
+                trade = {
+                    "trade_id": f"{sim_id}__{uuid.uuid4()}",
+                    "sim_id": sim_id,
+                    "symbol": _underlying,
+                    "option_symbol": contract["option_symbol"],
+                    "entry_price": fill_result["fill_price"],
+                    "qty": qty,
+                    "entry_time": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+                    "horizon": effective_profile.get("horizon", profile.get("horizon")),
+                    "dte_bucket": str(contract["dte"]),
+                    "otm_pct": contract["otm_pct_applied"],
+                    "direction": direction,
+                    "strike": contract["strike"],
+                    "expiry": contract["expiry"],
+                    "contract_type": contract["contract_type"],
+                    "hold_min_seconds": int(effective_profile.get("hold_min_seconds", profile.get("hold_min_seconds"))),
+                    "hold_max_seconds": int(effective_profile.get("hold_max_seconds", profile.get("hold_max_seconds"))),
+                    "entry_price_source": fill_result.get("price_source", "mid_plus_slippage"),
+                }
+                if feature_snapshot:
+                    trade["feature_snapshot"] = feature_snapshot
+                if sim_id == "SIM09" or str(signal_mode).upper() == "OPPORTUNITY":
+                    vol_state = volatility_state(df)
+                    vol_stop_map = {
+                        "DEAD": 0.03,
+                        "LOW": 0.04,
+                        "NORMAL": 0.06,
+                        "HIGH": 0.08,
+                    }
+                    dynamic_stop = vol_stop_map.get(str(vol_state).upper(), 0.06)
+                    trade["stop_loss_pct"] = min(0.10, max(0.01, float(dynamic_stop)))
+                trade["regime_at_entry"] = regime
+                trade["time_of_day_bucket"] = time_of_day_bucket
+                trade["signal_mode"] = signal_mode
+                trade["strategy_family"] = get_signal_family(str(signal_mode).upper())
+                if isinstance(signal_meta, dict):
+                    trade["structure_score"] = signal_meta.get("structure_score")
+                trade["entry_context"] = entry_context
+                # greeks at entry (from contract snapshot)
+                trade["iv_at_entry"] = contract.get("iv")
+                trade["delta_at_entry"] = contract.get("delta")
+                trade["gamma_at_entry"] = contract.get("gamma")
+                trade["theta_at_entry"] = contract.get("theta")
+                trade["vega_at_entry"] = contract.get("vega")
+                if isinstance(ml_prediction, dict):
+                    trade["predicted_direction"] = ml_prediction.get("predicted_direction")
+                    trade["prediction_confidence"] = ml_prediction.get("prediction_confidence")
+                    trade["direction_prob"] = ml_prediction.get("direction_prob")
+                    trade["edge_prob"] = ml_prediction.get("edge_prob")
+                    trade["regime"] = ml_prediction.get("regime")
+                    trade["volatility"] = ml_prediction.get("volatility")
+                    trade["conviction_score"] = ml_prediction.get("conviction_score")
+                    trade["impulse"] = ml_prediction.get("impulse")
+                    trade["follow_through"] = ml_prediction.get("follow_through")
+                    trade["setup"] = ml_prediction.get("setup")
+                    trade["style"] = ml_prediction.get("style")
+                    trade["confidence"] = ml_prediction.get("confidence")
+                    trade["ml_probability"] = ml_prediction.get("edge_prob")
+
+                sim.record_open(trade)
+                sim.save()
+
                 results.append({
                     "sim_id": sim_id,
-                    "status": "live_submitted",
-                    "option_symbol": live_result.get("option_symbol"),
-                    "qty": live_result.get("qty"),
-                    "fill_price": live_result.get("fill_price"),
-                    "entry_price": live_result.get("fill_price"),
+                    "status": "opened",
+                    "symbol": _trade_symbol,
+                    "trade_id": trade["trade_id"],
+                    "fill_price": trade["entry_price"],
+                    "entry_price": trade["entry_price"],
+                    "qty": qty,
+                    "option_symbol": trade["option_symbol"],
+                    "expiry": contract["expiry"],
+                    "strike": contract["strike"],
+                    "dte": contract["dte"],
+                    "spread_pct": contract["spread_pct"],
                     "direction": direction,
-                    "risk_dollars": live_result.get("risk_dollars"),
-                    "strike": live_result.get("strike"),
-                    "expiry": live_result.get("expiry"),
-                    "dte": live_result.get("dte"),
-                    "spread_pct": live_result.get("spread_pct"),
+                    "risk_dollars": risk_dollars,
                     "regime": regime,
                     "time_bucket": time_of_day_bucket,
-                    "mode": "LIVE",
-                    "balance": live_result.get("balance_after"),
-                    "entry_context": live_result.get("entry_context") or entry_context,
-                    "signal_mode": live_result.get("signal_mode") or signal_mode,
-                    "predicted_direction": live_result.get("predicted_direction") or ml_prediction.get("predicted_direction"),
-                    "prediction_confidence": live_result.get("prediction_confidence") or ml_prediction.get("prediction_confidence"),
-                    "edge_prob": live_result.get("edge_prob") or ml_prediction.get("edge_prob"),
-                    "direction_prob": live_result.get("direction_prob") or ml_prediction.get("direction_prob"),
-                })
-                continue
-
-            ok, reason = sim_should_trade_now(effective_profile)
-            if not ok:
-                results.append({
-                    "sim_id": sim_id,
-                    "status": "skipped",
-                    "reason": reason,
+                    "mode": "SIM",
+                    "balance": sim.balance,
                     "entry_context": entry_context,
                     "signal_mode": signal_mode,
+                    "predicted_direction": trade.get("predicted_direction"),
+                    "prediction_confidence": trade.get("prediction_confidence"),
+                    "edge_prob": trade.get("edge_prob"),
+                    "direction_prob": trade.get("direction_prob"),
                 })
-                continue
-
-            ok, reason = sim.can_trade()
-            if not ok:
-                results.append({
-                    "sim_id": sim_id,
-                    "status": "skipped",
-                    "reason": reason,
-                    "entry_context": entry_context,
-                    "signal_mode": signal_mode,
-                })
-                continue
-
-            elapsed = _time.monotonic() - _LAST_CHAIN_CALL_TS
-            if elapsed < _CHAIN_CALL_MIN_INTERVAL:
-                await asyncio.sleep(_CHAIN_CALL_MIN_INTERVAL - elapsed)
-            _LAST_CHAIN_CALL_TS = _time.monotonic()
-
-            contract, contract_reason = select_sim_contract_with_reason(direction, underlying_price, {**effective_profile, "sim_id": sim_id})
-            if contract is None:
-                results.append({
-                    "sim_id": sim_id,
-                    "status": "skipped",
-                    "reason": contract_reason or "no_contract",
-                    "entry_context": entry_context,
-                    "signal_mode": signal_mode,
-                })
-                continue
-
-            bid = contract["bid"]
-            ask = contract["ask"]
-
-            fill_result, err = sim_try_fill(
-                contract["option_symbol"],
-                qty=1,
-                bid=bid,
-                ask=ask,
-                profile=profile,
-                side="entry"
-            )
-            if err or fill_result is None:
-                results.append({
-                    "sim_id": sim_id,
-                    "status": "skipped",
-                    "reason": err,
-                    "entry_context": entry_context,
-                    "signal_mode": signal_mode,
-                })
-                continue
-
-            fill_price = fill_result["fill_price"]
-            risk_dollars = sim_compute_risk_dollars(sim.balance, profile)
-            qty = max(1, math.floor(risk_dollars / (fill_price * 100)))
-
-            fill_result, err = sim_try_fill(
-                contract["option_symbol"],
-                qty=qty,
-                bid=bid,
-                ask=ask,
-                profile=profile,
-                side="entry"
-            )
-            if err or fill_result is None:
-                results.append({"sim_id": sim_id, "status": "skipped", "reason": err})
-                continue
-
-            trade = {
-                "trade_id": f"{sim_id}__{uuid.uuid4()}",
-                "sim_id": sim_id,
-                "option_symbol": contract["option_symbol"],
-                "entry_price": fill_result["fill_price"],
-                "qty": qty,
-                "entry_time": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-                "horizon": effective_profile.get("horizon", profile.get("horizon")),
-                "dte_bucket": str(contract["dte"]),
-                "otm_pct": contract["otm_pct_applied"],
-                "direction": direction,
-                "strike": contract["strike"],
-                "expiry": contract["expiry"],
-                "contract_type": contract["contract_type"],
-                "hold_min_seconds": int(effective_profile.get("hold_min_seconds", profile.get("hold_min_seconds"))),
-                "hold_max_seconds": int(effective_profile.get("hold_max_seconds", profile.get("hold_max_seconds"))),
-                "entry_price_source": fill_result.get("price_source", "mid_plus_slippage"),
-            }
-            if feature_snapshot:
-                trade["feature_snapshot"] = feature_snapshot
-            if sim_id == "SIM09" or str(signal_mode).upper() == "OPPORTUNITY":
-                vol_state = volatility_state(df)
-                vol_stop_map = {
-                    "DEAD": 0.03,
-                    "LOW": 0.04,
-                    "NORMAL": 0.06,
-                    "HIGH": 0.08,
-                }
-                dynamic_stop = vol_stop_map.get(str(vol_state).upper(), 0.06)
-                trade["stop_loss_pct"] = min(0.10, max(0.01, float(dynamic_stop)))
-            trade["regime_at_entry"] = regime
-            trade["time_of_day_bucket"] = time_of_day_bucket
-            trade["signal_mode"] = signal_mode
-            trade["strategy_family"] = get_signal_family(str(signal_mode).upper())
-            if isinstance(signal_meta, dict):
-                trade["structure_score"] = signal_meta.get("structure_score")
-            trade["entry_context"] = entry_context
-            # greeks at entry (from contract snapshot)
-            trade["iv_at_entry"] = contract.get("iv")
-            trade["delta_at_entry"] = contract.get("delta")
-            trade["gamma_at_entry"] = contract.get("gamma")
-            trade["theta_at_entry"] = contract.get("theta")
-            trade["vega_at_entry"] = contract.get("vega")
-            if isinstance(ml_prediction, dict):
-                trade["predicted_direction"] = ml_prediction.get("predicted_direction")
-                trade["prediction_confidence"] = ml_prediction.get("prediction_confidence")
-                trade["direction_prob"] = ml_prediction.get("direction_prob")
-                trade["edge_prob"] = ml_prediction.get("edge_prob")
-                trade["regime"] = ml_prediction.get("regime")
-                trade["volatility"] = ml_prediction.get("volatility")
-                trade["conviction_score"] = ml_prediction.get("conviction_score")
-                trade["impulse"] = ml_prediction.get("impulse")
-                trade["follow_through"] = ml_prediction.get("follow_through")
-                trade["setup"] = ml_prediction.get("setup")
-                trade["style"] = ml_prediction.get("style")
-                trade["confidence"] = ml_prediction.get("confidence")
-                trade["ml_probability"] = ml_prediction.get("edge_prob")
-
-            sim.record_open(trade)
-            sim.save()
-
-            results.append({
-                "sim_id": sim_id,
-                "status": "opened",
-                "trade_id": trade["trade_id"],
-                "fill_price": trade["entry_price"],
-                "entry_price": trade["entry_price"],
-                "qty": qty,
-                "option_symbol": trade["option_symbol"],
-                "expiry": contract["expiry"],
-                "strike": contract["strike"],
-                "dte": contract["dte"],
-                "spread_pct": contract["spread_pct"],
-                "direction": direction,
-                "risk_dollars": risk_dollars,
-                "regime": regime,
-                "time_bucket": time_of_day_bucket,
-                "mode": "SIM",
-                "balance": sim.balance,
-                "entry_context": entry_context,
-                "signal_mode": signal_mode,
-                "predicted_direction": trade.get("predicted_direction"),
-                "prediction_confidence": trade.get("prediction_confidence"),
-                "edge_prob": trade.get("edge_prob"),
-                "direction_prob": trade.get("direction_prob"),
-            })
         except Exception as e:
             logging.exception("run_sim_entries_error: %s", e)
             results.append({"sim_id": sim_id, "status": "error", "reason": str(e)})
@@ -943,6 +998,7 @@ async def run_sim_exits() -> list[dict]:
                     record_sim_trade_close(trade, pnl_val)
                     results.append({
                         "sim_id": sim_id,
+                        "symbol": trade.get("symbol"),
                         "trade_id": trade["trade_id"],
                         "status": "closed",
                         "exit_price": exit_price,

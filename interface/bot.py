@@ -48,10 +48,15 @@ from simulation.sim_watcher import (
 from core.md_state import set_md_enabled, get_md_state, md_needs_warning, set_md_auto
 from core.api_resilience import resilience_stats
 from core.structured_logger import setup_structured_logging, slog_critical
-from core.backfill import run_backfill_async, backfill_status
+from core.backfill import (
+    run_backfill_async,
+    run_backfill_all_symbols_async,
+    backfill_status,
+    _load_registered_symbols as _backfill_get_symbols,
+)
 # -------- Core --------
 from core.market_clock import market_is_open
-from core.data_service import get_market_dataframe
+from core.data_service import get_market_dataframe, get_candle_data, _load_symbol_registry
 from execution.option_executor import get_option_price
 from core.session_scope import get_rth_session_view
 from core.account_repository import load_account
@@ -841,51 +846,143 @@ async def _send_embed(ctx, description: str, title: str | None = None, color: in
 # ==============================
 # COMMANDS
 # ==============================
+import time as _time
 
-@bot.command()
-async def spy(ctx):
+_CHART_TTL = 1800  # 30 minutes
+
+async def _schedule_delete(path: str, delay: float = _CHART_TTL):
+    """Delete a file after `delay` seconds (fire-and-forget background task)."""
+    await asyncio.sleep(delay)
     try:
-        df = get_market_dataframe()
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+async def _symbol_snapshot(ctx, symbol: str):
+    """Generic symbol snapshot: price, indicators, chart. Used by !spy, !iwm, !tsla, etc."""
+    symbol = symbol.upper()
+    import pandas_ta as _ta
+    try:
+        # Load candle data from CSV via registry
+        from datetime import date as _date
+        import pandas as _pd
+        from core.data_service import get_symbol_csv_path
+        csv_path = get_symbol_csv_path(symbol)
+        df = None
+        if csv_path and os.path.exists(csv_path):
+            df = _pd.read_csv(csv_path)
+            df.columns = [c.lower() for c in df.columns]
+            ts_col = next((c for c in ("timestamp", "time", "datetime") if c in df.columns), None)
+            if ts_col:
+                df[ts_col] = _pd.to_datetime(df[ts_col], errors="coerce")
+                df = df.dropna(subset=[ts_col])
+                if df[ts_col].dt.tz is not None:
+                    df[ts_col] = df[ts_col].dt.tz_convert("US/Eastern").dt.tz_localize(None)
+                df = df.set_index(ts_col).sort_index()
+                # Filter to today only
+                today = _pd.Timestamp(_date.today())
+                df = df[df.index.date == today.date()]
+        # For SPY fall back to get_market_dataframe
+        if (df is None or df.empty) and symbol == "SPY":
+            df = get_market_dataframe()
         if df is None or df.empty:
-            await _send_embed(ctx, "Market data unavailable.")
+            await _send_embed(ctx, f"No data for {symbol} — run `!backfill 5 {symbol.lower()}` first.")
             return
+
+        # Compute indicators if missing
+        if "ema9" not in df.columns and len(df) >= 9:
+            df["ema9"] = df["close"].ewm(span=9).mean()
+        if "ema20" not in df.columns and len(df) >= 20:
+            df["ema20"] = df["close"].ewm(span=20).mean()
+        if "vwap" not in df.columns and "volume" in df.columns:
+            try:
+                df["vwap"] = _ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+            except Exception:
+                df["vwap"] = df["close"]
 
         last = df.iloc[-1]
         recent = df.tail(120)
-
         high_price = recent["high"].max()
-        low_price = recent["low"].min()
-
-        high_time = recent["high"].idxmax()
-        low_time = recent["low"].idxmin()
-
+        low_price  = recent["low"].min()
+        high_time  = recent["high"].idxmax()
+        low_time   = recent["low"].idxmin()
         high_time_str = high_time.strftime('%H:%M') if hasattr(high_time, "strftime") else str(high_time)
-        low_time_str = low_time.strftime('%H:%M') if hasattr(low_time, "strftime") else str(low_time)
+        low_time_str  = low_time.strftime('%H:%M')  if hasattr(low_time,  "strftime") else str(low_time)
 
-        plt.figure(figsize=(8, 4))
-        plt.plot(df.index[-120:], df["close"][-120:], label="Price")
-        plt.plot(df.index[-120:], df["ema9"][-120:], label="EMA9")
-        plt.plot(df.index[-120:], df["ema20"][-120:], label="EMA20")
-        plt.plot(df.index[-120:], df["vwap"][-120:], label="VWAP")
-        plt.legend()
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig("charts/chartqqq.png")
-        plt.close()
+        # Generate chart (skip if cached copy is < 30 min old)
+        os.makedirs("charts", exist_ok=True)
+        chart_file = f"charts/snap_{symbol.lower()}.png"
+        if not (os.path.exists(chart_file) and _time.time() - os.path.getmtime(chart_file) < _CHART_TTL):
+            plt.figure(figsize=(8, 4))
+            n = min(120, len(df))
+            plt.plot(df.index[-n:], df["close"].iloc[-n:], label="Price")
+            if "ema9"  in df.columns: plt.plot(df.index[-n:], df["ema9"].iloc[-n:],  label="EMA9")
+            if "ema20" in df.columns: plt.plot(df.index[-n:], df["ema20"].iloc[-n:], label="EMA20")
+            if "vwap"  in df.columns: plt.plot(df.index[-n:], df["vwap"].iloc[-n:],  label="VWAP")
+            plt.legend(); plt.xticks(rotation=45); plt.tight_layout()
+            plt.savefig(chart_file); plt.close()
 
-        spy_embed = discord.Embed(title="📡 SPY Snapshot", color=0x3498DB)
-        spy_embed.add_field(name="💰 Price",    value=ab(A(f"${last['close']:.2f}", "white", bold=True)), inline=True)
-        spy_embed.add_field(name="📊 VWAP",     value=ab(A(f"${last['vwap']:.2f}", "cyan")), inline=True)
-        spy_embed.add_field(name="📈 EMA9",     value=ab(A(f"${last['ema9']:.2f}", "yellow")), inline=True)
-        spy_embed.add_field(name="📉 EMA20",    value=ab(A(f"${last['ema20']:.2f}", "yellow")), inline=True)
-        spy_embed.add_field(name="⬆️ Session High", value=ab(f"{A(f'${high_price:.2f}', 'green')} @ {A(high_time_str, 'white')}"), inline=True)
-        spy_embed.add_field(name="⬇️ Session Low",  value=ab(f"{A(f'${low_price:.2f}', 'red')} @ {A(low_time_str, 'white')}"), inline=True)
-        _append_footer(spy_embed)
-        await ctx.send(embed=spy_embed)
-        await ctx.send(file=discord.File("charts/chartqqq.png"))
+        def _v(col): return f"${last[col]:.2f}" if col in last.index and last[col] == last[col] else "N/A"
+        embed = discord.Embed(title=f"📡 {symbol} Snapshot", color=0x3498DB)
+        embed.add_field(name="💰 Price",         value=ab(A(_v("close"), "white", bold=True)), inline=True)
+        embed.add_field(name="📊 VWAP",          value=ab(A(_v("vwap"),  "cyan")),             inline=True)
+        embed.add_field(name="📈 EMA9",          value=ab(A(_v("ema9"),  "yellow")),           inline=True)
+        embed.add_field(name="📉 EMA20",         value=ab(A(_v("ema20"), "yellow")),           inline=True)
+        embed.add_field(name="⬆️ Session High",  value=ab(f"{A(f'${high_price:.2f}', 'green')} @ {A(high_time_str, 'white')}"), inline=True)
+        embed.add_field(name="⬇️ Session Low",   value=ab(f"{A(f'${low_price:.2f}', 'red')} @ {A(low_time_str, 'white')}"),   inline=True)
+        _append_footer(embed)
+        await ctx.send(embed=embed)
+        if os.path.exists(chart_file):
+            await ctx.send(file=discord.File(chart_file))
+            asyncio.create_task(_schedule_delete(chart_file))
     except Exception as e:
-        logging.exception(f"!spy failed: {e}")
-        await _send_embed(ctx, "⚠️ Chart error — data still warming up.")
+        logging.exception(f"!{symbol.lower()} snapshot failed: {e}")
+        await _send_embed(ctx, f"⚠️ Chart error for {symbol} — data may still be warming up.")
+
+# ── Symbol snapshot commands ──────────────────────────────────────────────────
+_KNOWN_SYMBOLS = ["spy", "qqq", "iwm", "vxx", "tsla", "aapl", "nvda", "msft"]
+
+@bot.command()
+async def spy(ctx):
+    await _symbol_snapshot(ctx, "SPY")
+
+@bot.command()
+async def qqq(ctx):
+    await _symbol_snapshot(ctx, "QQQ")
+
+@bot.command()
+async def iwm(ctx):
+    await _symbol_snapshot(ctx, "IWM")
+
+@bot.command()
+async def vxx(ctx):
+    await _symbol_snapshot(ctx, "VXX")
+
+@bot.command()
+async def tsla(ctx):
+    await _symbol_snapshot(ctx, "TSLA")
+
+@bot.command()
+async def aapl(ctx):
+    await _symbol_snapshot(ctx, "AAPL")
+
+@bot.command()
+async def nvda(ctx):
+    await _symbol_snapshot(ctx, "NVDA")
+
+@bot.command()
+async def msft(ctx):
+    await _symbol_snapshot(ctx, "MSFT")
+
+@bot.command(name="quote")
+async def quote(ctx, symbol: str | None = None):
+    """Generic: !quote <SYMBOL>"""
+    if not symbol:
+        await _send_embed(ctx, "Usage: `!quote <SYMBOL>` — e.g. `!quote tsla`")
+        return
+    await _symbol_snapshot(ctx, symbol)
 
 @bot.command()
 async def risk(ctx):
@@ -1383,6 +1480,9 @@ async def help_command(ctx, command_name: str | int | None = None):
         "helpplan": "advanced",
         "ask": "advanced",
         "askmore": "advanced",
+        "backfill": "advanced",
+        "query": "advanced",
+        "ratelimit": "advanced",
     }
 
     def _send_help_page(page_num: int):
@@ -1410,9 +1510,9 @@ async def help_command(ctx, command_name: str | int | None = None):
                 "title": "📙 Help — Page 3/3 (System + AI)",
                 "color": 0xF39C12,
                 "fields": [
-                    ("🖥 System", "`!system`, `!ratelimit`, `!backfill`, `!query`, `!replay`, `!helpplan`"),
+                    ("🖥 System", "`!system`, `!ratelimit`, `!backfill [days] [sym|all]`, `!query`, `!replay`, `!helpplan`"),
                     ("🧭 Momentum Decay", "`!md status`, `!md enable`, `!md disable`, `!md auto <low|medium|high>`"),
-                    ("🤖 AI Coach", "`!ask`, `!askmore`"),
+                    ("🤖 AI Coach", "`!ask <contract>` — chart + narrative  |  `!askmore`"),
                     ("🧰 Maintenance", "`!conviction_fix`, `!features_reset`, `!pred_reset`"),
                 ],
             },
@@ -1557,12 +1657,15 @@ Requires:
 Minimum 10 closed trades.
 """,
         "spy": """
-`!spy`
+`!spy` / `!qqq` / `!iwm` / `!vxx` / `!tsla` / `!aapl` / `!nvda` / `!msft`
+Or: `!quote <SYMBOL>` for any symbol
 
-Shows current SPY price snapshot:
+Shows price snapshot for that symbol:
 • Price, VWAP, EMA9, EMA20
-• Recent high/low with timestamps
+• Session high/low with timestamps
 • Sends a chart image
+
+Note: non-SPY symbols need data — run `!backfill 5 <symbol>` first.
 """,
         "regime": """
 `!regime`
@@ -1797,9 +1900,15 @@ Regime expectancy stats (R-multiple).
 Displays system health summary.
 """,
         "replay": """
-`!replay`
+`!replay [symbol]`
 
-Sends recorded session chart and live chart if available.
+Sends recorded session chart and live chart for the given symbol.
+Defaults to SPY if no symbol given.
+
+Examples:
+  `!replay` → SPY session
+  `!replay iwm` → IWM session
+  `!replay tsla` → TSLA session
 """,
         "helpplan": """
 `!helpplan`
@@ -1844,13 +1953,37 @@ Displays:
 • Active background systems
 """,
 
+        "backfill": """
+`!backfill [days] [symbol|all]`
+
+Fetches historical 1-min candles from Alpaca and merges into the symbol's CSV.
+
+Examples:
+`!backfill`              — SPY, 30 days
+`!backfill 60`           — SPY, 60 days
+`!backfill 30 QQQ`       — QQQ, 30 days
+`!backfill 7 all`        — all registered symbols, 7 days
+
+Registered symbols: SPY, QQQ, IWM, VXX, TSLA, AAPL, NVDA, MSFT
+""",
         "ask": """
-`!ask <question>`
+`!ask <option_contract>`  — Trade chart + AI analysis
+`!ask <question>`         — AI reviews your performance
 
-AI reviews your performance.
+**Trade analysis** (OCC contract format):
+`!ask SPY260321C00565000`
+`!ask QQQ260321P00480000`
 
-Example:
+• Searches all sims for trades on that contract
+• Generates annotated chart (entry/exit, EMAs, VWAP, RSI panel)
+• GPT narrative: entry reasoning, exit quality, grade (A–F), tags
+• Posts one embed per matching sim (compare strategies side-by-side)
+
+**Performance review** (free-text question):
 `!ask Did I overtrade?`
+`!ask Why are my mean reversion trades losing?`
+
+Use `!askmore` for follow-up questions.
 """,
         "askmore": """
 `!askmore <follow-up question>`
@@ -1894,24 +2027,26 @@ Analyzes:
 
 
 @bot.command(name="replay")
-async def replay(ctx):
-
+async def replay(ctx, symbol: str | None = None):
+    sym = (symbol or "SPY").upper()
     try:
-        chart_path = generate_chart()
+        chart_path = generate_chart(sym)
 
         if chart_path:
-            await _send_embed(ctx, "📊 Recorded Session:")
+            await _send_embed(ctx, f"📊 {sym} Recorded Session:")
             await ctx.send(file=discord.File(chart_path))
+            asyncio.create_task(_schedule_delete(chart_path))
         else:
-            await _send_embed(ctx, "No recorded session data available.")
+            await _send_embed(ctx, f"No recorded session data for {sym} — run `!backfill 5 {sym.lower()}` first.")
 
-        live_path = generate_live_chart()
+        live_path = generate_live_chart(sym)
 
         if live_path and os.path.exists(live_path):
-            await _send_embed(ctx, "📈 Live Market:")
+            await _send_embed(ctx, f"📈 {sym} Live Market:")
             await ctx.send(file=discord.File(live_path))
+            asyncio.create_task(_schedule_delete(live_path))
         else:
-            await _send_embed(ctx, "Market closed — no live data available.")
+            await _send_embed(ctx, f"Market closed or no live data for {sym}.")
 
     except Exception as e:
         logging.exception(f"Replay error: {e}")
@@ -5102,48 +5237,85 @@ async def ratelimit(ctx):
 
 
 @bot.command()
-async def backfill(ctx, days: int = 30):
-    """Backfill historical 1m candles from Alpaca. Usage: !backfill [days]"""
+async def backfill(ctx, days: int = 30, symbol: str = "SPY"):
+    """
+    Backfill historical 1m candles from Alpaca.
+    Usage: !backfill [days] [SPY|QQQ|all]
+    Examples: !backfill 30 SPY  |  !backfill 7 QQQ  |  !backfill 30 all
+    """
     if days < 1 or days > 365:
         await _send_embed(ctx, "Days must be between 1 and 365.")
         return
 
-    status = backfill_status()
-    embed = discord.Embed(
-        title=f"Backfilling {days} days of 1m candles…",
-        description=(
-            f"Current CSV: **{status['rows']:,}** rows\n"
-            f"Earliest: {status['earliest'] or 'N/A'}\n"
-            f"Latest: {status['latest'] or 'N/A'}\n\n"
-            "Running in background — this may take a minute."
-        ),
-        color=0x4444FF,
-    )
+    backfill_all = symbol.lower() == "all"
+    sym = symbol.upper()
+
+    if backfill_all:
+        registry = _backfill_get_symbols()
+        sym_list = list(registry.keys()) if registry else ["SPY"]
+        status_lines = []
+        for s in sym_list:
+            st = backfill_status(s)
+            status_lines.append(f"**{s}**: {st['rows']:,} rows ({st['latest'] or 'no data'})")
+        embed = discord.Embed(
+            title=f"Backfilling {days} days — ALL symbols ({len(sym_list)})",
+            description="\n".join(status_lines) + "\n\nRunning in background…",
+            color=0x4444FF,
+        )
+    else:
+        status = backfill_status(sym)
+        embed = discord.Embed(
+            title=f"Backfilling {days} days — {sym}",
+            description=(
+                f"Current: **{status['rows']:,}** rows\n"
+                f"Earliest: {status['earliest'] or 'N/A'}\n"
+                f"Latest: {status['latest'] or 'N/A'}\n\n"
+                "Running in background — this may take a minute."
+            ),
+            color=0x4444FF,
+        )
     _append_footer(embed)
     await ctx.send(embed=embed)
 
     messages: list[str] = []
-
     def progress(msg: str):
         messages.append(msg)
 
-    result = await run_backfill_async(days_back=days, progress_cb=progress)
+    if backfill_all:
+        result = await run_backfill_all_symbols_async(days_back=days, progress_cb=progress)
+    else:
+        result = await run_backfill_async(days_back=days, symbol=sym, progress_cb=progress)
 
     if result.get("ok"):
-        embed2 = discord.Embed(
-            title="Backfill Complete",
-            color=0x00CC44,
-        )
-        embed2.add_field(
-            name="Results",
-            value=(
-                f"Days fetched: **{result['fetched_days']}**\n"
-                f"Rows added: **{result['added_rows']:,}**\n"
-                f"Total rows: **{result['total_rows']:,}**\n"
-                f"Day-errors: {result['errors']}"
-            ),
-            inline=False,
-        )
+        if backfill_all:
+            lines = []
+            for s, r in result.get("results", {}).items():
+                if r.get("ok"):
+                    lines.append(f"**{s}**: +{r['added_rows']:,} rows (total {r['total_rows']:,}, {r['errors']} err)")
+                else:
+                    lines.append(f"**{s}**: ❌ {r.get('error','failed')}")
+            embed2 = discord.Embed(
+                title="Backfill Complete — All Symbols",
+                description="\n".join(lines) if lines else "No new rows added.",
+                color=0x00CC44,
+            )
+            embed2.add_field(
+                name="Totals",
+                value=f"Rows added: **{result['total_added']:,}** | Day-errors: {result['total_errors']}",
+                inline=False,
+            )
+        else:
+            embed2 = discord.Embed(title=f"Backfill Complete — {sym}", color=0x00CC44)
+            embed2.add_field(
+                name="Results",
+                value=(
+                    f"Days fetched: **{result['fetched_days']}**\n"
+                    f"Rows added: **{result['added_rows']:,}**\n"
+                    f"Total rows: **{result['total_rows']:,}**\n"
+                    f"Day-errors: {result['errors']}"
+                ),
+                inline=False,
+            )
     else:
         embed2 = discord.Embed(
             title="Backfill Failed",
@@ -5196,7 +5368,18 @@ async def query(ctx, sim_id: str = None, page: int = 1):
 async def ask(ctx, *, question=None):
 
     if not question:
-        await _send_embed(ctx, "Usage: !ask <question>\nExample: !ask Did I overtrade?")
+        await _send_embed(ctx,
+            "Usage:\n"
+            "• `!ask <option_contract>` — trade chart + AI analysis  "
+            "(e.g. `!ask SPY260310C00592000`)\n"
+            "• `!ask <question>` — AI reviews your performance  "
+            "(e.g. `!ask Did I overtrade?`)"
+        )
+        return
+
+    # If the argument looks like an OCC option symbol, route to trade analysis
+    if re.match(r'^[A-Z]{1,6}\d{6}[CP]\d+$', question.strip().upper()):
+        await _ask_trade_impl(ctx, question.strip().upper())
         return
 
     def _load_sim_profiles():
@@ -5834,5 +6017,190 @@ async def on_command_error(ctx, error):
         return
 
     await _send_embed(ctx, "⚠️ Internal error occurred. Logged for review.")
+
+
+# ==============================
+# !ask — Trade Analysis (helper, called from the main ask command)
+# ==============================
+
+async def _ask_trade_impl(ctx, symbol: str):
+    """
+    !ask <option_symbol>  — Find and analyze any trade matching the contract symbol.
+    Example: !ask SPY260303C00670000
+    """
+    try:
+        symbol_upper = symbol.strip().upper()
+
+        # Locate sim data dir and config
+        _bot_dir   = os.path.dirname(os.path.abspath(__file__))
+        _base_dir  = os.path.dirname(_bot_dir)
+        _sims_dir  = os.path.join(_base_dir, "data", "sims")
+        _cfg_path  = os.path.join(_base_dir, "simulation", "sim_config.yaml")
+
+        # Load sim config
+        with open(_cfg_path) as f:
+            import yaml as _yaml
+            sim_cfg = _yaml.safe_load(f) or {}
+
+        # Discover all sim IDs dynamically
+        all_sim_ids = [k for k, v in sim_cfg.items()
+                       if not str(k).startswith("_") and isinstance(v, dict)]
+
+        # Search all sims for matching trades
+        matches = []  # list of (sim_id, trade_dict, profile)
+        today_symbols = set()
+
+        for sid in all_sim_ids:
+            path = os.path.join(_sims_dir, f"{sid}.json")
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            profile = sim_cfg.get(sid, {})
+            for t in (data.get("trade_log") or []):
+                opt = (t.get("option_symbol") or "").upper()
+                today_symbols.add(opt)
+                if opt == symbol_upper:
+                    matches.append((sid, t, profile))
+
+        if not matches:
+            # Fuzzy: find symbols with same ticker+expiry prefix
+            prefix = symbol_upper[:9] if len(symbol_upper) >= 9 else symbol_upper
+            similar = sorted({s for s in today_symbols if s.startswith(prefix)})[:8]
+            suggestion = (f"\nSimilar contracts: `{'`, `'.join(similar)}`" if similar
+                          else "\nNo similar contracts found in trade logs.")
+            await ctx.send(f"No trades found for `{symbol_upper}`.{suggestion}")
+            return
+
+        # Candle window helper — symbol-aware via get_candle_data
+        import pandas as _pd
+        from core.data_service import get_candle_data as _get_candle_data
+
+        def _get_window(entry_str, exit_str, symbol="SPY"):
+            try:
+                e_dt = _pd.to_datetime(entry_str).tz_localize(None) if hasattr(_pd.to_datetime(entry_str), "tz") and _pd.to_datetime(entry_str).tzinfo else _pd.to_datetime(entry_str)
+                x_dt = _pd.to_datetime(exit_str).tz_localize(None)  if exit_str and hasattr(_pd.to_datetime(exit_str), "tz") and _pd.to_datetime(exit_str).tzinfo  else (_pd.to_datetime(exit_str) if exit_str else e_dt)
+                # Strip tz if present (get_candle_data expects naive ET)
+                if hasattr(e_dt, "tzinfo") and e_dt.tzinfo:
+                    import pytz as _pytz
+                    e_dt = e_dt.astimezone(_pytz.timezone("US/Eastern")).replace(tzinfo=None)
+                if hasattr(x_dt, "tzinfo") and x_dt.tzinfo:
+                    import pytz as _pytz
+                    x_dt = x_dt.astimezone(_pytz.timezone("US/Eastern")).replace(tzinfo=None)
+                start = e_dt.to_pydatetime() - timedelta(minutes=30)
+                end   = x_dt.to_pydatetime() + timedelta(minutes=10)
+                return _get_candle_data(symbol, start, end)
+            except Exception:
+                return []
+
+        # Send one embed per matching trade
+        for (sid, trade, profile) in matches:
+            pnl_d    = float(trade.get("realized_pnl_dollars") or 0)
+            pnl_pct  = round((trade.get("realized_pnl_pct") or 0) * 100, 1)
+            is_win   = pnl_d >= 0
+            direction = (trade.get("direction") or "").upper()
+            entry_p  = trade.get("entry_price")
+            exit_p   = trade.get("exit_price")
+            signal   = trade.get("signal_mode") or profile.get("signal_mode", "—")
+            exit_rsn = trade.get("exit_reason", "—")
+            trade_id = trade.get("trade_id", "")
+
+            # Format times
+            def _fmt_t(ts):
+                if not ts: return "—"
+                try:
+                    from datetime import datetime as _dt
+                    return _dt.fromisoformat(ts).strftime("%H:%M ET")
+                except Exception: return str(ts)[:16]
+
+            color = 0x3fb950 if is_win else 0xf85149
+            pnl_sign = "+" if pnl_d >= 0 else ""
+
+            # Resolve underlying symbol from trade dict or OCC prefix
+            _opt_sym_ask = (trade.get("option_symbol") or "").upper()
+            _undl = trade.get("symbol") or ""
+            if not _undl:
+                _m = re.match(r'^([A-Z]{1,6})', _opt_sym_ask)
+                _undl = _m.group(1) if _m else "SPY"
+
+            # Try to get cached narrative or generate new one
+            candle_data = _get_window(trade.get("entry_time",""), trade.get("exit_time",""), symbol=_undl)
+            narrative = None
+            try:
+                from analytics.trade_narrator import narrate_trade
+                narrative = await narrate_trade(trade, candle_data, profile)
+            except Exception:
+                pass
+
+            grade   = narrative.get("grade", "") if narrative else ""
+            summary = narrative.get("strategy_summary", "") if narrative else ""
+            tags    = narrative.get("tags", []) if narrative else []
+
+            # Build embed
+            title = f"📊 Trade Analysis: {sid} — {symbol_upper}"
+            embed = discord.Embed(title=title, color=color)
+            embed.add_field(name="Underlying", value=_undl or "—",     inline=True)
+            embed.add_field(name="Strategy",   value=signal,           inline=True)
+            embed.add_field(name="Direction",  value=direction or "—", inline=True)
+            embed.add_field(name="Grade",      value=grade or "—",     inline=True)
+            embed.add_field(name="📥 Entry",
+                            value=f"${entry_p:.4f}" if entry_p else "—",
+                            inline=True)
+            embed.add_field(name="📤 Exit",
+                            value=f"${exit_p:.4f} ({exit_rsn})" if exit_p else "—",
+                            inline=True)
+            embed.add_field(name="💰 P&L",
+                            value=f"`{pnl_sign}${pnl_d:.2f} ({pnl_sign}{pnl_pct}%)`",
+                            inline=True)
+            embed.add_field(name="⏱️ Time",
+                            value=f"{_fmt_t(trade.get('entry_time'))} → {_fmt_t(trade.get('exit_time'))}",
+                            inline=True)
+            if tags:
+                embed.add_field(name="🏷️ Tags", value=", ".join(tags), inline=False)
+            if summary:
+                embed.description = f"**{summary}**"
+
+            _append_footer(embed)
+
+            # Generate chart and attach
+            chart_file = None
+            try:
+                from charts.trade_chart import generate_trade_chart
+                png = generate_trade_chart(trade, candle_data, narrative=narrative,
+                                           size=(1000, 500))
+                if isinstance(png, bytes):
+                    import io as _io
+                    chart_file = discord.File(_io.BytesIO(png), filename="trade_chart.png")
+                    embed.set_image(url="attachment://trade_chart.png")
+            except Exception:
+                pass
+
+            if chart_file:
+                await ctx.send(embed=embed, file=chart_file)
+            else:
+                await ctx.send(embed=embed)
+
+            # Follow-up message with full narrative text (avoid embed field limits)
+            if narrative:
+                entry_r  = narrative.get("entry_reasoning", "")
+                exit_r   = narrative.get("exit_reasoning", "")
+                outcome  = narrative.get("outcome_analysis", "")
+                parts = []
+                if entry_r:  parts.append(f"**📥 Entry Reasoning**\n{entry_r}")
+                if exit_r:   parts.append(f"**📤 Exit Reasoning**\n{exit_r}")
+                if outcome:  parts.append(f"**📊 Outcome Analysis**\n{outcome}")
+                if parts:
+                    followup = "\n\n".join(parts)
+                    if len(followup) > 1950:
+                        followup = followup[:1950] + "…"
+                    await ctx.send(followup)
+            elif not narrative or narrative.get("entry_reasoning") == "Analysis unavailable — GPT service unreachable or API key not set.":
+                await ctx.send("*AI analysis unavailable — OPENAI_API_KEY not set or GPT call failed.*")
+
+    except Exception as e:
+        await ctx.send(f"❌ Error running !ask: {e}")
 
 bot.run(DISCORD_TOKEN)
