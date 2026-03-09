@@ -25,6 +25,9 @@ class SimPortfolio:
         self.schema_version = 1
         self.created_at = self._now_et_iso()
         self.last_updated_at = self._now_et_iso()
+        # Anti-overtrading state
+        self.last_entry_time_iso: str | None = None
+        self.last_stop_exit_time_iso: str | None = None
 
     def _now_et_iso(self) -> str:
         eastern = pytz.timezone("US/Eastern")
@@ -45,6 +48,8 @@ class SimPortfolio:
         self.schema_version = 1
         self.created_at = self._now_et_iso()
         self.last_updated_at = self.created_at
+        self.last_entry_time_iso = None
+        self.last_stop_exit_time_iso = None
 
     def _path(self) -> str:
         os.makedirs(SIM_DIR, exist_ok=True)
@@ -76,6 +81,8 @@ class SimPortfolio:
         self.created_at = data.get("created_at", self._now_et_iso())
         self.last_updated_at = data.get("last_updated_at", self.created_at)
         self.profile_snapshot = data.get("profile_snapshot", {})
+        self.last_entry_time_iso = data.get("last_entry_time_iso")
+        self.last_stop_exit_time_iso = data.get("last_stop_exit_time_iso")
         self.reset_daily_if_needed()
 
     def save(self) -> None:
@@ -96,6 +103,8 @@ class SimPortfolio:
             "daily_loss": self.daily_loss,
             "last_trade_day": self.last_trade_day,
             "peak_balance": self.peak_balance,
+            "last_entry_time_iso": self.last_entry_time_iso,
+            "last_stop_exit_time_iso": self.last_stop_exit_time_iso,
         }
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -149,6 +158,34 @@ class SimPortfolio:
             if total_exposure >= exposure_cap:
                 return False, "exposure_cap"
 
+        # Minimum seconds between any entries
+        min_between = self.profile.get("min_seconds_between_entries")
+        if min_between is not None and self.last_entry_time_iso is not None:
+            try:
+                eastern = pytz.timezone("US/Eastern")
+                last_entry_dt = datetime.fromisoformat(self.last_entry_time_iso)
+                if last_entry_dt.tzinfo is None:
+                    last_entry_dt = eastern.localize(last_entry_dt)
+                elapsed = (datetime.now(eastern) - last_entry_dt).total_seconds()
+                if elapsed < float(min_between):
+                    return False, "min_seconds_between_entries"
+            except Exception:
+                pass
+
+        # Cooldown after a stop-loss exit
+        cooldown = self.profile.get("cooldown_after_stop_seconds")
+        if cooldown is not None and self.last_stop_exit_time_iso is not None:
+            try:
+                eastern = pytz.timezone("US/Eastern")
+                last_stop_dt = datetime.fromisoformat(self.last_stop_exit_time_iso)
+                if last_stop_dt.tzinfo is None:
+                    last_stop_dt = eastern.localize(last_stop_dt)
+                elapsed = (datetime.now(eastern) - last_stop_dt).total_seconds()
+                if elapsed < float(cooldown):
+                    return False, "cooldown_after_stop"
+            except Exception:
+                pass
+
         return True, ""
 
     def record_open(self, trade: dict) -> None:
@@ -183,6 +220,7 @@ class SimPortfolio:
         except (TypeError, ValueError):
             pass
         self.open_trades.append(trade)
+        self.last_entry_time_iso = self._now_et_iso()
 
     def record_close(self, trade_id: str, exit_data: dict) -> None:
         trade = None
@@ -248,6 +286,11 @@ class SimPortfolio:
         trade_record["realized_pnl_pct"] = realized_pnl_pct
 
         self.trade_log.append(trade_record)
+
+        # Track stop-exit timestamp for cooldown guard
+        exit_reason = exit_data.get("exit_reason", "")
+        if isinstance(exit_reason, str) and "stop" in exit_reason.lower():
+            self.last_stop_exit_time_iso = self._now_et_iso()
 
         # Persist to SQLite trade journal (best-effort, never raises)
         try:

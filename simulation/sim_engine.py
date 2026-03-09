@@ -13,7 +13,7 @@ from simulation.sim_contract import select_sim_contract, select_sim_contract_wit
 from simulation.sim_live_router import sim_live_router, manage_live_exit
 from execution.option_executor import get_option_price
 from simulation.sim_watcher import _get_time_of_day_bucket
-from simulation.sim_signals import derive_sim_signal
+from simulation.sim_signals import derive_sim_signal, get_signal_family
 from simulation.sim_ml import predict_sim_trade, record_sim_trade_close
 from analytics.sim_features import compute_sim_features
 from core.md_state import is_md_enabled
@@ -67,6 +67,27 @@ def _count_directional_exposure(direction: str) -> int:
     return count
 
 
+def _count_family_directional_exposure(family: str, direction: str) -> int:
+    """Count sims in the same strategy family that have an open trade in the given direction."""
+    count = 0
+    for sid, prof in _PROFILES.items():
+        if str(sid).startswith("_"):
+            continue
+        mode = str(prof.get("signal_mode", "")).upper()
+        if get_signal_family(mode) != family:
+            continue
+        try:
+            s = SimPortfolio(sid, prof)
+            s.load()
+            for t in s.open_trades:
+                if isinstance(t, dict) and t.get("direction") == direction:
+                    count += 1
+                    break
+        except Exception:
+            continue
+    return count
+
+
 async def run_sim_entries(
     df,
     regime: str | None = None
@@ -90,6 +111,19 @@ async def run_sim_entries(
             underlying_price = None
 
             effective_profile = dict(profile)
+
+            # ── 0. Blocked-session gate ────────────────────────────────
+            blocked_sessions = profile.get("blocked_sessions")
+            if blocked_sessions and time_of_day_bucket:
+                if isinstance(blocked_sessions, list) and time_of_day_bucket in blocked_sessions:
+                    results.append({
+                        "sim_id": sim_id,
+                        "status": "skipped",
+                        "reason": "blocked_session",
+                        "session": time_of_day_bucket,
+                        "signal_mode": profile.get("signal_mode"),
+                    })
+                    continue
 
             # ── 1. Derive signal FIRST ──────────────────────────────
             feature_snapshot = None
@@ -126,6 +160,7 @@ async def run_sim_entries(
                     "close_z_min": profile.get("close_z_min"),
                 },
                 feature_snapshot=feature_snapshot,
+                profile=profile,
             )
             if isinstance(sig, tuple):
                 if len(sig) >= 2:
@@ -187,6 +222,33 @@ async def run_sim_entries(
                         "signal_mode": signal_mode,
                     })
                     continue
+
+            # ── Cross-sim family crowding guard ───────────────────────
+            if global_config.get("cross_sim_guard_enabled", False):
+                max_family_concurrent = None
+                try:
+                    v = global_config.get("max_family_concurrent")
+                    if v is not None:
+                        max_family_concurrent = int(v)
+                except (TypeError, ValueError):
+                    pass
+                if max_family_concurrent is not None:
+                    sig_family = get_signal_family(str(signal_mode).upper())
+                    if sig_family not in ("unknown", "adaptive"):
+                        family_count = _count_family_directional_exposure(sig_family, direction)
+                        if family_count >= max_family_concurrent:
+                            results.append({
+                                "sim_id": sim_id,
+                                "status": "skipped",
+                                "reason": "family_crowding_limit",
+                                "family": sig_family,
+                                "direction": direction,
+                                "family_count": family_count,
+                                "max_allowed": max_family_concurrent,
+                                "entry_context": entry_context,
+                                "signal_mode": signal_mode,
+                            })
+                            continue
 
             # ── 5. ML prediction with real direction/price ─────────
             ml_context = {
@@ -505,6 +567,9 @@ async def run_sim_entries(
             trade["regime_at_entry"] = regime
             trade["time_of_day_bucket"] = time_of_day_bucket
             trade["signal_mode"] = signal_mode
+            trade["strategy_family"] = get_signal_family(str(signal_mode).upper())
+            if isinstance(signal_meta, dict):
+                trade["structure_score"] = signal_meta.get("structure_score")
             trade["entry_context"] = entry_context
             # greeks at entry (from contract snapshot)
             trade["iv_at_entry"] = contract.get("iv")

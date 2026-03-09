@@ -9,6 +9,7 @@ config.local.*
 
 # ── Data files (may contain account info / trade history) ────────
 data/account.json
+data/account.json.bak*
 data/heartbeat.json
 data/trade_journal.db
 data/trade_journal.db-wal
@@ -18,6 +19,9 @@ data/sims/*.json
 data/predictions.csv
 data/conviction_expectancy.csv
 data/qqq_1m.csv
+
+# ── Cloudflare tunnel binary ──────────────────────────────────────
+cloudflared
 
 # ── Logs ─────────────────────────────────────────────────────────
 logs/

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPY Sim Classroom</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=VT323&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════ NOTICE BOARD (top bar) -->
+<div class="notice-bar" id="status-bar">
+  <div class="notice-left">
+    <span class="bot-dot" id="bot-dot"></span>
+    <span class="notice-text" id="bot-status-text">Loading…</span>
+  </div>
+  <div class="notice-center">
+    <span class="room-title">📚 SPY SIM CLASSROOM</span>
+  </div>
+  <div class="notice-right">
+    <span class="clock-badge" id="et-clock"></span>
+    <span class="notice-text" id="market-status"></span>
+    <button class="pin-btn" onclick="refreshAll()" title="Refresh">↺</button>
+    <span class="notice-text small" id="last-refresh"></span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ FRONT WALL: CHALKBOARD -->
+<div class="board-area">
+  <div class="board-frame">
+    <div class="chalkboard">
+      <div class="chalk-header">
+        <span class="chalk-title">SPY · 1-MIN CHART · LAST 60 BARS</span>
+        <div class="chalk-prediction" id="pred-badge">
+          <span class="chalk-label">AI SIGNAL →</span>
+          <span class="chalk-dir" id="pred-dir">——</span>
+          <span class="chalk-conf" id="pred-conf"></span>
+          <span class="chalk-meta" id="pred-meta"></span>
+        </div>
+      </div>
+      <div class="chalk-chart-area">
+        <div id="apex-chart"></div>
+      </div>
+      <div class="chalk-footer">
+        <span class="chalk-stat"><span class="chalk-stat-label">PRICE</span> <span id="chart-price">——</span></span>
+        <span class="chalk-stat" id="chart-range"></span>
+        <span class="chalk-stat" id="pred-checked"></span>
+      </div>
+    </div>
+    <div class="board-tray">
+      <div class="chalk-piece"></div>
+      <div class="chalk-piece sm"></div>
+      <div class="chalk-piece"></div>
+      <div class="eraser"></div>
+    </div>
+  </div>
+  <div class="podium">
+    <div class="podium-top"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ TEACHER'S DESK -->
+<div id="teacher-panel"></div>
+
+<!-- ══════════════════════════════════════ CLASSROOM FLOOR -->
+<div class="classroom-floor">
+  <div class="floor-header">
+    <span class="roster-label">CLASS ROSTER</span>
+    <span class="roster-count" id="sim-count"></span>
+  </div>
+  <div class="seating-area" id="desks-grid">
+    <div class="loading-msg">Loading students…</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ SIM INSPECTOR DRAWER -->
+<div class="sim-drawer" id="sim-drawer">
+  <div class="drawer-header">
+    <div class="drawer-title-block">
+      <span class="drawer-sim-id" id="drawer-sim-id">—</span>
+      <span class="drawer-sim-name" id="drawer-sim-name"></span>
+    </div>
+    <div class="drawer-header-right">
+      <span id="drawer-signal-badge"></span>
+      <button class="drawer-close" onclick="closeDrawer()">✕</button>
+    </div>
+  </div>
+  <div class="drawer-tabs">
+    <button class="dtab active" onclick="switchDrawerTab('overview',this)">Overview</button>
+    <button class="dtab" onclick="switchDrawerTab('trade',this)">Active Trade</button>
+    <button class="dtab" onclick="switchDrawerTab('history',this)">History</button>
+    <button class="dtab" onclick="switchDrawerTab('profile',this)">Profile</button>
+  </div>
+  <div class="drawer-panel" id="dpanel-overview"></div>
+  <div class="drawer-panel hidden" id="dpanel-trade"></div>
+  <div class="drawer-panel hidden" id="dpanel-history"></div>
+  <div class="drawer-panel hidden" id="dpanel-profile"></div>
+</div>
+<div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
+
+<script src="/static/main.js"></script>
+</body>
+</html>

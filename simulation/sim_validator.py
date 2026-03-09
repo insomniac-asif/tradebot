@@ -4,6 +4,7 @@ import yaml
 from datetime import datetime
 
 from core.data_service import get_market_dataframe
+from simulation.sim_signals import _KNOWN_SIGNAL_MODES
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "simulation", "sim_config.yaml")
@@ -103,6 +104,14 @@ def _validate_sim(sim_id: str, profile: dict, df=None) -> list[str]:
     except Exception:
         errors.append("cutoff_format_invalid")
 
+    # entry_start_time_et format (optional field)
+    entry_start = profile.get("entry_start_time_et")
+    if entry_start is not None:
+        try:
+            datetime.strptime(str(entry_start), "%H:%M")
+        except Exception:
+            errors.append("entry_start_time_format_invalid")
+
     # Feature gating: if enabled, require indicators.
     if profile.get("features_enabled"):
         if df is None:
@@ -117,12 +126,21 @@ def _validate_sim(sim_id: str, profile: dict, df=None) -> list[str]:
                     errors.append(f"features_missing:{col}")
 
     mode = str(profile.get("signal_mode", "")).upper()
+
+    # Unknown signal mode detection
+    if mode and mode not in _KNOWN_SIGNAL_MODES:
+        errors.append(f"unknown_signal_mode:{mode}")
+
     if mode == "ORB_BREAKOUT":
         if not profile.get("features_enabled"):
             errors.append("orb_requires_features")
         orb_minutes = _safe_float(profile.get("orb_minutes"))
         if orb_minutes is None or not (5 <= orb_minutes <= 120):
             errors.append("orb_minutes_invalid")
+
+    if mode == "EXTREME_EXTENSION_FADE":
+        if not profile.get("features_enabled"):
+            errors.append("extreme_extension_fade_requires_features")
 
     return errors
 
