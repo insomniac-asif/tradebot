@@ -160,6 +160,15 @@ def _parse_occ(option_symbol: str) -> dict:
 
 _ALL_SESSIONS = {"PREMARKET", "OPENING_HOUR", "MIDDAY", "POWER_HOUR", "CLOSING"}
 
+def _get_account_phase(balance: float) -> str:
+    """Return MICRO / EARLY_GROWTH / SCALING based on current balance."""
+    try:
+        from simulation.sim_account_mode import get_account_phase
+        return get_account_phase(balance)
+    except Exception:
+        return "UNKNOWN"
+
+
 def _is_sim_disabled(profile: dict) -> bool:
     """Return True if a sim has all trading sessions blocked (effectively disabled)."""
     if profile.get("enabled") is False:
@@ -306,6 +315,16 @@ def _compute_stats(sim_id: str, data: dict, profile: dict) -> dict:
         "session": session,
         "streak": {"type": streak_type, "count": streak_count} if streak_type else None,
         "is_disabled": _is_sim_disabled(profile),
+        # Small-account compounding fields
+        "is_dead": bool(data.get("is_dead", False)),
+        "death_time": data.get("death_time"),
+        "death_balance": data.get("death_balance"),
+        "reset_count": int(data.get("reset_count", 0)),
+        "account_phase": _get_account_phase(balance),
+        "peak_balance": round(float(data.get("peak_balance", balance_start)), 2),
+        "growth_from_start_pct": round(pnl_pct * 100, 2),
+        "small_account_mode": bool(profile.get("small_account_mode", False)),
+        "death_threshold": float(profile.get("death_threshold", 25.0)),
     }
 
 

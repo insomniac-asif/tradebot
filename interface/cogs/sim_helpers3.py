@@ -171,16 +171,34 @@ async def handle_simreset(ctx, sim_id):
         if not target_keys: await _send_embed(ctx, "No sims matched your reset request."); return
         results = [(k, *_reset_one(k, profiles.get(k, {}))) for k in target_keys]
         title = f"\u2705 Sim Reset \u2014 {sim_key}" if sim_key in {"ALL", "LIVE"} else f"\u2705 Sim Reset \u2014 {target_keys[0]}"
-        embed = discord.Embed(title=title, color=0x2ECC71)
-        ok_keys = [k for k, ok, _ in results if ok]; fail_keys = [k for k, ok, _ in results if not ok]
-        for k, ok, status in results:
+        ok_keys   = [k for k, ok, _ in results if ok]
+        fail_keys = [k for k, ok, _ in results if not ok]
+        embed = discord.Embed(title=title, color=0x2ECC71 if not fail_keys else 0xE74C3C)
+        if len(results) == 1:
+            # Single-sim reset: one descriptive field
+            k, ok, _ = results[0]
             sb = profiles.get(k, {}).get("balance_start", 0.0)
-            embed.add_field(name=_add_field_icons(k), value=f"{'Reset to starting balance.' if ok else 'Reset failed.'} Start: ${float(sb):,.2f}", inline=False)
-        if len(results) > 1:
-            parts = []
-            if ok_keys: parts.append(f"Reset: {', '.join(ok_keys)}")
-            if fail_keys: parts.append(f"Failed: {', '.join(fail_keys)}")
-            if parts: embed.add_field(name=_add_field_icons("Summary"), value=" | ".join(parts), inline=False)
+            embed.add_field(
+                name=_add_field_icons(k),
+                value=f"{'Reset to starting balance.' if ok else 'Reset failed.'} Start: ${float(sb):,.2f}",
+                inline=False,
+            )
+        else:
+            # Multi-sim reset: compact summary to stay under Discord's 25-field limit
+            sb_sample = profiles.get(target_keys[0], {}).get("balance_start", 0.0)
+            embed.add_field(
+                name=_add_field_icons("Summary"),
+                value=f"Reset {len(ok_keys)}/{len(results)} sims to ${float(sb_sample):,.2f} starting balance.",
+                inline=False,
+            )
+            if ok_keys:
+                # Chunk into groups of ~15 to avoid value length limits
+                chunk_size = 15
+                for i in range(0, len(ok_keys), chunk_size):
+                    chunk = ok_keys[i:i+chunk_size]
+                    embed.add_field(name="\u2705 Reset OK", value="  ".join(chunk), inline=False)
+            if fail_keys:
+                embed.add_field(name="\u274c Failed", value="  ".join(fail_keys), inline=False)
         _append_footer(embed); await ctx.send(embed=embed)
     except Exception:
         logging.exception("simreset_error")

@@ -419,6 +419,7 @@ async def _execute_paper_entry(
     bid = contract["bid"]
     ask = contract["ask"]
 
+    # Probe fill at qty=1 to discover the realistic fill_price with slippage
     fill_result, err = sim_try_fill(
         contract["option_symbol"], qty=1, bid=bid, ask=ask, profile=profile, side="entry"
     )
@@ -430,8 +431,29 @@ async def _execute_paper_entry(
         return True
 
     fill_price = fill_result["fill_price"]
-    risk_dollars = sim_compute_risk_dollars(sim.balance, profile)
-    qty = max(1, math.floor(risk_dollars / (fill_price * 100)))
+
+    # ── Small-account sizing ──────────────────────────────────────────────
+    # Use the small-account module when the profile enables small_account_mode,
+    # or when balance_start indicates a small account (< $5,000).
+    # Falls back to the legacy risk_dollars / fill_price formula otherwise.
+    _use_small = (
+        profile.get("small_account_mode", False)
+        or float(profile.get("balance_start", 25000)) < 5000
+    )
+    if _use_small:
+        from simulation.sim_account_mode import compute_small_account_qty
+        qty, risk_dollars, block_reason = compute_small_account_qty(
+            sim.balance, fill_price, profile
+        )
+        if block_reason is not None:
+            results.append({
+                "sim_id": sim_id, "status": "skipped", "reason": block_reason,
+                "entry_context": entry_context, "signal_mode": signal_mode,
+            })
+            return True
+    else:
+        risk_dollars = sim_compute_risk_dollars(sim.balance, profile)
+        qty = max(1, math.floor(risk_dollars / (fill_price * 100)))
 
     fill_result, err = sim_try_fill(
         contract["option_symbol"], qty=qty, bid=bid, ask=ask, profile=profile, side="entry"

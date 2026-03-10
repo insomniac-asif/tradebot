@@ -108,26 +108,34 @@ async def handle_simstats(ctx, sim_id):
             embed.set_footer(text=footer)
             _append_footer(embed)
             await ctx.send(embed=embed); return
-        # summary for all sims
-        embed = discord.Embed(title="\U0001f4ca Sim Overview \u2014 All Portfolios", color=0x3498DB)
+        # summary for all sims — split into pages of 20 to stay under Discord's 25-field limit
+        sim_keys = list(profiles.keys())
         max_abs_pnl = 0.0
-        for sk, pr in profiles.items():
-            try:
-                sp = _sim_path(sk)
-                if not os.path.exists(sp): continue
-                sim = SimPortfolio(sk, pr); sim.load()
-                tl = sim.trade_log if isinstance(sim.trade_log, list) else []
-                pvs = [_safe_float(t.get("realized_pnl_dollars")) for t in tl]
-                pvs = [p for p in pvs if p is not None]
-                tp = sum(pvs) if pvs else 0.0
-                max_abs_pnl = max(max_abs_pnl, abs(tp))
-            except Exception: continue
+        sim_rows = []
         for sk, pr in profiles.items():
             try:
                 sp = _sim_path(sk)
                 if not os.path.exists(sp):
-                    embed.add_field(name=sk, value="No data", inline=False); continue
+                    sim_rows.append((sk, pr, None)); continue
                 sim = SimPortfolio(sk, pr); sim.load()
+                tl = sim.trade_log if isinstance(sim.trade_log, list) else []
+                pvs = [_safe_float(t.get("realized_pnl_dollars")) for t in tl if _safe_float(t.get("realized_pnl_dollars")) is not None]
+                tp = sum(pvs) if pvs else 0.0
+                max_abs_pnl = max(max_abs_pnl, abs(tp))
+                sim_rows.append((sk, pr, sim))
+            except Exception:
+                sim_rows.append((sk, pr, None))
+        PAGE_SIZE = 20
+        pages = [sim_rows[i:i+PAGE_SIZE] for i in range(0, len(sim_rows), PAGE_SIZE)]
+        total_pages = len(pages)
+        for page_idx, page_rows in enumerate(pages):
+            title = f"\U0001f4ca Sim Overview \u2014 All Portfolios"
+            if total_pages > 1:
+                title += f" ({page_idx+1}/{total_pages})"
+            embed = discord.Embed(title=title, color=0x3498DB)
+            for sk, pr, sim in page_rows:
+                if sim is None:
+                    embed.add_field(name=sk, value="No data", inline=False); continue
                 tl = sim.trade_log if isinstance(sim.trade_log, list) else []
                 tt = len(tl); wins = 0; pvs = []; ec = {}
                 for t in tl:
@@ -154,10 +162,9 @@ async def handle_simstats(ctx, sim_id):
                 ]
                 if gate_line: lines.append(gate_line)
                 embed.add_field(name=sk, value=ab(*lines), inline=False)
-            except Exception:
-                embed.add_field(name=sk, value="No data", inline=False)
-        _append_footer(embed)
-        await ctx.send(embed=embed)
+            if page_idx == total_pages - 1:
+                _append_footer(embed)
+            await ctx.send(embed=embed)
     except Exception:
         logging.exception("simstats_error")
         await _send_embed(ctx, "simstats failed due to an internal error.")

@@ -28,6 +28,11 @@ class SimPortfolio:
         # Anti-overtrading state
         self.last_entry_time_iso: str | None = None
         self.last_stop_exit_time_iso: str | None = None
+        # Small-account compounding state
+        self.is_dead: bool = False
+        self.death_time: str | None = None
+        self.death_balance: float | None = None
+        self.reset_count: int = 0
 
     def _now_et_iso(self) -> str:
         eastern = pytz.timezone("US/Eastern")
@@ -50,6 +55,11 @@ class SimPortfolio:
         self.last_updated_at = self.created_at
         self.last_entry_time_iso = None
         self.last_stop_exit_time_iso = None
+        # Small-account compounding state
+        self.is_dead = False
+        self.death_time = None
+        self.death_balance = None
+        self.reset_count = 0
 
     def _path(self) -> str:
         os.makedirs(SIM_DIR, exist_ok=True)
@@ -83,6 +93,11 @@ class SimPortfolio:
         self.profile_snapshot = data.get("profile_snapshot", {})
         self.last_entry_time_iso = data.get("last_entry_time_iso")
         self.last_stop_exit_time_iso = data.get("last_stop_exit_time_iso")
+        # Small-account compounding state
+        self.is_dead = bool(data.get("is_dead", False))
+        self.death_time = data.get("death_time")
+        self.death_balance = data.get("death_balance")
+        self.reset_count = int(data.get("reset_count", 0))
         self.reset_daily_if_needed()
 
     def save(self) -> None:
@@ -105,6 +120,11 @@ class SimPortfolio:
             "peak_balance": self.peak_balance,
             "last_entry_time_iso": self.last_entry_time_iso,
             "last_stop_exit_time_iso": self.last_stop_exit_time_iso,
+            # Small-account compounding state
+            "is_dead": self.is_dead,
+            "death_time": self.death_time,
+            "death_balance": self.death_balance,
+            "reset_count": self.reset_count,
         }
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -133,6 +153,10 @@ class SimPortfolio:
             self.save()
 
     def can_trade(self) -> tuple[bool, str]:
+        # Dead sims may still exit open positions but must not open new ones
+        if getattr(self, "is_dead", False):
+            return False, "sim_dead"
+
         daily_loss_limit_pct = self.profile.get("daily_loss_limit_pct")
         if daily_loss_limit_pct is not None:
             daily_loss_limit = self.balance * float(daily_loss_limit_pct)
@@ -285,6 +309,11 @@ class SimPortfolio:
         trade_record["realized_pnl_dollars"] = realized_pnl_dollars
         trade_record["realized_pnl_pct"] = realized_pnl_pct
 
+        # Stamp balance snapshot onto the trade record for equity-curve analysis
+        trade_record["balance_after_trade"]      = round(self.balance, 4)
+        trade_record["peak_balance_after_trade"] = round(self.peak_balance, 4)
+        trade_record["account_phase"]            = self._get_phase()
+
         self.trade_log.append(trade_record)
 
         # Track stop-exit timestamp for cooldown guard
@@ -292,12 +321,26 @@ class SimPortfolio:
         if isinstance(exit_reason, str) and "stop" in exit_reason.lower():
             self.last_stop_exit_time_iso = self._now_et_iso()
 
+        # Check for account death (small-account mode)
+        try:
+            from simulation.sim_account_mode import check_and_handle_death
+            check_and_handle_death(self)
+        except Exception:
+            pass
+
         # Persist to SQLite trade journal (best-effort, never raises)
         try:
             from core.trade_db import insert_trade
             insert_trade(trade_record)
         except Exception:
             pass
+
+    def _get_phase(self) -> str:
+        try:
+            from simulation.sim_account_mode import get_account_phase
+            return get_account_phase(self.balance)
+        except Exception:
+            return "UNKNOWN"
 
     def update_open_trade_excursion(self, trade_id: str, current_price: float) -> None:
         try:

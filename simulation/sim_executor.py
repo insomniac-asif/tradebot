@@ -39,7 +39,10 @@ def sim_try_fill(
 
 def sim_compute_risk_dollars(balance: float, profile: dict) -> float:
     risk = balance * float(profile["risk_per_trade_pct"])
-    return max(risk, 50.0)
+    # Floor scales with balance: minimum 1 % of balance, hard minimum $3.
+    # Replaces the old hard $50 floor that was a large percentage of a small account.
+    min_floor = max(3.0, balance * 0.01)
+    return max(risk, min_floor)
 
 
 def sim_should_trade_now(profile: dict) -> tuple[bool, str]:

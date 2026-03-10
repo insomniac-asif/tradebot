@@ -35,8 +35,10 @@ data/strategy_performance.json
 charts/*.png
 charts/*.jpg
 
-# ── Cloudflare tunnel binary ──────────────────────────────────────
+# ── Cloudflare tunnel ─────────────────────────────────────────────
 cloudflared
+cloudflared-tunnel.log
+~/.cloudflared/
 
 # ── Logs ─────────────────────────────────────────────────────────
 logs/
