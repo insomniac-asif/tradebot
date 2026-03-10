@@ -424,19 +424,45 @@ async def get_chart(symbol: str = "SPY", bars: int = 60):
     import asyncio
     sym = symbol.upper()
     try:
-        from core.data_service import get_market_dataframe, _fetch_from_alpaca, _prepare_dataframe
-        # Always fetch fresh intraday data from Alpaca for charts (never use stale CSV)
+        from core.data_service import get_market_dataframe, _fetch_from_alpaca, _prepare_dataframe, _load_symbol_registry
         if sym == "SPY":
             df = await asyncio.to_thread(get_market_dataframe)
         else:
+            # Always read CSV first (like SPY), supplement with Alpaca when market open
+            df = None
+            registry = _load_symbol_registry()
+            csv_path = registry.get(sym, {}).get("data_file")
+            if csv_path:
+                _abs = os.path.join(BASE_DIR, csv_path)
+                if os.path.exists(_abs):
+                    try:
+                        df = pd.read_csv(_abs, parse_dates=[0])
+                    except Exception:
+                        df = None
+            # Try live Alpaca data and merge with CSV
             raw = await asyncio.to_thread(_fetch_from_alpaca, sym)
-            df = _prepare_dataframe(raw) if raw is not None and not raw.empty else None
+            fresh = _prepare_dataframe(raw) if raw is not None and not raw.empty else None
+            if fresh is not None and not fresh.empty:
+                if df is not None and not df.empty:
+                    # Supplement: concat CSV + fresh, drop duplicates on timestamp
+                    fresh_reset = fresh.reset_index()
+                    df_all = pd.concat([df, fresh_reset], ignore_index=True)
+                    _tc = next((c for c in df_all.columns if "time" in c.lower() or "date" in c.lower()), None)
+                    if _tc:
+                        df_all[_tc] = pd.to_datetime(df_all[_tc], errors="coerce")
+                        df_all = df_all.drop_duplicates(subset=[_tc], keep="last").sort_values(_tc)
+                    df = df_all
+                else:
+                    df = fresh
 
         if df is None or df.empty:
             return {"candles": [], "symbol": sym, "error": f"no_data_{sym}"}
 
-        # df has a DatetimeIndex (set by _prepare_dataframe); reset for easier handling
+        # df may have a DatetimeIndex (from _prepare_dataframe) or plain RangeIndex (CSV); reset for easier handling
         df = df.reset_index()
+        # Drop spurious 'index' column from RangeIndex reset
+        if "index" in df.columns and df["index"].dtype != "datetime64[ns]" and not hasattr(df["index"].dtype, "tz"):
+            df = df.drop(columns=["index"])
         ts_col = next((c for c in df.columns if "time" in c.lower() or "date" in c.lower()), None)
         if ts_col is None:
             return {"candles": [], "symbol": sym, "error": "no_timestamp_col"}
@@ -451,15 +477,22 @@ async def get_chart(symbol: str = "SPY", bars: int = 60):
         else:
             df[ts_col] = df[ts_col].dt.tz_convert(_et)
 
-        # Filter to today's session only (ET date) so tail(60) doesn't span multiple days
+        # Filter to the most recent session so tail(60) doesn't span multiple days/gaps
         _now_et = pd.Timestamp.now(tz=_et)
         _today_et = _now_et.date()
         _today_start = pd.Timestamp(_today_et, tz=_et)
         _today_end   = _today_start + pd.Timedelta(days=1)
         df_today = df[(df[ts_col] >= _today_start) & (df[ts_col] < _today_end)]
-        # Fall back to full df if today has fewer than 10 bars (pre-market / data not yet loaded)
         if len(df_today) >= 10:
             df = df_today
+        else:
+            # Market closed or no data today — use the most recent trading day
+            _last_date = df[ts_col].dt.date.iloc[-1]
+            _last_start = pd.Timestamp(_last_date, tz=_et)
+            _last_end   = _last_start + pd.Timedelta(days=1)
+            df_last = df[(df[ts_col] >= _last_start) & (df[ts_col] < _last_end)]
+            if len(df_last) >= 10:
+                df = df_last
 
         df = df.tail(max(bars, 1))
         candles = []
@@ -500,7 +533,7 @@ async def get_predictions(symbol: str = None):
                 # No symbol column yet and requesting non-SPY → no results
                 return {"predictions": [], "latest": None, "symbol": sym_upper}
 
-        # Use today's ET date as cutoff — always show today's latest prediction
+        # Use today's ET date as cutoff — fall back to last day with predictions if today is empty
         _et_tz = pytz.timezone("America/New_York")
         _today_date = datetime.now(_et_tz).date()
         if df[ts_col].dt.tz is not None:
@@ -509,6 +542,15 @@ async def get_predictions(symbol: str = None):
             cutoff = pd.Timestamp(_today_date)
 
         recent = df[df[ts_col] >= cutoff].tail(30)
+
+        # If no predictions today, fall back to the last day that has data
+        if recent.empty and not df.empty:
+            _last_date = df[ts_col].dt.date.iloc[-1]
+            if df[ts_col].dt.tz is not None:
+                _last_cutoff = pd.Timestamp(_last_date, tz=_et_tz)
+            else:
+                _last_cutoff = pd.Timestamp(_last_date)
+            recent = df[df[ts_col] >= _last_cutoff].tail(30)
 
         preds = []
         for _, row in recent.iterrows():
@@ -910,6 +952,42 @@ async def get_trade_chart(sim_id: str, trade_id: str, refresh: bool = False):
     return Response(content=png, media_type="image/png")
 
 
+@app.get("/api/sim/{sim_id}/replay/{trade_index}")
+async def get_replay_chart(sim_id: str, trade_index: int):
+    """Return trade replay chart PNG. trade_index is 1-based from most recent closed trade."""
+    sim_id = sim_id.upper()
+    data = _load_sim(sim_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Sim not found: {sim_id}")
+
+    trades = [t for t in (data.get("trade_log") or []) if t.get("exit_time")]
+    if not trades:
+        raise HTTPException(status_code=404, detail="No closed trades")
+    if trade_index < 1 or trade_index > len(trades):
+        raise HTTPException(status_code=404, detail=f"Trade index out of range (1–{len(trades)})")
+
+    trade = trades[-trade_index]
+    try:
+        import sys
+        sys.path.insert(0, BASE_DIR)
+        from interface.charting import generate_trade_replay
+
+        chart_path = await asyncio.to_thread(generate_trade_replay, sim_id, trade)
+        if chart_path and os.path.exists(chart_path):
+            return Response(content=open(chart_path, "rb").read(), media_type="image/png")
+
+        # Fallback placeholder if candle data unavailable
+        from charts.trade_chart import _render_placeholder
+        placeholder = _render_placeholder(
+            f"Price data unavailable for this trade's time range\n"
+            f"({trade.get('entry_time', '')[:10]})",
+            (800, 400),
+        )
+        return Response(content=placeholder, media_type="image/png")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Chart generation failed: {exc}")
+
+
 @app.get("/api/trades/{sim_id}/{trade_id}/narrative")
 async def get_narrative(sim_id: str, trade_id: str):
     """Return cached GPT narrative JSON, or 404 if not yet generated."""
@@ -951,6 +1029,19 @@ async def trigger_narrative(sim_id: str, trade_id: str, force: bool = False):
         return narrative
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/strategy_performance")
+async def api_strategy_performance():
+    """Return strategy performance store data for dashboard heatmaps."""
+    try:
+        import sys
+        sys.path.insert(0, BASE_DIR)
+        from analytics.strategy_performance import PERF_STORE
+        PERF_STORE._load()   # reload from disk in case exits happened since process start
+        return PERF_STORE._data
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------

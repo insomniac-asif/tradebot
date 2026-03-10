@@ -304,6 +304,13 @@ def _fetch_from_alpaca(symbol: str = "SPY"):
     df["timestamp"] = df["timestamp"].dt.tz_convert("US/Eastern")
     df["timestamp"] = df["timestamp"].dt.tz_localize(None)
 
+    try:
+        from core.singletons import RISK_SUPERVISOR
+        import time as _t
+        RISK_SUPERVISOR.update_bar_freshness(_t.time())
+    except ImportError:
+        pass
+
     return df
 
 
@@ -506,3 +513,82 @@ def get_candle_data(symbol: str, start: "datetime", end: "datetime") -> list[dic
     except Exception as e:
         logging.warning("get_candle_data_alpaca_failed symbol=%s: %s", symbol, e)
         return []
+
+
+def backfill_symbol_csvs(min_bars: int = 100):
+    """
+    Check all symbols in the registry. For each, look at the last trading day
+    in the CSV. If it has fewer than `min_bars` bars, fetch that day from Alpaca
+    and replace the sparse data. Also backfills SPY.
+
+    Returns dict of {symbol: bars_written} for symbols that were backfilled.
+    """
+    eastern = pytz.timezone("US/Eastern")
+    registry = _load_symbol_registry()
+    results = {}
+
+    # Build list: registry symbols + SPY
+    symbol_paths = {}
+    for sym, entry in registry.items():
+        rel = entry.get("data_file", "")
+        if rel:
+            symbol_paths[sym.upper()] = os.path.join(BASE_DIR, rel) if not os.path.isabs(rel) else rel
+    if "SPY" not in symbol_paths:
+        symbol_paths["SPY"] = DATA_FILE
+
+    for sym, csv_path in symbol_paths.items():
+        try:
+            if not os.path.exists(csv_path):
+                continue
+            df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+            if df.empty:
+                continue
+
+            # Find the last date and count its bars
+            last_date = df["timestamp"].dt.date.iloc[-1]
+            day_bars = df[df["timestamp"].dt.date == last_date]
+            if len(day_bars) >= min_bars:
+                continue  # enough data, skip
+
+            # Fetch from Alpaca for that date
+            start_et = eastern.localize(datetime.combine(last_date, datetime.min.time()).replace(hour=9, minute=30))
+            end_et = eastern.localize(datetime.combine(last_date, datetime.min.time()).replace(hour=16, minute=0))
+
+            client = get_client()
+            if client is None:
+                continue
+
+            rate_limit_sleep("alpaca_stock_bars", ALPACA_MIN_CALL_INTERVAL_SEC)
+            req = StockBarsRequest(
+                symbol_or_symbols=sym,
+                timeframe=TimeFrame(1, TimeFrameUnit("Min")),
+                start=start_et.astimezone(pytz.UTC),
+                end=end_et.astimezone(pytz.UTC),
+                feed=DataFeed.IEX,
+            )
+            bars = client.get_stock_bars(req)
+            fresh_df = getattr(bars, "df", None)
+            if fresh_df is None or fresh_df.empty:
+                continue
+
+            fresh_df = fresh_df.reset_index()
+            if "symbol" in fresh_df.columns:
+                fresh_df = fresh_df.drop(columns=["symbol"])
+            fresh_df["timestamp"] = pd.to_datetime(fresh_df["timestamp"], utc=True)
+            fresh_df["timestamp"] = fresh_df["timestamp"].dt.tz_convert("US/Eastern").dt.tz_localize(None)
+
+            # Keep only columns matching the CSV
+            csv_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+            fresh_df = fresh_df[[c for c in csv_cols if c in fresh_df.columns]]
+
+            # Remove sparse day, append fresh
+            before = df[df["timestamp"].dt.date < last_date]
+            result = pd.concat([before, fresh_df], ignore_index=True).sort_values("timestamp")
+            result.to_csv(csv_path, index=False)
+            results[sym] = len(fresh_df)
+            logging.error("backfill_complete: %s got %d bars for %s (was %d)", sym, len(fresh_df), last_date, len(day_bars))
+
+        except Exception as e:
+            logging.error("backfill_failed: %s — %s", sym, e)
+
+    return results

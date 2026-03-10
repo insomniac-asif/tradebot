@@ -1,3 +1,13 @@
+# LIVE PATH AUDIT
+# Two paths can place live orders:
+#   1. sim_live_router.py → SIM00 (sim graduation path) — ACTIVE
+#   2. decision/trader.py → open_trade_if_valid() (auto_trader) — PAPER ONLY
+#      (auto_trader routes through open_trade_if_valid which calls execute_option_entry,
+#       but no sim with execution_mode=live feeds through trader.py in production.
+#       Both paths are gated by core/singletons.py::RISK_SUPERVISOR.authorize_entry())
+# Resolution: sim_live_router.py is the canonical live path for SIM00.
+#             decision/trader.py manages the paper auto_trader account only.
+
 import os
 import asyncio
 import yaml
@@ -60,6 +70,20 @@ def _safe_int(val):
 
 async def sim_live_router(sim_id, direction, price, ml_prediction=None, regime=None, time_of_day_bucket=None, signal_mode=None, entry_context=None, feature_snapshot=None):
     try:
+        try:
+            from core.runtime_state import RUNTIME, SystemState
+            _rs = RUNTIME.state
+            if _rs == SystemState.PANIC_LOCKDOWN:
+                return {"status": "error", "message": "panic_lockdown"}
+            if _rs == SystemState.OFFLINE:
+                return {"status": "error", "message": "system_offline"}
+            if _rs == SystemState.EXIT_ONLY:
+                return {"status": "error", "message": "exit_only_mode"}
+            if not RUNTIME.can_enter():
+                return {"status": "error", "message": f"runtime_{_rs.value.lower()}"}
+        except ImportError:
+            pass
+
         if direction not in {"BULLISH", "BEARISH"}:
             return {"status": "error", "message": "invalid_direction"}
         try:
@@ -148,6 +172,19 @@ async def sim_live_router(sim_id, direction, price, ml_prediction=None, regime=N
         est_exposure = mid_val * qty * 100
         if open_exposure + est_exposure > capital_limit_val:
             return {"status": "error", "message": "capital_limit_reached"}
+
+        try:
+            from core.singletons import RISK_SUPERVISOR
+            notional = mid_val * qty * 100
+            _allowed, _deny_reason = RISK_SUPERVISOR.authorize_entry(
+                sim_id=sim_id, direction=direction,
+                symbol=_trade_symbol, notional=notional,
+            )
+            if not _allowed:
+                logging.info("sim_live_router_blocked_supervisor: %s", _deny_reason)
+                return {"status": "error", "message": f"risk_supervisor: {_deny_reason}"}
+        except ImportError:
+            pass
 
         fill_result, block = await execute_option_entry(
             contract["option_symbol"],

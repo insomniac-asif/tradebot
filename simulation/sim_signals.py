@@ -109,9 +109,9 @@ def _safe_float(val, default=None):
 # Existing signal functions (preserved, updated to 3-tuple returns)
 # ---------------------------------------------------------------------------
 
-def _signal_mean_reversion(df) -> tuple:
-    RSI_OVERSOLD = 30
-    RSI_OVERBOUGHT = 70
+def _signal_mean_reversion(df, context=None) -> tuple:
+    RSI_OVERSOLD = _ctx_float(context, "rsi_oversold", 30)
+    RSI_OVERBOUGHT = _ctx_float(context, "rsi_overbought", 70)
     MIN_BARS_REQUIRED = 2
     try:
         if df is None or len(df) < MIN_BARS_REQUIRED:
@@ -134,8 +134,8 @@ def _signal_mean_reversion(df) -> tuple:
         return None, None, {"reason": "mean_reversion_error"}
 
 
-def _signal_breakout(df) -> tuple:
-    BREAKOUT_LOOKBACK = 20
+def _signal_breakout(df, context=None) -> tuple:
+    BREAKOUT_LOOKBACK = int(_ctx_float(context, "breakout_lookback", 20))
     try:
         if df is None or len(df) < BREAKOUT_LOOKBACK + 1:
             return None, None, {"reason": "insufficient_bars"}
@@ -160,8 +160,8 @@ def _signal_breakout(df) -> tuple:
         return None, None, {"reason": "breakout_error"}
 
 
-def _signal_trend_pullback(df) -> tuple:
-    PULLBACK_TOLERANCE = 0.001
+def _signal_trend_pullback(df, context=None) -> tuple:
+    PULLBACK_TOLERANCE = _ctx_float(context, "pullback_tolerance", 0.001)
     MIN_BARS_REQUIRED = 2
     try:
         if df is None or len(df) < MIN_BARS_REQUIRED:
@@ -478,13 +478,13 @@ def _signal_zscore_bounce(df, context: dict | None = None, feature_snapshot: dic
 # New signal functions
 # ---------------------------------------------------------------------------
 
-def _signal_failed_breakout_reversal(df) -> tuple:
+def _signal_failed_breakout_reversal(df, context=None) -> tuple:
     """
     Detects a failed breakout/breakdown: previous bar pierced a reference
     level but closed back inside it; current bar confirms the reversal.
     No feature_snapshot required.
     """
-    LOOKBACK = 20
+    LOOKBACK = int(_ctx_float(context, "fbr_lookback", 20))
     try:
         if df is None or len(df) < LOOKBACK + 2:
             return None, None, {"reason": "insufficient_bars"}
@@ -1676,6 +1676,7 @@ def derive_sim_signal(
     context: dict | None = None,
     feature_snapshot: dict | None = None,
     profile: dict | None = None,
+    signal_params: dict | None = None,
 ):
     """
     Dispatch entry-signal generation by mode.
@@ -1684,15 +1685,23 @@ def derive_sim_signal(
     direction is "BULLISH", "BEARISH", or None.
     price is float or None.
     context_dict is a dict or None.
+
+    signal_params: optional per-sim dict from YAML signal_params key.
+    Merged (at lower priority) into context before dispatch so signal
+    functions can read tuning constants via _ctx_float.
     """
+    # Merge signal_params (lower priority) under context (higher priority)
+    if signal_params:
+        context = {**signal_params, **(context or {})}
+
     try:
         mode = str(signal_mode).upper()
 
         if mode == "MEAN_REVERSION":
-            return _signal_mean_reversion(df)
+            return _signal_mean_reversion(df, context)
 
         elif mode == "BREAKOUT":
-            direction, price, ctx = _signal_breakout(df)
+            direction, price, ctx = _signal_breakout(df, context)
             if direction is None:
                 return None, None, ctx
             vol_z_min = _ctx_float(context, "vol_z_min", None)
@@ -1708,7 +1717,7 @@ def derive_sim_signal(
             return direction, price, ctx
 
         elif mode == "TREND_PULLBACK":
-            direction, price, ctx = _signal_trend_pullback(df)
+            direction, price, ctx = _signal_trend_pullback(df, context)
             if direction is None:
                 return None, None, ctx
             min_exp = _ctx_float(context, "atr_expansion_min", None)
@@ -1764,7 +1773,7 @@ def derive_sim_signal(
             return _signal_zscore_bounce(df, context, feature_snapshot)
 
         elif mode == "FAILED_BREAKOUT_REVERSAL":
-            return _signal_failed_breakout_reversal(df)
+            return _signal_failed_breakout_reversal(df, context)
 
         elif mode == "VWAP_CONTINUATION":
             return _signal_vwap_continuation(df, profile)

@@ -1,5 +1,6 @@
 import os
 import asyncio
+import random
 import uuid
 import yaml
 import pytz
@@ -104,6 +105,12 @@ async def run_sim_entries(
     results = []
     if not _PROFILES:
         return [{"sim_id": None, "status": "error", "reason": "no_profiles_loaded"}]
+    try:
+        from core.runtime_state import RUNTIME
+        if not RUNTIME.can_run_paper_sims():
+            return [{"sim_id": None, "status": "skipped", "reason": f"runtime_{RUNTIME.state.value.lower()}"}]
+    except ImportError:
+        pass
     time_of_day_bucket = _get_time_of_day_bucket()
 
     # ── Pre-fetch each unique symbol's df ONCE (avoids 24x repeated blocking calls) ──
@@ -127,9 +134,16 @@ async def run_sim_entries(
         except Exception:
             pass
 
-    for sim_id, profile in _PROFILES.items():
-        if str(sim_id).startswith("_"):
-            continue
+    # Shuffle paper sims so no single sim always gets first access to
+    # directional capacity. SIM00 (live) is always evaluated last so that
+    # source sims have been processed before the graduation gate runs.
+    _all_sim_ids = [sid for sid in _PROFILES if not str(sid).startswith("_")]
+    _paper_ids = [sid for sid in _all_sim_ids if sid != "SIM00"]
+    random.shuffle(_paper_ids)
+    _ordered_ids = _paper_ids + (["SIM00"] if "SIM00" in _all_sim_ids else [])
+
+    for sim_id in _ordered_ids:
+        profile = _PROFILES[sim_id]
         try:
             sim = SimPortfolio(sim_id, profile)
             sim.load()
@@ -154,6 +168,8 @@ async def run_sim_entries(
             if not _sim_symbols or not isinstance(_sim_symbols, list):
                 _fallback = profile.get("symbol", "SPY")
                 _sim_symbols = [_fallback] if _fallback else ["SPY"]
+            _sim_symbols = list(_sim_symbols)
+            random.shuffle(_sim_symbols)
 
             # ── Loop over each symbol this sim trades ────────────────────
             for _trade_symbol in _sim_symbols:
@@ -208,6 +224,7 @@ async def run_sim_entries(
                     },
                     feature_snapshot=feature_snapshot,
                     profile=profile,
+                    signal_params=profile.get("signal_params") or {},
                 )
                 if isinstance(sig, tuple):
                     if len(sig) >= 2:
@@ -247,6 +264,18 @@ async def run_sim_entries(
                             "entry_context": entry_context,
                             "signal_mode": signal_mode,
                         })
+                    # Candidate: signal evaluated but did not fire
+                    try:
+                        from decision.candidate import Candidate
+                        from analytics.candidate_logger import log_candidate
+                        log_candidate(Candidate(
+                            sim_id=sim_id, strategy=signal_mode,
+                            symbol=_trade_symbol, direction=None, fired=False,
+                            regime=regime or "", time_bucket=time_of_day_bucket or "",
+                            signal_params=profile.get("signal_params") or {},
+                        ))
+                    except Exception:
+                        pass
                     continue
 
                 # ── Cross-sim directional exposure guard ─────────────────
@@ -649,6 +678,22 @@ async def run_sim_entries(
                 sim.record_open(trade)
                 sim.save()
 
+                # Candidate: signal fired and trade opened
+                try:
+                    from decision.candidate import Candidate
+                    from analytics.candidate_logger import log_candidate
+                    log_candidate(Candidate(
+                        sim_id=sim_id, strategy=signal_mode,
+                        symbol=_trade_symbol, direction=direction, fired=True,
+                        entry_ref=float(underlying_price) if underlying_price else None,
+                        regime=regime or "", time_bucket=time_of_day_bucket or "",
+                        traded=True, trade_id=trade.get("trade_id"),
+                        conviction=int(trade.get("conviction_score") or 0) or None,
+                        signal_params=profile.get("signal_params") or {},
+                    ))
+                except Exception:
+                    pass
+
                 results.append({
                     "sim_id": sim_id,
                     "status": "opened",
@@ -678,6 +723,49 @@ async def run_sim_entries(
         except Exception as e:
             logging.exception("run_sim_entries_error: %s", e)
             results.append({"sim_id": sim_id, "status": "error", "reason": str(e)})
+
+    # Batch-log candidates for skipped/blocked and live_submitted results.
+    # "opened" + "no-fire" are already logged inline above.
+    try:
+        from decision.candidate import Candidate
+        from analytics.candidate_logger import log_candidate
+        # Reasons that indicate signal fired but gate blocked it
+        _PRE_SIGNAL_REASONS = frozenset({"blocked_session"})
+        for _r in results:
+            _sid = _r.get("sim_id")
+            _status = _r.get("status")
+            if not _sid or _status in ("error", "opened"):
+                continue
+            if _status == "skipped":
+                _reason = _r.get("reason", "")
+                _fired = _reason not in _PRE_SIGNAL_REASONS
+                log_candidate(Candidate(
+                    sim_id=_sid,
+                    strategy=_r.get("signal_mode", ""),
+                    symbol="",
+                    direction=None,
+                    fired=_fired,
+                    blocked=True,
+                    block_reason=_reason,
+                    regime="",
+                    time_bucket=time_of_day_bucket or "",
+                ))
+            elif _status == "live_submitted":
+                log_candidate(Candidate(
+                    sim_id=_sid,
+                    strategy=_r.get("signal_mode", ""),
+                    symbol=_r.get("option_symbol", ""),
+                    direction=_r.get("direction"),
+                    fired=True,
+                    entry_ref=_r.get("entry_price"),
+                    regime=_r.get("regime", ""),
+                    time_bucket=_r.get("time_bucket", ""),
+                    traded=True,
+                    trade_id=_r.get("trade_id"),
+                ))
+    except Exception:
+        pass
+
     return results
 
 
@@ -996,6 +1084,24 @@ async def run_sim_exits() -> list[dict]:
                     except (TypeError, ValueError):
                         pnl_val = None
                     record_sim_trade_close(trade, pnl_val)
+                    # Strategy performance store
+                    try:
+                        from analytics.strategy_performance import PERF_STORE
+                        _pnl_d = float(pnl_val or 0)
+                        _cost = float(entry_price or 0) * float(qty_val or 0) * 100
+                        _pnl_pct = _pnl_d / _cost if _cost > 0 else 0.0
+                        PERF_STORE.record_close(
+                            strategy=trade.get("signal_mode", ""),
+                            regime=trade.get("regime_at_entry", "UNKNOWN"),
+                            time_bucket=trade.get("time_of_day_bucket", "UNKNOWN"),
+                            pnl=_pnl_d,
+                            pnl_pct=_pnl_pct,
+                            hold_seconds=float(exit_data.get("time_in_trade_seconds") or 0),
+                            grade=trade.get("grade"),
+                            spread_pct=trade.get("spread_pct"),
+                        )
+                    except Exception:
+                        pass
                     results.append({
                         "sim_id": sim_id,
                         "symbol": trade.get("symbol"),
@@ -1071,6 +1177,24 @@ async def run_sim_exits() -> list[dict]:
                     except (TypeError, ValueError):
                         pnl_val = None
                     record_sim_trade_close(trade, pnl_val)
+                    # Strategy performance store
+                    try:
+                        from analytics.strategy_performance import PERF_STORE
+                        _pnl_d = float(pnl_val or 0)
+                        _cost = float(entry_price or 0) * float(qty_val or 0) * 100
+                        _pnl_pct = _pnl_d / _cost if _cost > 0 else 0.0
+                        PERF_STORE.record_close(
+                            strategy=trade.get("signal_mode", ""),
+                            regime=trade.get("regime_at_entry", "UNKNOWN"),
+                            time_bucket=trade.get("time_of_day_bucket", "UNKNOWN"),
+                            pnl=_pnl_d,
+                            pnl_pct=_pnl_pct,
+                            hold_seconds=float(exit_data.get("time_in_trade_seconds") or 0),
+                            grade=trade.get("grade"),
+                            spread_pct=trade.get("spread_pct"),
+                        )
+                    except Exception:
+                        pass
                     results.append({
                         "sim_id": sim_id,
                         "trade_id": trade["trade_id"],

@@ -1,6 +1,9 @@
 # interface/charting.py
 
+import io
+import logging
 import os
+import re as _re
 import time as _time_mod
 import pandas as pd
 from typing import cast
@@ -8,7 +11,7 @@ import pandas_ta as ta
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
 from alpaca.data.historical import StockHistoricalDataClient
@@ -270,3 +273,82 @@ def generate_live_chart(symbol: str = "SPY"):
     plt.savefig(filepath)
     plt.close()
     return filepath
+
+
+def generate_trade_replay(
+    sim_id: str,
+    trade: dict,
+    output_path: str = None,
+) -> str | None:
+    """
+    Generate a mini price chart for a closed trade.
+    Fetches 1-minute underlying bars around the trade window, then delegates
+    rendering to charts.trade_chart.generate_trade_chart().
+    Returns the file path to the saved PNG, or None if data is unavailable.
+    """
+    try:
+        from core.data_service import get_candle_data
+        from core.paths import CHART_DIR
+        from charts.trade_chart import generate_trade_chart
+
+        entry_str = trade.get("entry_time")
+        exit_str  = trade.get("exit_time")
+        if not entry_str:
+            return None
+
+        # Resolve underlying symbol (e.g. "SPY260303C00689000" → "SPY")
+        opt_sym = trade.get("option_symbol") or ""
+        symbol  = trade.get("symbol") or ""
+        if not symbol:
+            m = _re.match(r'^([A-Z]{1,6})', opt_sym.upper())
+            symbol = m.group(1) if m else "SPY"
+
+        # Parse ISO-8601 timestamps to naive Eastern Time
+        def _to_et_naive(ts_str):
+            if not ts_str:
+                return None
+            try:
+                dt = datetime.fromisoformat(str(ts_str))
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(pytz.timezone("US/Eastern")).replace(tzinfo=None)
+                return dt
+            except Exception:
+                return None
+
+        entry_dt = _to_et_naive(entry_str)
+        exit_dt  = _to_et_naive(exit_str)
+        if entry_dt is None:
+            return None
+        if exit_dt is None:
+            exit_dt = entry_dt
+
+        # Window: 15-min buffer each side; short trades (<30 min) get 1-hour
+        # window centered on the trade midpoint
+        trade_secs = max(0.0, (exit_dt - entry_dt).total_seconds())
+        if trade_secs < 1800:
+            mid   = entry_dt + timedelta(seconds=trade_secs / 2)
+            start = mid - timedelta(minutes=30)
+            end   = mid + timedelta(minutes=30)
+        else:
+            start = entry_dt - timedelta(minutes=15)
+            end   = exit_dt  + timedelta(minutes=15)
+
+        candle_data = get_candle_data(symbol, start, end)
+        if not candle_data:
+            logging.warning("generate_trade_replay: no candle data for %s %s [%s → %s]",
+                            sim_id, symbol, start, end)
+            return None
+
+        if output_path is None:
+            os.makedirs(CHART_DIR, exist_ok=True)
+            ts_tag = entry_dt.strftime("%Y%m%d_%H%M")
+            output_path = os.path.join(CHART_DIR, f"replay_{sim_id}_{ts_tag}.png")
+
+        # Inject sim_id so chart title/caching uses the right sim
+        trade_copy = dict(trade, sim_id=sim_id)
+        result = generate_trade_chart(trade_copy, candle_data, output_path=output_path)
+        return output_path if result else None
+
+    except Exception:
+        logging.exception("generate_trade_replay failed for %s", sim_id)
+        return None

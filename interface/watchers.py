@@ -16,7 +16,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from core.market_clock import market_is_open
-from core.data_service import get_market_dataframe, get_symbol_csv_path, get_symbol_dataframe, _load_symbol_registry
+from core.data_service import get_market_dataframe, get_symbol_csv_path, get_symbol_dataframe, _load_symbol_registry, backfill_symbol_csvs
 from core.debug import debug_log
 from core.structured_logger import slog, slog_critical
 from core.reconciler import write_heartbeat
@@ -968,10 +968,10 @@ async def opportunity_watcher(bot, alert_channel_id):
 # =========================================================
 print("Auto trader started")
 async def auto_trader(bot, channel_id):
-
     await bot.wait_until_ready()
     channel = bot.get_channel(channel_id)
     nyse_calendar = mcal.get_calendar("NYSE") if mcal is not None else None
+    _runtime_activated = False
     while not bot.is_closed():
         if not getattr(bot, "trading_enabled", True):
             if not getattr(bot, "startup_notice_sent", False):
@@ -1046,6 +1046,16 @@ async def auto_trader(bot, channel_id):
             continue
 
         bot.data_integrity_state = False
+
+        if not _runtime_activated:
+            try:
+                from core.runtime_state import RUNTIME, SystemState
+                if RUNTIME.transition(SystemState.TRADING_ENABLED, "first_clean_bar"):
+                    _runtime_activated = True
+                elif RUNTIME.state not in {SystemState.BOOTING, SystemState.RECONCILING}:
+                    _runtime_activated = True  # already past startup
+            except ImportError:
+                _runtime_activated = True
 
         # Strict data freshness guard: block if latest candle is older than 2 minutes.
         last_ts = df.index[-1] if len(df.index) > 0 else None
@@ -2070,3 +2080,162 @@ async def heart_monitor(bot, channel_id):
         # Write heartbeat so crash recovery can detect unclean shutdowns
         write_heartbeat()
         await asyncio.sleep(60)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EMERGENCY EXIT LOOP (Phase 6)
+# Independent of sim_exit_loop.  Runs every 15s.  SIM00 live positions only.
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def emergency_exit_loop():
+    """
+    Force-close conditions (any one triggers an immediate market close):
+      1. PANIC_LOCKDOWN state → close ALL SIM00 live positions
+      2. Same-day expiry past 15:50 ET (tighter than normal 15:55 cutoff)
+      3. Option price dropped > 60% from entry (flash crash / data issue)
+    """
+    while True:
+        try:
+            await asyncio.sleep(15)
+
+            from core.market_clock import market_is_open
+            if not market_is_open():
+                continue
+
+            try:
+                from core.singletons import RUNTIME, SystemState
+                _state = RUNTIME.state
+            except ImportError:
+                continue
+
+            # ── Load SIM00 open trades ─────────────────────────────────
+            try:
+                import yaml as _yaml
+                import os as _os
+                _base = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+                _cfg_path = _os.path.join(_base, "simulation", "sim_config.yaml")
+                with open(_cfg_path) as _f:
+                    _profiles = _yaml.safe_load(_f) or {}
+                _sim00_profile = _profiles.get("SIM00", {})
+                if not isinstance(_sim00_profile, dict):
+                    continue
+                if _sim00_profile.get("execution_mode") != "live":
+                    continue
+                from simulation.sim_portfolio import SimPortfolio
+                _sim = SimPortfolio("SIM00", _sim00_profile)
+                _sim.load()
+            except Exception:
+                continue
+
+            if not _sim.open_trades:
+                continue
+
+            eastern = pytz.timezone("America/New_York")
+            now_et = datetime.now(eastern)
+            _EOD_EMERGENCY = now_et.replace(hour=15, minute=50, second=0, microsecond=0).time()
+
+            for _trade in list(_sim.open_trades):
+                if not isinstance(_trade, dict):
+                    continue
+                _option_sym = _trade.get("option_symbol")
+                if not _option_sym:
+                    continue
+
+                _force = False
+                _reason = ""
+
+                # 1. Panic lockdown — force close everything
+                if _state == SystemState.PANIC_LOCKDOWN:
+                    _force = True
+                    _reason = "panic_lockdown"
+
+                # 2. Same-day expiry emergency cutoff (15:50)
+                if not _force:
+                    try:
+                        _expiry_raw = _trade.get("expiry")
+                        if isinstance(_expiry_raw, str):
+                            from datetime import datetime as _dt
+                            _exp_date = _dt.fromisoformat(_expiry_raw).date()
+                            if _exp_date == now_et.date() and now_et.time() >= _EOD_EMERGENCY:
+                                _force = True
+                                _reason = "emergency_expiry_cutoff"
+                    except Exception:
+                        pass
+
+                # 3. Price dropped > 60% from entry
+                if not _force:
+                    try:
+                        from execution.option_executor import get_option_price
+                        _entry = float(_trade.get("entry_price", 0))
+                        if _entry > 0:
+                            _cur = get_option_price(_option_sym)
+                            if _cur is not None and (_cur - _entry) / _entry <= -0.60:
+                                _force = True
+                                _reason = f"emergency_60pct_loss entry={_entry:.4f} cur={_cur:.4f}"
+                    except Exception:
+                        pass
+
+                if not _force:
+                    continue
+
+                try:
+                    import asyncio
+                    from execution.option_executor import close_option_position
+                    _qty = int(_trade.get("qty", 0))
+                    if _qty <= 0:
+                        continue
+                    _close = await asyncio.to_thread(close_option_position, _option_sym, _qty)
+                    _filled = _close.get("filled_avg_price") if _close.get("ok") else None
+                    logging.error(
+                        "emergency_exit_loop_closed: sim=SIM00 symbol=%s qty=%d reason=%s filled=%s",
+                        _option_sym, _qty, _reason, _filled,
+                    )
+                    _exit_price = _filled if _filled is not None else _trade.get("entry_price", 0)
+                    _sim.record_close(_trade["trade_id"], {
+                        "exit_price": _exit_price,
+                        "exit_time": now_et.isoformat(),
+                        "exit_reason": _reason,
+                        "exit_price_source": "broker_fill" if _filled else "estimated_mid",
+                        "exit_quote_model": "emergency",
+                        "entry_price_source": _trade.get("entry_price_source", "live_fill"),
+                        "time_in_trade_seconds": 0,
+                        "spread_guard_bypassed": True,
+                    })
+                    _sim.save()
+                except Exception as _ce:
+                    logging.error("emergency_exit_loop_close_failed: %s reason=%s", _ce, _reason)
+
+        except Exception as _e:
+            logging.error("emergency_exit_loop_error: %s", _e, exc_info=True)
+            await asyncio.sleep(30)
+
+
+async def backfill_watcher():
+    """
+    Runs once per trading day shortly after market open (09:35 ET).
+    Checks all symbol CSVs for sparse/missing data from the previous session
+    and backfills from Alpaca if needed.
+    """
+    last_run_date = None
+    eastern = pytz.timezone("America/New_York")
+    target_time = dtime(9, 35)
+    while True:
+        try:
+            now_et = datetime.now(eastern)
+            if now_et.weekday() > 4:
+                await asyncio.sleep(300)
+                continue
+            if now_et.time() < target_time:
+                await asyncio.sleep(30)
+                continue
+            if last_run_date == now_et.date():
+                await asyncio.sleep(300)
+                continue
+
+            last_run_date = now_et.date()
+            results = await asyncio.to_thread(backfill_symbol_csvs)
+            if results:
+                logging.error("backfill_watcher_done: %s", results)
+        except Exception as e:
+            logging.error("backfill_watcher_error: %s", e, exc_info=True)
+        await asyncio.sleep(30)

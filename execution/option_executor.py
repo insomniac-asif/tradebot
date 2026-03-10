@@ -176,6 +176,13 @@ def _get_option_quote(api_key: str, secret_key: str, symbol: str):
                 ask = quote.ask_price
                 if bid is not None and ask is not None and bid > 0 and ask > 0:
                     _cache_quote(symbol, float(bid), float(ask))
+                    try:
+                        from core.singletons import RISK_SUPERVISOR
+                        _now = time.time()
+                        RISK_SUPERVISOR.update_quote_freshness(_now)
+                        RISK_SUPERVISOR.update_broker_health(_now)
+                    except ImportError:
+                        pass
                     return float(bid), float(ask)
             last_err = "no_quote"
         except Exception as e:
@@ -247,7 +254,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
 
     client = TradingClient(api_key, secret_key, paper=True)
     first_limit = round(mid + (spread * 0.25), 2)
-    order: Any = client.submit_order(
+    order: Any = await asyncio.to_thread(client.submit_order,
         LimitOrderRequest(
             symbol=option_symbol,
             qty=quantity,
@@ -261,7 +268,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
     # --- first attempt: limit at mid + 25% of spread ---
     start = time.time()
     while (time.time() - start) < 5:
-        current: Any = client.get_order_by_id(order.id)
+        current: Any = await asyncio.to_thread(client.get_order_by_id, order.id)
         if current.status == OrderStatus.FILLED and current.filled_avg_price is not None:
             try:
                 fill_price = float(current.filled_avg_price)
@@ -282,7 +289,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                 )
                 if fill_price > expected_mid * 1.10:
                     try:
-                        client.submit_order(
+                        asyncio.create_task(asyncio.to_thread(client.submit_order,
                             LimitOrderRequest(
                                 symbol=option_symbol,
                                 qty=quantity,
@@ -291,7 +298,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                                 limit_price=float(fill_price),
                                 position_intent=PositionIntent.SELL_TO_CLOSE,
                             )
-                        )
+                        ))
                     except Exception:
                         pass
                     _increment_no_record_exit(acc, "slippage_guard_triggered")
@@ -314,7 +321,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                 qty_val = 0
             if qty_val > 0 and current.filled_avg_price is not None:
                 try:
-                    client.cancel_order_by_id(order.id)
+                    await asyncio.to_thread(client.cancel_order_by_id, order.id)
                 except Exception:
                     pass
                 try:
@@ -340,7 +347,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                     return None, "partial_fill_below_threshold"
                 if filled_price > expected_mid * 1.10:
                     try:
-                        client.submit_order(
+                        asyncio.create_task(asyncio.to_thread(client.submit_order,
                             LimitOrderRequest(
                                 symbol=option_symbol,
                                 qty=min(qty_val, quantity),
@@ -349,7 +356,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                                 limit_price=float(filled_price),
                                 position_intent=PositionIntent.SELL_TO_CLOSE,
                             )
-                        )
+                        ))
                     except Exception:
                         pass
                     _increment_no_record_exit(acc, "slippage_guard_triggered")
@@ -374,11 +381,11 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
         await _sleep(1)
 
     try:
-        client.cancel_order_by_id(order.id)
+        await asyncio.to_thread(client.cancel_order_by_id, order.id)
     except Exception:
         pass
 
-    order: Any = client.submit_order(
+    order: Any = await asyncio.to_thread(client.submit_order,
         LimitOrderRequest(
             symbol=option_symbol,
             qty=quantity,
@@ -392,7 +399,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
     # --- second attempt: limit at ask ---
     start = time.time()
     while (time.time() - start) < 5:
-        current: Any = client.get_order_by_id(order.id)
+        current: Any = await asyncio.to_thread(client.get_order_by_id, order.id)
         if current.status == OrderStatus.FILLED and current.filled_avg_price is not None:
             try:
                 fill_price = float(current.filled_avg_price)
@@ -413,7 +420,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                 )
                 if fill_price > expected_mid * 1.10:
                     try:
-                        client.submit_order(
+                        asyncio.create_task(asyncio.to_thread(client.submit_order,
                             LimitOrderRequest(
                                 symbol=option_symbol,
                                 qty=quantity,
@@ -422,7 +429,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                                 limit_price=float(fill_price),
                                 position_intent=PositionIntent.SELL_TO_CLOSE,
                             )
-                        )
+                        ))
                     except Exception:
                         pass
                     _increment_no_record_exit(acc, "slippage_guard_triggered")
@@ -445,7 +452,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                 qty_val = 0
             if qty_val > 0 and current.filled_avg_price is not None:
                 try:
-                    client.cancel_order_by_id(order.id)
+                    await asyncio.to_thread(client.cancel_order_by_id, order.id)
                 except Exception:
                     pass
                 try:
@@ -471,7 +478,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                     return None, "partial_fill_below_threshold"
                 if filled_price > expected_mid * 1.10:
                     try:
-                        client.submit_order(
+                        asyncio.create_task(asyncio.to_thread(client.submit_order,
                             LimitOrderRequest(
                                 symbol=option_symbol,
                                 qty=min(qty_val, quantity),
@@ -480,7 +487,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
                                 limit_price=float(filled_price),
                                 position_intent=PositionIntent.SELL_TO_CLOSE,
                             )
-                        )
+                        ))
                     except Exception:
                         pass
                     _increment_no_record_exit(acc, "slippage_guard_triggered")
@@ -505,7 +512,7 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
         await _sleep(1)
 
     try:
-        client.cancel_order_by_id(order.id)
+        await asyncio.to_thread(client.cancel_order_by_id, order.id)
     except Exception:
         pass
 

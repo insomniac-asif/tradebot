@@ -24,6 +24,7 @@
   <div class="notice-right">
     <span class="clock-badge" id="et-clock"></span>
     <span class="notice-text" id="market-status"></span>
+    <button id="sound-toggle" class="sound-toggle" onclick="toggleSound()" title="Sound OFF — click to enable">🔇</button>
     <button class="pin-btn" onclick="refreshAll()" title="Refresh">↺</button>
     <span class="notice-text small" id="last-refresh"></span>
   </div>
@@ -31,6 +32,19 @@
 
 <!-- ══════════════════════════════════════ FRONT WALL: CHALKBOARD -->
 <div class="board-area">
+  <!-- Classroom wall decorations -->
+  <div class="wall-deco wall-deco-left">
+    <div class="wall-clock">
+      <div class="clock-face">
+        <div class="clock-hand clock-hour"></div>
+        <div class="clock-hand clock-minute"></div>
+        <div class="clock-dot"></div>
+      </div>
+    </div>
+    <div class="wall-poster">
+      <div class="poster-text">BUY LOW<br>SELL HIGH</div>
+    </div>
+  </div>
   <div class="board-frame">
     <div class="chalkboard">
 
@@ -92,6 +106,9 @@
         </div>
       </div>
 
+      <!-- Chalkboard announcement strip (typewriter) -->
+      <div id="chalk-announce"></div>
+
     </div>
     <div class="board-tray">
       <div class="chalk-piece"></div>
@@ -102,6 +119,31 @@
   </div>
   <div class="podium">
     <div class="podium-top"></div>
+  </div>
+  <!-- Right wall decoration: trophy shelf + bookshelf -->
+  <div class="wall-deco wall-deco-right">
+    <div class="trophy-shelf-wrap" id="trophy-shelf">
+      <div class="trophy-title">TOP 3</div>
+      <div class="trophy-empty">Term just started!</div>
+    </div>
+    <div class="wall-shelf">
+      <div class="shelf-books">
+        <div class="shelf-book" style="background:#8a3020;height:28px"></div>
+        <div class="shelf-book" style="background:#2a5888;height:32px"></div>
+        <div class="shelf-book" style="background:#488838;height:26px"></div>
+        <div class="shelf-book" style="background:#b08828;height:30px"></div>
+        <div class="shelf-book" style="background:#6a3088;height:28px"></div>
+      </div>
+      <div class="shelf-plank"></div>
+    </div>
+    <div class="wall-shelf">
+      <div class="shelf-books">
+        <div class="shelf-book" style="background:#386888;height:30px"></div>
+        <div class="shelf-book" style="background:#a84028;height:26px"></div>
+        <div class="shelf-book" style="background:#3a6a38;height:32px"></div>
+      </div>
+      <div class="shelf-plank"></div>
+    </div>
   </div>
 </div>
 

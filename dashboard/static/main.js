@@ -63,6 +63,178 @@ let simsCache = [];
 let currentSimId = null;
 let _symbolRegistryCache = null;
 
+// ─────────────────────────────────────────────── CLASSROOM SOUNDS
+
+let _soundEnabled  = false;
+let _audioCtx      = null;
+let _openBellDate  = null;   // date string when open bell last played
+let _closeBellDate = null;   // date string when close bell last played
+
+function _ctx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
+
+function _tone(freq, dur, type = 'triangle', vol = 0.22, delay = 0) {
+  try {
+    const ctx = _ctx();
+    const osc = ctx.createOscillator();
+    const g   = ctx.createGain();
+    osc.connect(g); g.connect(ctx.destination);
+    osc.type = type;
+    osc.frequency.value = freq;
+    const t = ctx.currentTime + delay;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.start(t); osc.stop(t + dur + 0.01);
+  } catch (_) {}
+}
+
+function playClassroomSound(type) {
+  if (!_soundEnabled) return;
+  switch (type) {
+    case 'entry':
+      // Ascending two-note chime  C5 → E5
+      _tone(523, 0.18, 'triangle', 0.20, 0.00);
+      _tone(659, 0.18, 'triangle', 0.20, 0.14);
+      break;
+    case 'profit':
+      // Bright cash-register arpeggio  C5 → E5 → G5
+      _tone(523, 0.12, 'triangle', 0.22, 0.00);
+      _tone(659, 0.12, 'triangle', 0.22, 0.10);
+      _tone(784, 0.20, 'triangle', 0.22, 0.20);
+      break;
+    case 'loss':
+      // Soft descending droop  E4 → A3
+      _tone(330, 0.18, 'triangle', 0.18, 0.00);
+      _tone(220, 0.30, 'sine',     0.14, 0.12);
+      break;
+    case 'open_bell':
+      // Two quick school bell dings
+      _tone(800, 0.28, 'square',   0.15, 0.00);
+      _tone(800, 0.28, 'square',   0.15, 0.34);
+      break;
+    case 'close_bell':
+      // Single deeper, longer ding
+      _tone(600, 0.55, 'triangle', 0.20, 0.00);
+      break;
+  }
+}
+
+function toggleSound() {
+  _soundEnabled = !_soundEnabled;
+  const btn = document.getElementById('sound-toggle');
+  if (!btn) return;
+  btn.classList.toggle('sound-on', _soundEnabled);
+  btn.textContent = _soundEnabled ? '🔊' : '🔇';
+  btn.title = _soundEnabled ? 'Sound ON — click to mute' : 'Sound OFF — click to enable';
+  if (_soundEnabled) {
+    try { _ctx().resume(); } catch (_) {}
+    _tone(660, 0.10, 'triangle', 0.15);
+  }
+}
+
+// ─────────────────────────────────────────────── CHALKBOARD ANNOUNCEMENTS
+
+let _prevSimState    = null;   // null = first load, don't announce
+const _announceQueue = [];
+let _announceActive  = false;
+
+function _buildSimSnapshot(sims) {
+  const snap = {};
+  for (const s of sims) {
+    snap[s.sim_id] = {
+      open_count:    s.open_count    || 0,
+      pnl_dollars:   s.pnl_dollars   || 0,
+      open_trade_key: s.open_trade
+        ? (s.open_trade.trade_id || s.open_trade.symbol || s.open_trade.direction || '')
+        : '',
+    };
+  }
+  return snap;
+}
+
+function detectTradeEvents(sims) {
+  if (!_prevSimState) { _prevSimState = _buildSimSnapshot(sims); return; }
+
+  for (const sim of sims) {
+    const prev = _prevSimState[sim.sim_id];
+    if (!prev) continue;
+
+    const hadTrade = prev.open_count > 0;
+    const hasTrade = (sim.open_count || 0) > 0;
+
+    if (!hadTrade && hasTrade) {
+      // ── New entry ──
+      const dir = (sim.open_trade && sim.open_trade.direction)
+        ? sim.open_trade.direction.toUpperCase() : 'LONG';
+      _enqueueAnnounce(`${sim.sim_id} went ${dir}`);
+      playClassroomSound('entry');
+
+    } else if (hadTrade && !hasTrade) {
+      // ── Exit ──
+      const pnlDelta = (sim.pnl_dollars || 0) - prev.pnl_dollars;
+      let msg;
+      if (Math.abs(pnlDelta) > 0.01) {
+        const sign = pnlDelta >= 0 ? '+' : '-';
+        msg = `${sim.sim_id} closed ${sign}$${Math.abs(pnlDelta).toFixed(2)}`;
+      } else {
+        msg = `${sim.sim_id} closed a trade`;
+      }
+      _enqueueAnnounce(msg);
+      playClassroomSound(pnlDelta >= 0 ? 'profit' : 'loss');
+    }
+  }
+
+  _prevSimState = _buildSimSnapshot(sims);
+}
+
+function _enqueueAnnounce(text) {
+  if (_announceQueue.length >= 5) _announceQueue.shift(); // cap queue
+  _announceQueue.push(text);
+  if (!_announceActive) _runAnnounceQueue();
+}
+
+function _runAnnounceQueue() {
+  if (!_announceQueue.length) { _announceActive = false; return; }
+  _announceActive = true;
+  _playChalkMsg(_announceQueue.shift(), _runAnnounceQueue);
+}
+
+function _playChalkMsg(text, onDone) {
+  const el = document.getElementById('chalk-announce');
+  if (!el) { onDone && onDone(); return; }
+
+  // Reset
+  el.style.transition = '';
+  el.style.opacity    = '1';
+  el.textContent      = '';
+  el.classList.add('visible');
+
+  // Typewriter
+  let i = 0;
+  function typeNext() {
+    if (i < text.length) {
+      el.textContent += text[i++];
+      setTimeout(typeNext, 48);
+    } else {
+      // Hold 3s → fade 500ms → next
+      setTimeout(() => {
+        el.style.transition = 'opacity 0.5s ease';
+        el.style.opacity    = '0';
+        setTimeout(() => {
+          el.classList.remove('visible');
+          el.textContent = '';
+          el.style.transition = '';
+          onDone && onDone();
+        }, 520);
+      }, 3000);
+    }
+  }
+  typeNext();
+}
+
 // ─────────────────────────────────────────────── INIT
 document.addEventListener('DOMContentLoaded', async () => {
   startClock();
@@ -123,8 +295,10 @@ async function fetchSims() {
   try {
     const r = await fetch('/api/sims');
     simsCache = await r.json();
+    detectTradeEvents(simsCache);
     renderDesks(simsCache);
     renderTeacherDesk(simsCache);
+    renderTrophyShelf(simsCache);
   } catch (e) {
     document.getElementById('desks-grid').innerHTML =
       '<div class="loading-msg text-red">Failed to load sims</div>';
@@ -148,6 +322,27 @@ function startClock() {
     else if (totalMin < 20 * 60)       session = 'After-Hours';
     else                               session = 'Closed';
     el.textContent = `${timeStr} ET · ${session}`;
+
+    // Drive wall clock hands with real ET time (smooth continuous rotation)
+    const hourHand = document.querySelector('.clock-hour');
+    const minHand  = document.querySelector('.clock-minute');
+    if (hourHand && minHand) {
+      const hourDeg = (h % 12) * 30 + m * 0.5 + s * (0.5 / 60);
+      const minDeg  = m * 6 + s * 0.1;
+      hourHand.style.transform = `translateX(-50%) rotate(${hourDeg}deg)`;
+      minHand.style.transform  = `translateX(-50%) rotate(${minDeg}deg)`;
+    }
+
+    // Market bells — play once per calendar day
+    const dateStr = et.toDateString();
+    if (h === 9 && m === 30 && s < 3 && _openBellDate !== dateStr) {
+      _openBellDate = dateStr;
+      playClassroomSound('open_bell');
+    }
+    if (h === 16 && m === 0 && s < 3 && _closeBellDate !== dateStr) {
+      _closeBellDate = dateStr;
+      playClassroomSound('close_bell');
+    }
   }
   tick();
   setInterval(tick, 1000);
@@ -459,14 +654,176 @@ function renderDesks(sims) {
     grid.appendChild(rowEl);
   }
 
+  // Live sim first — right next to teacher's desk
+  if (liveSim) appendRow('LIVE', [liveSim], 'strategy-label-live');
+
   STRATEGY_ORDER.forEach(key => {
     const group = groups[key];
     if (!group || !group.length) return;
     appendRow(STRATEGY_LABEL[key] || key.toUpperCase(), group, '');
   });
+}
 
-  // Live sim at the bottom
-  if (liveSim) appendRow('LIVE', [liveSim], 'strategy-label-live');
+// ─────────────────────────────────────────────── PERSONALITY TOOLTIPS
+
+const SIM_PERSONALITIES = {
+  MEAN_REVERSION:           '"I only buy the dip."',
+  VWAP_REVERSION:           '"Everything returns to VWAP. Everything."',
+  ZSCORE_BOUNCE:            '"They called it extreme. I called it entry."',
+  FAILED_BREAKOUT_REVERSAL: '"Fakeouts are my bread and butter."',
+  EXTREME_EXTENSION_FADE:   '"The further they run, the harder they fall."',
+  BREAKOUT:                 '"New highs? I\'m already in."',
+  ORB_BREAKOUT:             '"First 30 minutes. That\'s all I need."',
+  AFTERNOON_BREAKOUT:       '"I wait while others get chopped up."',
+  OPENING_DRIVE:            '"Gap and go. No hesitation."',
+  TREND_PULLBACK:           '"Buy the pullback, ride the trend."',
+  SWING_TREND:              '"I don\'t day-trade. I day-wait."',
+  VWAP_CONTINUATION:        '"Near VWAP and trending? Say less."',
+  TREND_RECLAIM:            '"Lost levels always get reclaimed."',
+  OPPORTUNITY:              '"I take whatever the market gives me."',
+  FVG_4H:                   '"Gaps get filled. I have patience."',
+  FVG_5M:                   '"Quick gaps, quick fills, quick profits."',
+  LIQUIDITY_SWEEP:          '"They hunt stops. I hunt them back."',
+  FVG_SWEEP_COMBO:          '"Sweep AND a gap? Now we\'re talking."',
+  FLOW_DIVERGENCE:          '"Price lies. Flow tells the truth."',
+  MULTI_TF_CONFIRM:         '"I wait for everyone to agree."',
+  GAP_FADE:                 '"Overnight gaps are overreactions. Usually."',
+  VPOC_REVERSION:           '"Volume doesn\'t lie. Price always returns."',
+  OPENING_RANGE_RECLAIM:    '"Flush, reclaim, profit. Every time."',
+  VOL_COMPRESSION_BREAKOUT: '"Quiet markets are loaded springs."',
+  VOL_SPIKE_FADE:           '"Panic is my entry signal."',
+};
+
+let _simTT = null;
+function _getTooltip() {
+  if (!_simTT) {
+    _simTT = document.createElement('div');
+    _simTT.id = 'sim-tooltip';
+    _simTT.innerHTML = '<div class="stt-phrase"></div><div class="stt-meta"></div>';
+    document.body.appendChild(_simTT);
+  }
+  return _simTT;
+}
+
+function showSimTooltip(seat, sim) {
+  const tt = _getTooltip();
+  const phrase = SIM_PERSONALITIES[sim.signal_mode] || '"Just running my algo."';
+  tt.querySelector('.stt-phrase').textContent = phrase;
+  tt.querySelector('.stt-meta').textContent = `${sim.sim_id} · ${shortName(sim.signal_mode || '')}`;
+
+  tt.classList.remove('visible', 'stt-below');
+
+  const r   = seat.getBoundingClientRect();
+  const ttH = tt.offsetHeight || 56;
+  const ttW = tt.offsetWidth  || 200;
+
+  let top, below = false;
+  if (r.top - ttH - 14 < 8) { top = r.bottom + 10; below = true; }
+  else                       { top = r.top - ttH - 14; }
+
+  const centerX  = r.left + r.width / 2;
+  const halfW    = ttW / 2;
+  const clampedX = Math.max(halfW + 8, Math.min(window.innerWidth - halfW - 8, centerX));
+
+  tt.style.top  = top + 'px';
+  tt.style.left = clampedX + 'px';
+  if (below) tt.classList.add('stt-below');
+  requestAnimationFrame(() => tt.classList.add('visible'));
+}
+
+function hideSimTooltip() {
+  if (_simTT) _simTT.classList.remove('visible');
+}
+
+// ─────────────────────────────────────────────── TROPHY SHELF
+
+function renderTrophyShelf(sims) {
+  const shelf = document.getElementById('trophy-shelf');
+  if (!shelf) return;
+
+  // Rank: 10+ trades, by win_rate desc then total_trades desc
+  const qualified = [...sims]
+    .filter(s => (s.total_trades || 0) >= 10)
+    .sort((a, b) => {
+      const wDiff = (b.win_rate || 0) - (a.win_rate || 0);
+      return wDiff !== 0 ? wDiff : (b.total_trades || 0) - (a.total_trades || 0);
+    })
+    .slice(0, 3);
+
+  const SLOTS = [
+    // [cx, cup top y, cup w, cup h, color, dark, hi]
+    [10,  20, 16, 14, '#FFD700', '#B8860B', '#FFEE88'],  // gold
+    [32,  24, 14, 12, '#C0C0C0', '#808080', '#E8E8E8'],  // silver
+    [54,  28, 12, 11, '#CD7F32', '#8B4513', '#E8A050'],  // bronze
+  ];
+
+  // Build trophy SVG paths for each slot
+  function trophyRects(cx, cupTopY, cw, ch, col, dark, hi) {
+    const lx = cx - Math.floor(cw / 2);
+    const rx = cx + Math.ceil(cw / 2);
+    const cupBotY = cupTopY + ch;
+    const stemW = Math.max(3, Math.floor(cw / 4));
+    const stemX = cx - Math.floor(stemW / 2);
+    const stemH = 5;
+    const baseW = cw - 2;
+    const baseX = cx - Math.floor(baseW / 2);
+    const shelfY = 46;
+    const baseY = shelfY - 2;
+    const stemTopY = baseY - stemH;
+    // recalculate cup bottom to match stem
+    const actualCupBotY = stemTopY;
+    const actualCupTopY = actualCupBotY - ch;
+    const rimY = actualCupTopY - 2;
+    const hlW = 2;
+
+    return `
+      <rect x="${lx}"       y="${rimY}"          width="${cw+2}" height="2"     fill="${col}"/>
+      <rect x="${lx}"       y="${actualCupTopY}" width="${cw}"   height="${ch}"  fill="${col}"/>
+      <rect x="${lx-3}"     y="${actualCupTopY+3}" width="3"     height="${Math.floor(ch*0.4)}" fill="${dark}"/>
+      <rect x="${rx}"       y="${actualCupTopY+3}" width="3"     height="${Math.floor(ch*0.4)}" fill="${dark}"/>
+      <rect x="${lx+1}"     y="${actualCupTopY+1}" width="${hlW}" height="${Math.floor(ch*0.6)}" fill="${hi}" opacity="0.55"/>
+      <rect x="${stemX}"    y="${stemTopY}"      width="${stemW}" height="${stemH}" fill="${dark}"/>
+      <rect x="${baseX}"    y="${baseY}"         width="${baseW}" height="2"     fill="${dark}"/>
+      <rect x="${baseX+1}"  y="${baseY}"         width="${baseW-2}" height="1"  fill="${col}" opacity="0.4"/>`;
+  }
+
+  const svgParts = SLOTS.map(([cx, cy, cw, ch, col, dark, hi], i) => {
+    const s = qualified[i];
+    return s ? trophyRects(cx, cy, cw, ch, col, dark, hi) : `
+      <rect x="${cx-4}" y="36" width="8" height="10" fill="${col}" opacity="0.18"/>
+      <rect x="${cx-3}" y="46" width="6" height="1"  fill="${dark}" opacity="0.15"/>`;
+  }).join('');
+
+  const labelParts = SLOTS.map(([cx], i) => {
+    const s = qualified[i];
+    const id = s ? s.sim_id : '—';
+    const wr = s ? (s.win_rate || 0).toFixed(0) + '%' : '';
+    return `<div class="trophy-label" style="flex:0 0 ${Math.round(100/3)}%;text-align:center">
+      <div class="tl-id">${id}</div>
+      <div class="tl-wr">${wr}</div>
+    </div>`;
+  }).join('');
+
+  const emptyMsg = qualified.length === 0
+    ? '<div class="trophy-empty">Term just started!</div>' : '';
+
+  shelf.innerHTML = `
+    <div class="trophy-title">TOP 3</div>
+    ${emptyMsg}
+    <svg viewBox="0 0 64 52" width="64" height="52"
+         xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+      ${svgParts}
+      <!-- shelf surface -->
+      <rect x="0" y="46" width="64" height="4" fill="#b07828"/>
+      <rect x="0" y="46" width="64" height="1" fill="#c88838"/>
+      <rect x="0" y="50" width="64" height="2" fill="rgba(0,0,0,0.22)"/>
+      <!-- brackets -->
+      <rect x="7"  y="46" width="2" height="6" fill="#7a4226"/>
+      <rect x="5"  y="50" width="6" height="2" fill="#7a4226"/>
+      <rect x="55" y="46" width="2" height="6" fill="#7a4226"/>
+      <rect x="53" y="50" width="6" height="2" fill="#7a4226"/>
+    </svg>
+    <div class="trophy-labels">${labelParts}</div>`;
 }
 
 function buildSeat(sim) {
@@ -489,11 +846,20 @@ function buildSeat(sim) {
     else               wrClass = 'wr-bad';
   }
 
+  // Sims disabled via blocked_sessions (all 4 sessions blocked) show as sleeping/grayed.
+  // New sims with 0 trades but not disabled show as normal (idle, awake).
+  const sleeping = sim.sim_id === 'SIM04' || sim.sim_id === 'SIM05';
   const seat = document.createElement('div');
   const wasSelected = currentSimId === sim.sim_id;
-  seat.className = 'seat' + (active ? ' active' : '') + (wasSelected ? ' selected' : '');
+  seat.className = 'seat' + (active ? ' active' : '') + (sleeping ? ' sleeping' : '') + (wasSelected ? ' selected' : '');
   seat.dataset.simId = sim.sim_id;
   seat.onclick = () => openDrawer(sim.sim_id);
+
+  // Personality tooltip (mouse-only — skipped on touch devices)
+  if (!('ontouchstart' in window)) {
+    seat.addEventListener('mouseenter', () => showSimTooltip(seat, sim));
+    seat.addEventListener('mouseleave', hideSimTooltip);
+  }
 
   const notebookClass = 'notebook ' + (wr == null || sim.total_trades === 0 ? '' : wr >= 50 ? 'profit' : 'loss');
 
@@ -533,158 +899,417 @@ function buildSeat(sim) {
 
 // ─────────────────────────────────────────────── STUDENT SVG (classroom character)
 const SHIRT_COLORS = [
-  '#4a7ac8','#7a5ab8','#4a9860','#c8882a','#b84a78',
-  '#2a8898','#b85a2a','#5a882a','#b83a3a','#2a6898',
-  '#988a2a','#5a4ab8','#2a8870','#884858','#3a5898',
-  '#988050','#3a6870','#907830','#a83a68','#3a2e98',
-  '#3a6888','#7a8830','#783a68',
+  '#4a6fa8','#7a4ea0','#4a8858','#b07828','#a0426a',
+  '#287880','#a04e28','#4a7828','#a03030','#285880',
+  '#887828','#4a3ea0','#287860','#784050','#2a4880',
+  '#887048','#2a5860','#806828','#903058','#2a2880',
+  '#2a5878','#6a7828','#682858',
 ];
-const SKIN_TONES = ['#f9c990','#f0a870','#d08848','#b87030','#8a5028'];
-const HAIR_COLORS = ['#1a1008','#5a3010','#c89030','#c04020','#707070','#101010'];
+const SKIN_TONES = ['#f2c08a','#e8a068','#c87840','#a86028','#7a4820'];
+const HAIR_COLORS = ['#181008','#4a2810','#b08028','#a83818','#585858','#0e0e0e'];
+// Desk item variation per student: determines what items appear on their desk
+const DESK_ITEMS = ['papers_mug', 'books_pencil', 'papers_apple', 'notebook_mug', 'books_mug', 'papers_pencil'];
 
 function studentSVG(simId, mood, idx, personality = 'casual', active = false) {
   const shirt = SHIRT_COLORS[idx % SHIRT_COLORS.length];
   const skin  = SKIN_TONES[(idx * 3) % SKIN_TONES.length];
-  const hair  = HAIR_COLORS[(idx * 2) % HAIR_COLORS.length];
+  const deskItem = DESK_ITEMS[idx % DESK_ITEMS.length];
+
+  // ── Gender assignment (deterministic by idx)
+  // idx = simNumber - 1 clamped to 0; SIM00+SIM01 share idx=0 → both female
+  // Male at idx 1,5,9,13,18,23,28,33 = SIM02,SIM06,SIM10,SIM14,SIM19,SIM24,SIM29,SIM34 (~22%)
+  const MALE_IDXS = new Set([1, 5, 9, 13, 18, 23, 28, 33]);
+  const isFemale = !MALE_IDXS.has(idx);
+
+  // Hair color — male uses original palette, female gets wider variety
+  const FEMALE_HAIR_COLORS = [
+    '#181008', // black
+    '#3a1a08', // espresso
+    '#4a2810', // dark brown
+    '#7a3818', // auburn
+    '#b08028', // blonde
+    '#c89840', // light blonde
+    '#a83818', // red
+    '#585858', // dark grey
+    '#7b3f8c', // purple (fun)
+    '#2255aa', // blue (fun)
+  ];
+  const hair = isFemale
+    ? FEMALE_HAIR_COLORS[(idx * 3 + 1) % FEMALE_HAIR_COLORS.length]
+    : HAIR_COLORS[(idx * 2) % HAIR_COLORS.length];
+
+  // Darker / lighter shades for hair detail
+  const shadeHex = (hex, delta) => hex.replace(/[0-9a-f]{2}/gi, h =>
+    Math.min(255, Math.max(0, parseInt(h, 16) + delta)).toString(16).padStart(2, '0'));
+  const hairDark  = shadeHex(hair, -28);
+  const hairLight = shadeHex(hair, +22);
+
+  // Darker shade for shirt details (collar, shadow)
+  const shirtDark = shirt.replace(/[0-9a-f]{2}/gi, (h, i) =>
+    Math.max(0, parseInt(h, 16) - 30).toString(16).padStart(2, '0'));
 
   // Laptop screen color reflects mood
-  const screenBg = mood === 'happy' ? '#0e3a1a' : mood === 'sad' ? '#3a0e0e' : '#0e1e3a';
+  const screenBg = mood === 'happy' ? '#0a2e14' : mood === 'sad' ? '#2e0a0a' : '#0a1a2e';
   const screenFg = mood === 'happy' ? '#44dd44' : mood === 'sad' ? '#dd4444' : '#4488dd';
-  const screenGlow = active ? `<rect x="16" y="43" width="16" height="9" fill="${screenFg}" opacity="0.15"/>` : '';
+  const screenGlow = active ? `<rect x="15" y="42" width="18" height="10" fill="${screenFg}" opacity="0.12"/>` : '';
+
+  // Eyelashes for female characters (1-2 pixels above each eye)
+  const lashes = isFemale ? `
+      <rect x="18" y="17" width="3" height="1" fill="#2a2018" opacity="0.75"/>
+      <rect x="20" y="16" width="1" height="1" fill="#2a2018" opacity="0.5"/>
+      <rect x="27" y="17" width="3" height="1" fill="#2a2018" opacity="0.75"/>
+      <rect x="29" y="16" width="1" height="1" fill="#2a2018" opacity="0.5"/>` : '';
 
   // Face expression
   let eyes = '', mouth = '';
   if (mood === 'happy') {
-    // ^^ style happy eyes + smile
-    eyes = `
-      <path d="M19,19 Q20,17 21,19" fill="none" stroke="#333" stroke-width="1.2" stroke-linecap="round"/>
-      <path d="M27,19 Q28,17 29,19" fill="none" stroke="#333" stroke-width="1.2" stroke-linecap="round"/>`;
-    mouth = `<path d="M21,23 Q24,26 27,23" fill="none" stroke="#333" stroke-width="1.2" stroke-linecap="round"/>`;
+    eyes = `${lashes}
+      <rect x="18" y="18" width="3" height="2" rx="0" fill="#2a2018"/>
+      <rect x="27" y="18" width="3" height="2" rx="0" fill="#2a2018"/>
+      <rect x="19" y="17" width="1" height="1" fill="#2a2018" opacity="0.4"/>
+      <rect x="28" y="17" width="1" height="1" fill="#2a2018" opacity="0.4"/>`;
+    mouth = `<rect x="20" y="23" width="8" height="2" rx="1" fill="#2a2018" opacity="0.6"/>
+      <rect x="21" y="24" width="6" height="1" fill="#fff" opacity="0.3"/>`;
   } else if (mood === 'sad') {
-    // sad droopy eyes + frown
-    eyes = `
-      <path d="M19,18 Q20,20 21,18" fill="none" stroke="#333" stroke-width="1.2" stroke-linecap="round"/>
-      <path d="M27,18 Q28,20 29,18" fill="none" stroke="#333" stroke-width="1.2" stroke-linecap="round"/>`;
-    mouth = `<path d="M21,25 Q24,22 27,25" fill="none" stroke="#333" stroke-width="1.2" stroke-linecap="round"/>`;
+    eyes = `${lashes}
+      <rect x="18" y="18" width="3" height="3" rx="0" fill="#2a2018"/>
+      <rect x="18" y="18" width="3" height="1" fill="${skin}" opacity="0.5"/>
+      <rect x="27" y="18" width="3" height="3" rx="0" fill="#2a2018"/>
+      <rect x="27" y="18" width="3" height="1" fill="${skin}" opacity="0.5"/>`;
+    mouth = `<rect x="21" y="24" width="6" height="1" fill="#2a2018" opacity="0.5"/>`;
   } else {
-    // neutral dots + flat mouth
-    eyes = `
-      <circle cx="20" cy="19" r="1.2" fill="#333"/>
-      <circle cx="28" cy="19" r="1.2" fill="#333"/>`;
-    mouth = `<line x1="21" y1="24" x2="27" y2="24" stroke="#333" stroke-width="1.2" stroke-linecap="round"/>`;
+    eyes = `${lashes}
+      <rect x="18" y="18" width="3" height="3" rx="0" fill="#2a2018"/>
+      <rect x="19" y="18" width="1" height="1" fill="#fff" opacity="0.6"/>
+      <rect x="27" y="18" width="3" height="3" rx="0" fill="#2a2018"/>
+      <rect x="28" y="18" width="1" height="1" fill="#fff" opacity="0.6"/>`;
+    mouth = `<rect x="21" y="24" width="6" height="1" fill="#2a2018" opacity="0.4"/>`;
   }
 
-  // Front-facing personality accessories
+  // Personality accessories — pixel art style
   let accessory = '';
   if (personality === 'scholar') {
-    // Glasses on face
     accessory = `
-      <rect x="17" y="17.5" width="6" height="4" rx="1.5" fill="none" stroke="#444" stroke-width="1"/>
-      <rect x="25" y="17.5" width="6" height="4" rx="1.5" fill="none" stroke="#444" stroke-width="1"/>
-      <line x1="23" y1="19.5" x2="25" y2="19.5" stroke="#444" stroke-width="1"/>
-      <line x1="17" y1="19.5" x2="15" y2="20" stroke="#444" stroke-width="0.8"/>
-      <line x1="31" y1="19.5" x2="33" y2="20" stroke="#444" stroke-width="0.8"/>`;
+      <rect x="16" y="17" width="7" height="5" fill="none" stroke="#3a3a5a" stroke-width="1.2"/>
+      <rect x="25" y="17" width="7" height="5" fill="none" stroke="#3a3a5a" stroke-width="1.2"/>
+      <rect x="23" y="19" width="2" height="1" fill="#3a3a5a"/>
+      <rect x="16" y="19" width="1" height="1" fill="#3a3a5a" opacity="0.6"/>
+      <rect x="32" y="19" width="1" height="1" fill="#3a3a5a" opacity="0.6"/>
+      <rect x="16" y="17" width="1" height="1" fill="rgba(255,255,255,0.2)"/>
+      <rect x="25" y="17" width="1" height="1" fill="rgba(255,255,255,0.2)"/>`;
   } else if (personality === 'athlete') {
-    // Headband across forehead
     accessory = `
-      <rect x="11" y="12" width="26" height="4" rx="2" fill="#e03030" opacity="0.9"/>
-      <rect x="11" y="13" width="26" height="1.5" fill="rgba(255,255,255,0.2)" rx="0.5"/>`;
+      <rect x="11" y="11" width="26" height="4" fill="#c02828"/>
+      <rect x="11" y="12" width="26" height="1" fill="#e04040" opacity="0.6"/>
+      <rect x="22" y="11" width="4" height="4" fill="#e8e8e8" opacity="0.3"/>`;
   } else if (personality === 'trend') {
-    // Tie on chest
     accessory = `
-      <polygon points="24,33 22,37 24,43 26,37" fill="#c09010" opacity="0.9"/>
-      <rect x="22" y="32" width="4" height="3" rx="0.5" fill="#e0b020" opacity="0.85"/>`;
+      <rect x="22" y="32" width="4" height="2" fill="#d0a020"/>
+      <rect x="22" y="34" width="4" height="2" fill="#b89018"/>
+      <rect x="23" y="36" width="2" height="4" fill="#a08010"/>
+      <rect x="22" y="40" width="4" height="2" fill="#b89018"/>`;
   }
 
-  // Front-facing character: background → chair back → body → desk → face
+  // ── HAIR ─────────────────────────────────────────────────────────────
+  let hairSVG = '';
+  if (!isFemale) {
+    // Original male hair styles (4 variants)
+    const hairStyle = idx % 4;
+    if (hairStyle === 0) {
+      hairSVG = `
+      <rect x="12" y="4" width="24" height="10" rx="4" fill="${hair}"/>
+      <rect x="14" y="3" width="20" height="4" rx="3" fill="${hair}"/>
+      <rect x="13" y="10" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else if (hairStyle === 1) {
+      hairSVG = `
+      <rect x="12" y="4" width="24" height="12" rx="5" fill="${hair}"/>
+      <rect x="11" y="6" width="12" height="6" rx="2" fill="${hair}"/>
+      <rect x="14" y="3" width="18" height="4" rx="3" fill="${hair}"/>
+      <rect x="13" y="10" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else if (hairStyle === 2) {
+      hairSVG = `
+      <rect x="12" y="5" width="24" height="10" rx="4" fill="${hair}"/>
+      <rect x="16" y="2" width="4" height="5" rx="1" fill="${hair}"/>
+      <rect x="22" y="1" width="4" height="6" rx="1" fill="${hair}"/>
+      <rect x="28" y="3" width="3" height="4" rx="1" fill="${hair}"/>
+      <rect x="13" y="10" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else {
+      hairSVG = `
+      <rect x="11" y="4" width="26" height="14" rx="6" fill="${hair}"/>
+      <ellipse cx="24" cy="5" rx="12" ry="5" fill="${hair}"/>
+      <rect x="13" y="10" width="22" height="4" fill="${hair}" opacity="0.3"/>`;
+    }
+  } else {
+    // Female hair styles (6 variants, idx % 6)
+    const femStyle = idx % 6;
+    if (femStyle === 0) {
+      // Long straight — strands down beside shoulders
+      hairSVG = `
+      <rect x="11" y="4" width="26" height="12" rx="5" fill="${hair}"/>
+      <rect x="13" y="3" width="22" height="5" rx="3" fill="${hair}"/>
+      <rect x="10" y="12" width="4" height="20" fill="${hair}"/>
+      <rect x="11" y="12" width="2" height="20" fill="${hairLight}" opacity="0.3"/>
+      <rect x="34" y="12" width="4" height="20" fill="${hair}"/>
+      <rect x="34" y="12" width="2" height="20" fill="${hairLight}" opacity="0.3"/>
+      <rect x="10" y="30" width="3" height="2" fill="${hair}" opacity="0.55"/>
+      <rect x="35" y="30" width="3" height="2" fill="${hair}" opacity="0.55"/>
+      <rect x="13" y="11" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else if (femStyle === 1) {
+      // Ponytail — main cap + tail sweeping right
+      hairSVG = `
+      <rect x="12" y="4" width="24" height="12" rx="5" fill="${hair}"/>
+      <rect x="14" y="3" width="20" height="5" rx="3" fill="${hair}"/>
+      <rect x="34" y="7" width="4" height="4" fill="${hairDark}"/>
+      <rect x="36" y="8" width="6" height="3" fill="${hair}"/>
+      <rect x="38" y="10" width="5" height="15" fill="${hair}"/>
+      <rect x="38" y="10" width="3" height="15" fill="${hairLight}" opacity="0.25"/>
+      <rect x="39" y="24" width="4" height="2" fill="${hair}" opacity="0.55"/>
+      <rect x="13" y="11" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else if (femStyle === 2) {
+      // Bob cut — shoulder-length, straight-cut bottom
+      hairSVG = `
+      <rect x="11" y="4" width="26" height="12" rx="5" fill="${hair}"/>
+      <rect x="13" y="3" width="22" height="5" rx="3" fill="${hair}"/>
+      <rect x="10" y="11" width="5" height="17" fill="${hair}"/>
+      <rect x="33" y="11" width="5" height="17" fill="${hair}"/>
+      <rect x="10" y="27" width="5" height="2" fill="${hairDark}" opacity="0.5"/>
+      <rect x="33" y="27" width="5" height="2" fill="${hairDark}" opacity="0.5"/>
+      <rect x="11" y="12" width="2" height="14" fill="${hairLight}" opacity="0.25"/>
+      <rect x="35" y="12" width="2" height="14" fill="${hairLight}" opacity="0.25"/>
+      <rect x="13" y="11" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else if (femStyle === 3) {
+      // Bun — gathered round bun raised above head
+      hairSVG = `
+      <rect x="12" y="6" width="24" height="12" rx="5" fill="${hair}"/>
+      <rect x="13" y="5" width="22" height="4" rx="2" fill="${hair}"/>
+      <rect x="18" y="0" width="12" height="9" rx="4" fill="${hair}"/>
+      <rect x="20" y="0" width="8" height="5" rx="3" fill="${hairLight}" opacity="0.35"/>
+      <rect x="20" y="1" width="4" height="2" fill="${hairLight}" opacity="0.5"/>
+      <rect x="18" y="7" width="12" height="1" fill="${hairDark}" opacity="0.4"/>
+      <rect x="13" y="12" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else if (femStyle === 4) {
+      // Braids — two braids with alternating segments
+      hairSVG = `
+      <rect x="12" y="4" width="24" height="12" rx="5" fill="${hair}"/>
+      <rect x="14" y="3" width="20" height="5" rx="3" fill="${hair}"/>
+      <rect x="10" y="14" width="4" height="4" fill="${hair}"/>
+      <rect x="10" y="18" width="4" height="3" fill="${hairDark}"/>
+      <rect x="10" y="21" width="4" height="4" fill="${hair}"/>
+      <rect x="10" y="25" width="4" height="3" fill="${hairDark}"/>
+      <rect x="10" y="28" width="4" height="3" fill="${hair}"/>
+      <rect x="11" y="30" width="2" height="2" fill="${hairDark}" opacity="0.6"/>
+      <rect x="34" y="14" width="4" height="4" fill="${hair}"/>
+      <rect x="34" y="18" width="4" height="3" fill="${hairDark}"/>
+      <rect x="34" y="21" width="4" height="4" fill="${hair}"/>
+      <rect x="34" y="25" width="4" height="3" fill="${hairDark}"/>
+      <rect x="34" y="28" width="4" height="3" fill="${hair}"/>
+      <rect x="35" y="30" width="2" height="2" fill="${hairDark}" opacity="0.6"/>
+      <rect x="13" y="11" width="22" height="3" fill="${hair}" opacity="0.3"/>`;
+    } else {
+      // Long with bangs — bangs across forehead, long side strands
+      hairSVG = `
+      <rect x="11" y="4" width="26" height="10" rx="4" fill="${hair}"/>
+      <rect x="13" y="3" width="22" height="5" rx="3" fill="${hair}"/>
+      <rect x="12" y="12" width="24" height="4" fill="${hair}"/>
+      <rect x="13" y="13" width="22" height="2" fill="${hairLight}" opacity="0.2"/>
+      <rect x="10" y="13" width="4" height="22" fill="${hair}"/>
+      <rect x="11" y="13" width="2" height="22" fill="${hairLight}" opacity="0.25"/>
+      <rect x="34" y="13" width="4" height="22" fill="${hair}"/>
+      <rect x="34" y="13" width="2" height="22" fill="${hairLight}" opacity="0.25"/>
+      <rect x="10" y="33" width="3" height="2" fill="${hair}" opacity="0.55"/>
+      <rect x="35" y="33" width="3" height="2" fill="${hair}" opacity="0.55"/>`;
+    }
+
+    // Optional hair accessories (vary by idx, not all female characters)
+    const ACC_COLORS = ['#e85080','#c030a0','#e86020','#5050d0','#30a060'];
+    if (idx % 5 === 0) {
+      // Small pixel bow (top-right of head)
+      const bc = ACC_COLORS[idx % ACC_COLORS.length];
+      hairSVG += `
+      <rect x="29" y="4" width="3" height="2" fill="${bc}"/>
+      <rect x="32" y="3" width="3" height="2" fill="${bc}"/>
+      <rect x="29" y="6" width="3" height="2" fill="${bc}"/>
+      <rect x="31" y="4" width="2" height="4" fill="${bc}" opacity="0.75"/>`;
+    } else if (idx % 7 === 0) {
+      // Thin headband across forehead
+      const bc = ACC_COLORS[(idx + 2) % ACC_COLORS.length];
+      hairSVG += `
+      <rect x="12" y="12" width="24" height="2" fill="${bc}" opacity="0.85"/>
+      <rect x="13" y="12" width="22" height="1" fill="rgba(255,255,255,0.2)"/>`;
+    } else if (idx % 11 === 0) {
+      // Hair clip on right side
+      hairSVG += `
+      <rect x="33" y="10" width="4" height="2" fill="#d0c020"/>
+      <rect x="33" y="11" width="4" height="1" fill="#a09018"/>`;
+    }
+  }
+
+  // Optional necklace for some female characters
+  const necklace = (isFemale && idx % 3 === 0) ? `
+      <rect x="21" y="32" width="2" height="1" fill="#d0a020"/>
+      <rect x="25" y="32" width="2" height="1" fill="#d0a020"/>
+      <rect x="23" y="33" width="2" height="1" fill="#b88018" opacity="0.8"/>` : '';
+
+  // Desk items — left side and right side
+  let leftItems = '', rightItems = '';
+  if (deskItem === 'papers_mug') {
+    leftItems = `
+      <rect x="1" y="42" width="10" height="8" fill="#ede4d0"/>
+      <rect x="2" y="44" width="8" height="1" fill="rgba(120,100,60,0.3)"/>
+      <rect x="2" y="46" width="6" height="1" fill="rgba(120,100,60,0.3)"/>`;
+    rightItems = `
+      <rect x="38" y="43" width="7" height="7" fill="#a85028"/>
+      <rect x="38" y="43" width="7" height="2" fill="#c06030"/>
+      <rect x="45" y="45" width="2" height="3" fill="#a85028"/>
+      <rect x="39" y="44" width="2" height="1" fill="rgba(255,255,255,0.15)"/>`;
+  } else if (deskItem === 'books_pencil') {
+    leftItems = `
+      <rect x="1" y="44" width="10" height="6" fill="#c04040"/>
+      <rect x="1" y="44" width="10" height="1" fill="#d06060"/>
+      <rect x="2" y="42" width="8" height="3" fill="#4060b0"/>
+      <rect x="2" y="42" width="8" height="1" fill="#5078c8"/>`;
+    rightItems = `
+      <rect x="40" y="43" width="1" height="8" fill="#d8c020" transform="rotate(-12 40 47)"/>
+      <rect x="40" y="42" width="1" height="2" fill="#e8a088" transform="rotate(-12 40 43)"/>`;
+  } else if (deskItem === 'papers_apple') {
+    leftItems = `
+      <rect x="1" y="42" width="10" height="8" fill="#ede4d0"/>
+      <rect x="2" y="44" width="8" height="1" fill="rgba(120,100,60,0.3)"/>
+      <rect x="2" y="46" width="5" height="1" fill="rgba(120,100,60,0.3)"/>`;
+    rightItems = `
+      <circle cx="42" cy="47" r="4" fill="#c83030"/>
+      <rect x="41" y="42" width="2" height="2" fill="#5a8030"/>
+      <rect x="42" y="42" width="1" height="3" fill="#6a4020"/>`;
+  } else if (deskItem === 'notebook_mug') {
+    leftItems = `
+      <rect x="1" y="42" width="10" height="8" fill="#e8d8a8"/>
+      <rect x="1" y="42" width="2" height="8" fill="#c0a870"/>
+      <rect x="4" y="44" width="6" height="1" fill="rgba(100,80,40,0.3)"/>
+      <rect x="4" y="46" width="4" height="1" fill="rgba(100,80,40,0.3)"/>`;
+    rightItems = `
+      <rect x="38" y="43" width="7" height="7" fill="#486898"/>
+      <rect x="38" y="43" width="7" height="2" fill="#5880b0"/>
+      <rect x="45" y="45" width="2" height="3" fill="#486898"/>`;
+  } else if (deskItem === 'books_mug') {
+    leftItems = `
+      <rect x="1" y="44" width="10" height="6" fill="#307848"/>
+      <rect x="1" y="44" width="10" height="1" fill="#409858"/>
+      <rect x="2" y="42" width="9" height="3" fill="#884030"/>
+      <rect x="2" y="42" width="9" height="1" fill="#a85840"/>`;
+    rightItems = `
+      <rect x="38" y="43" width="7" height="7" fill="#a85028"/>
+      <rect x="38" y="43" width="7" height="2" fill="#c06030"/>
+      <rect x="45" y="45" width="2" height="3" fill="#a85028"/>`;
+  } else {
+    leftItems = `
+      <rect x="1" y="42" width="10" height="8" fill="#ede4d0"/>
+      <rect x="2" y="44" width="8" height="1" fill="rgba(120,100,60,0.3)"/>`;
+    rightItems = `
+      <rect x="40" y="43" width="1" height="8" fill="#d8c020" transform="rotate(-12 40 47)"/>
+      <rect x="40" y="42" width="1" height="2" fill="#e8a088" transform="rotate(-12 40 43)"/>`;
+  }
+
+  // Build the full character SVG
   return `<svg viewBox="0 0 48 64" width="72" height="96" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
 
-  <!-- ── CHAIR BACK ── -->
-  <rect x="6"  y="28" width="36" height="6"  rx="3" fill="#6b3a12"/>
-  <rect x="8"  y="29" width="32" height="4"  rx="2" fill="#8a4e1c"/>
+  <!-- ── CHAIR ── -->
+  <rect x="8" y="28" width="32" height="5" fill="#5a2e0c"/>
+  <rect x="9" y="29" width="30" height="3" fill="#7a3e18"/>
+  <rect x="10" y="30" width="28" height="1" fill="rgba(255,255,255,0.08)"/>
 
-  <!-- ── BODY / TORSO ── -->
-  <!-- Neck -->
-  <rect x="20" y="26" width="8" height="6" rx="2" fill="${skin}"/>
-  <!-- Shirt body -->
-  <rect x="9"  y="31" width="30" height="16" rx="3" fill="${shirt}"/>
-  <!-- Collar V -->
-  <polygon points="24,31 21,34 27,34" fill="${skin}" opacity="0.7"/>
+  <!-- ── BODY ── -->
+  <rect x="20" y="26" width="8" height="5" fill="${skin}"/>
+  <!-- Shirt -->
+  <rect x="10" y="30" width="28" height="16" fill="${shirt}"/>
+  <rect x="10" y="30" width="28" height="2" fill="${shirtDark}"/>
+  <!-- Collar -->
+  <rect x="20" y="30" width="8" height="3" fill="${skin}" opacity="0.6"/>
+  <!-- Shirt seam -->
+  <rect x="23" y="33" width="2" height="10" fill="${shirtDark}" opacity="0.15"/>
   <!-- Left arm -->
-  <rect x="2"  y="32" width="9" height="12" rx="4" fill="${shirt}"/>
-  <rect x="1"  y="42" width="8" height="5"  rx="3" fill="${skin}"/>
+  <rect x="3" y="31" width="8" height="12" fill="${shirt}"/>
+  <rect x="3" y="31" width="8" height="1" fill="${shirtDark}" opacity="0.4"/>
+  <rect x="2" y="42" width="8" height="4" fill="${skin}"/>
   <!-- Right arm -->
-  <rect x="37" y="32" width="9" height="12" rx="4" fill="${shirt}"/>
-  <rect x="39" y="42" width="8" height="5"  rx="3" fill="${skin}"/>
+  <rect x="37" y="31" width="8" height="12" fill="${shirt}"/>
+  <rect x="37" y="31" width="8" height="1" fill="${shirtDark}" opacity="0.4"/>
+  <rect x="38" y="42" width="8" height="4" fill="${skin}"/>
 
-  <!-- Personality accessory on body (tie) -->
+  <!-- Body accessory (tie for trend) -->
   ${personality === 'trend' ? accessory : ''}
 
-  <!-- ── DESK (in front of body, lower half) ── -->
-  <!-- Desk top surface -->
-  <rect x="0"  y="41" width="48" height="10" fill="#c88030"/>
-  <line x1="0" y1="46" x2="48" y2="46" stroke="#a86820" stroke-width="0.6" opacity="0.4"/>
-  <!-- Desk front edge (3D) -->
-  <rect x="0"  y="51" width="48" height="5"  fill="#7a3e0c"/>
-  <rect x="0"  y="55" width="48" height="1"  fill="rgba(0,0,0,0.2)"/>
+  <!-- Necklace (some female characters) -->
+  ${necklace}
 
-  <!-- Laptop on desk -->
-  <!-- Laptop base/keyboard -->
-  <rect x="13" y="44" width="22" height="6" rx="1" fill="#2a2a3a"/>
-  <rect x="14" y="45" width="20" height="4" rx="0.5" fill="#333345"/>
-  <!-- Keys hint -->
-  <rect x="15" y="46" width="4"  height="1" rx="0.3" fill="#4a4a60" opacity="0.9"/>
-  <rect x="21" y="46" width="6"  height="1" rx="0.3" fill="#4a4a60" opacity="0.9"/>
-  <rect x="29" y="46" width="4"  height="1" rx="0.3" fill="#4a4a60" opacity="0.9"/>
-  <!-- Laptop lid (open, tilted back) -->
-  <rect x="13" y="36" width="22" height="10" rx="1" fill="#1e1e2e"/>
-  <rect x="14" y="37" width="20" height="8"  fill="${screenBg}"/>
+  <!-- ── DESK ── -->
+  <!-- Desk surface with wood grain -->
+  <rect x="0" y="41" width="48" height="10" fill="#b07828"/>
+  <rect x="0" y="41" width="48" height="1" fill="#c88838"/>
+  <rect x="0" y="44" width="48" height="1" fill="rgba(0,0,0,0.06)"/>
+  <rect x="0" y="47" width="48" height="1" fill="rgba(0,0,0,0.04)"/>
+  <!-- Grain lines -->
+  <rect x="5" y="42" width="38" height="1" fill="rgba(160,100,40,0.12)"/>
+  <rect x="8" y="45" width="32" height="1" fill="rgba(160,100,40,0.08)"/>
+  <rect x="3" y="48" width="42" height="1" fill="rgba(160,100,40,0.06)"/>
+  <!-- Desk front face -->
+  <rect x="0" y="51" width="48" height="5" fill="#6a3810"/>
+  <rect x="0" y="51" width="48" height="1" fill="#7a4818"/>
+  <rect x="0" y="55" width="48" height="1" fill="rgba(0,0,0,0.25)"/>
+  <!-- Desk legs (pixel style) -->
+  <rect x="2" y="56" width="4" height="6" fill="#5a3010"/>
+  <rect x="42" y="56" width="4" height="6" fill="#5a3010"/>
+  <rect x="2" y="56" width="4" height="1" fill="#6a4018"/>
+
+  <!-- ── LAPTOP ── -->
+  <rect x="14" y="44" width="20" height="6" fill="#2a2838"/>
+  <rect x="15" y="45" width="18" height="4" fill="#363448"/>
+  <!-- Keys -->
+  <rect x="16" y="46" width="4" height="1" fill="#4a4860"/>
+  <rect x="22" y="46" width="5" height="1" fill="#4a4860"/>
+  <rect x="29" y="46" width="3" height="1" fill="#4a4860"/>
+  <!-- Screen lid -->
+  <rect x="14" y="36" width="20" height="9" fill="#1e1c2c"/>
+  <rect x="15" y="37" width="18" height="7" fill="${screenBg}"/>
   ${screenGlow}
-  <!-- Screen content lines -->
-  <rect x="16" y="38" width="10" height="1.5" fill="${screenFg}" opacity="0.75"/>
-  <rect x="16" y="40" width="14" height="1.5" fill="${screenFg}" opacity="0.55"/>
-  <rect x="16" y="42" width="7"  height="1.5" fill="${screenFg}" opacity="0.40"/>
-  <!-- Laptop hinge line -->
-  <rect x="13" y="45" width="22" height="1" fill="#111120" opacity="0.5"/>
+  <!-- Screen content (chart-like lines) -->
+  <rect x="17" y="38" width="4" height="1" fill="${screenFg}" opacity="0.8"/>
+  <rect x="22" y="38" width="3" height="1" fill="${screenFg}" opacity="0.5"/>
+  <rect x="17" y="40" width="8" height="1" fill="${screenFg}" opacity="0.6"/>
+  <rect x="27" y="40" width="4" height="1" fill="${screenFg}" opacity="0.4"/>
+  <rect x="17" y="42" width="5" height="1" fill="${screenFg}" opacity="0.35"/>
+  <!-- Hinge -->
+  <rect x="14" y="44" width="20" height="1" fill="#141228" opacity="0.6"/>
 
-  <!-- Papers left of desk -->
-  <rect x="1"  y="42" width="10" height="8" rx="0.5" fill="#f0e8d4"/>
-  <rect x="2"  y="44" width="8"  height="1" fill="rgba(140,120,80,0.4)"/>
-  <rect x="2"  y="46" width="6"  height="1" fill="rgba(140,120,80,0.4)"/>
-  <rect x="2"  y="48" width="7"  height="1" fill="rgba(140,120,80,0.4)"/>
-
-  <!-- Mug right of desk -->
-  <rect x="38" y="43" width="7" height="7" rx="1" fill="#bb6030"/>
-  <rect x="38" y="43" width="7" height="2" rx="1" fill="#dd7040"/>
-  <path d="M45,46 Q48,46 48,48 Q48,50 45,50" fill="none" stroke="#bb6030" stroke-width="1.3"/>
+  <!-- Desk items -->
+  ${leftItems}
+  ${rightItems}
 
   <!-- ── HEAD ── -->
-  <!-- Hair (top + sides) -->
-  <rect x="11" y="5"  width="26" height="16" rx="6" fill="${hair}"/>
-  <!-- Hair top volume -->
-  <ellipse cx="24" cy="6" rx="11" ry="5" fill="${hair}"/>
+  ${hairSVG}
   <!-- Face -->
-  <rect x="13" y="10" width="22" height="18" rx="5" fill="${skin}"/>
-  <!-- Ear left -->
-  <rect x="10" y="14" width="4" height="6" rx="2" fill="${skin}"/>
-  <!-- Ear right -->
-  <rect x="34" y="14" width="4" height="6" rx="2" fill="${skin}"/>
-  <!-- Hair shadow on forehead -->
-  <rect x="13" y="10" width="22" height="4" rx="3" fill="${hair}" opacity="0.35"/>
+  <rect x="13" y="10" width="22" height="18" rx="4" fill="${skin}"/>
+  <!-- Ears -->
+  <rect x="11" y="15" width="3" height="5" fill="${skin}"/>
+  <rect x="34" y="15" width="3" height="5" fill="${skin}"/>
+  <rect x="11" y="16" width="1" height="3" fill="rgba(0,0,0,0.06)"/>
+  <rect x="36" y="16" width="1" height="3" fill="rgba(0,0,0,0.06)"/>
 
   <!-- Eyes & mouth -->
   ${eyes}
   ${mouth}
 
-  <!-- Nose -->
-  <rect x="23" y="21" width="2" height="1" rx="0.5" fill="${skin}" opacity="0"/>
-  <path d="M22,21 Q24,23 26,21" fill="none" stroke="rgba(0,0,0,0.15)" stroke-width="0.8"/>
+  <!-- Nose (pixel dot) -->
+  <rect x="23" y="21" width="2" height="2" fill="rgba(0,0,0,0.08)"/>
 
-  <!-- Personality accessory on head (glasses or headband) -->
+  <!-- Cheek blush -->
+  <rect x="15" y="22" width="3" height="2" fill="#e8a088" opacity="${mood === 'happy' ? '0.4' : '0.15'}"/>
+  <rect x="30" y="22" width="3" height="2" fill="#e8a088" opacity="${mood === 'happy' ? '0.4' : '0.15'}"/>
+
+  <!-- Head accessory (glasses, headband) -->
   ${personality !== 'trend' ? accessory : ''}
 
   <!-- ── SHADOW ── -->
-  <ellipse cx="24" cy="62" rx="18" ry="2" fill="rgba(0,0,0,0.15)"/>
+  <ellipse cx="24" cy="62" rx="18" ry="2" fill="rgba(0,0,0,0.12)"/>
 </svg>`;
 }
 
@@ -902,29 +1527,18 @@ async function fetchChartAndPredictions() {
     ]);
     const results = await Promise.all(fetches);
 
-    // Compute shared x-axis window in ET epoch-ms
-    let commonStart = 0, commonEnd = 0;
-    for (let i = 0; i < symbols.length; i++) {
-      const candles = results[i * 2].candles || [];
-      if (!candles.length) continue;
-      const t0 = toETMs(candles[0].t);
-      const t1 = toETMs(candles[candles.length - 1].t);
-      commonStart = commonStart ? Math.max(commonStart, t0) : t0;
-      commonEnd   = commonEnd   ? Math.max(commonEnd,  t1) : t1;
-    }
-
     for (let i = 0; i < symbols.length; i++) {
       const sym      = symbols[i];
       const chartData = results[i * 2];
       const predData  = results[i * 2 + 1];
-      _updateSymbolCard(sym, chartData.candles || [], predData.predictions || [], commonStart || undefined, commonEnd || undefined);
+      _updateSymbolCard(sym, chartData.candles || [], predData.predictions || []);
     }
   } catch (e) {
     console.warn('symbol chart fetch error', e);
   }
 }
 
-function _updateSymbolCard(sym, candles, preds, xMin, xMax) {
+function _updateSymbolCard(sym, candles, preds) {
   const chart = symbolCharts[sym];
   if (!chart) return;
 
@@ -961,10 +1575,6 @@ function _updateSymbolCard(sym, candles, preds, xMin, xMax) {
     { name: 'pred_cur',  type: 'line',        data: curSeg },
     { name: 'pred_prev', type: 'line',        data: prevSeg },
   ], true);
-
-  if (xMin && xMax) {
-    chart.updateOptions({ xaxis: { min: xMin, max: xMax + 60000 } }, false, false);
-  }
 
   if (candles.length) {
     const last  = candles[candles.length - 1];
@@ -1267,6 +1877,25 @@ function toggleTradeRow(idx) {
   el.classList.toggle('expanded');
 }
 
+function toggleReplayChart(simId, tradeId, idx, e) {
+  if (e) e.stopPropagation();
+  const wrap = document.getElementById('tr-replay-wrap-' + idx);
+  const img  = document.getElementById('tr-replay-chart-' + idx);
+  const btn  = document.getElementById('tr-replay-btn-' + idx);
+  if (!wrap) return;
+  const isOpen = !wrap.classList.contains('hidden');
+  if (isOpen) {
+    wrap.classList.add('hidden');
+    if (btn) btn.textContent = '▶ Replay';
+  } else {
+    wrap.classList.remove('hidden');
+    if (btn) btn.textContent = '▼ Hide';
+    if (img && !img.src.includes('/api/trades/')) {
+      img.src = `/api/trades/${simId}/${encodeURIComponent(tradeId)}/chart?t=${Date.now()}`;
+    }
+  }
+}
+
 function tdDetail(label, val, cls = '') {
   return `<div class="td-detail-item">
     <span class="td-detail-label">${label}</span>
@@ -1556,10 +2185,22 @@ function renderTradeAccordionWithDetails(trades, container, simId) {
             ${t.regime ? tdDetail('Regime', t.regime) : ''}
           </div>
           ${t.trade_id ? `
-          <button class="tr-details-btn${isSelected ? ' tr-details-btn-active' : ''}"
-                  onclick="openTradeDetails('${simId}','${t.trade_id}',${idx},event)">
-            ${isSelected ? '✓ Viewing' : '[Details]'}
-          </button>` : ''}
+          <div class="tr-action-row">
+            <button class="tr-details-btn${isSelected ? ' tr-details-btn-active' : ''}"
+                    onclick="openTradeDetails('${simId}','${t.trade_id}',${idx},event)">
+              ${isSelected ? '✓ Viewing' : '[Details]'}
+            </button>
+            <button class="tr-replay-btn" id="tr-replay-btn-${idx}"
+                    onclick="toggleReplayChart('${simId}','${t.trade_id}',${idx},event)">
+              ▶ Replay
+            </button>
+          </div>
+          <div class="tr-replay-wrap hidden" id="tr-replay-wrap-${idx}">
+            <div class="tr-replay-loading" id="tr-replay-load-${idx}">Loading chart…</div>
+            <img class="tr-replay-img hidden" id="tr-replay-chart-${idx}" src="" alt="Trade replay"
+                 onload="this.classList.remove('hidden');document.getElementById('tr-replay-load-${idx}').classList.add('hidden')"
+                 onerror="this.classList.add('hidden');document.getElementById('tr-replay-load-${idx}').textContent='Replay unavailable'"/>
+          </div>` : ''}
         </div>
       </div>`;
   }).join('');

@@ -868,6 +868,13 @@ async def open_trade_if_valid(ctx=None):
     if ctx is None:
         ctx = DecisionContext()
 
+    try:
+        from core.runtime_state import RUNTIME
+        if not RUNTIME.can_enter():
+            return f"runtime_{RUNTIME.state.value.lower()}"
+    except ImportError:
+        pass
+
     _record_signal_attempt()
 
     acc = load_account()
