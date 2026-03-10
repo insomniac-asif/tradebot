@@ -1,9 +1,89 @@
 # signals/predictor.py
 
-from datetime import datetime
-import pytz
+import json
 import math
+import os
+from datetime import datetime
+
+import pytz
+
 from core.data_service import get_market_dataframe
+from signals.regime import get_regime
+from signals.session_classifier import classify_session
+
+# ── learned-weight loader (file-stat cache) ───────────────────────────────────
+_WEIGHTS_FILE  = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "predictor_weights.json")
+_weights_cache: dict = {}
+_weights_mtime: float = 0.0
+
+
+def _load_weights() -> dict:
+    """Return cached predictor weights, reloading when the file changes."""
+    global _weights_cache, _weights_mtime
+    try:
+        mtime = os.path.getmtime(_WEIGHTS_FILE)
+        if mtime != _weights_mtime:
+            with open(_WEIGHTS_FILE) as f:
+                _weights_cache = json.load(f)
+            _weights_mtime = mtime
+    except Exception:
+        pass
+    return _weights_cache
+
+
+def _apply_biases(
+    bullish_score: float,
+    bearish_score: float,
+    range_score: float,
+    regime: str,
+    session: str,
+    volatility: str,
+    weights: dict,
+) -> tuple[float, float, float]:
+    """
+    Add learned bias corrections to pre-softmax scores.
+
+    Priority order (most → least specific):
+      1. regime × session combo  (if available, replaces regime + session)
+      2. regime + session separately
+      3. volatility (always added at half weight as a supplementary signal)
+    """
+    combo_key = f"{regime}_{session}"
+    combo     = weights.get("regime_session", {}).get(combo_key)
+
+    if combo:
+        # Use the more-specific combined bias
+        bullish_score += combo.get("bullish", 0.0)
+        bearish_score += combo.get("bearish", 0.0)
+        range_score   += combo.get("range",   0.0)
+    else:
+        # Fall back to independent regime + session biases
+        r_bias = weights.get("regime",  {}).get(regime,  {})
+        s_bias = weights.get("session", {}).get(session, {})
+        bullish_score += r_bias.get("bullish", 0.0) + s_bias.get("bullish", 0.0)
+        bearish_score += r_bias.get("bearish", 0.0) + s_bias.get("bearish", 0.0)
+        range_score   += r_bias.get("range",   0.0) + s_bias.get("range",   0.0)
+
+    # Volatility bias always layered on top (half weight — supplementary)
+    v_bias = weights.get("volatility", {}).get(volatility, {})
+    bullish_score += v_bias.get("bullish", 0.0) * 0.5
+    bearish_score += v_bias.get("bearish", 0.0) * 0.5
+    range_score   += v_bias.get("range",   0.0) * 0.5
+
+    return bullish_score, bearish_score, range_score
+
+
+def _detect_volatility(df) -> str:
+    """Lightweight volatility bucket from last 30 bars."""
+    try:
+        recent = df.tail(30)
+        vol = float(recent["high"].max()) - float(recent["low"].min())
+        if vol < 0.35:   return "DEAD"
+        if vol < 0.75:   return "LOW"
+        if vol < 1.50:   return "NORMAL"
+        return "HIGH"
+    except Exception:
+        return "NORMAL"
 
 
 def make_prediction(minutes=60, df=None):
@@ -92,19 +172,34 @@ def make_prediction(minutes=60, df=None):
         range_score += 0.05
         reasons.append("Normal volatility")
 
+    # ── Apply learned bias corrections ───────────────────────────────────────
+    weights = _load_weights()
+    if weights:
+        regime    = get_regime(df)
+        now_et    = datetime.now(pytz.timezone("US/Eastern"))
+        session   = classify_session(now_et.isoformat())
+        vol_state = _detect_volatility(df)
+
+        bullish_score, bearish_score, range_score = _apply_biases(
+            bullish_score, bearish_score, range_score,
+            regime, session, vol_state, weights,
+        )
+        reasons.append(f"Bias: {regime}/{session}/{vol_state}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Temperature keeps probabilities realistic and avoids overconfidence.
     temperature = 1.35
-    exp_bull = math.exp(bullish_score / temperature)
-    exp_bear = math.exp(bearish_score / temperature)
-    exp_range = math.exp(range_score / temperature)
-    total = exp_bull + exp_bear + exp_range
-    bullish = exp_bull / total
-    bearish = exp_bear / total
+    exp_bull  = math.exp(bullish_score / temperature)
+    exp_bear  = math.exp(bearish_score / temperature)
+    exp_range = math.exp(range_score   / temperature)
+    total     = exp_bull + exp_bear + exp_range
+    bullish    = exp_bull  / total
+    bearish    = exp_bear  / total
     range_prob = exp_range / total
 
     expected_move = price * (vol * (minutes / 30))
     pred_high = price + expected_move / 2
-    pred_low = price - expected_move / 2
+    pred_low  = price - expected_move / 2
 
     direction = max(
         [("bullish", bullish), ("bearish", bearish), ("range", range_prob)],
@@ -114,11 +209,11 @@ def make_prediction(minutes=60, df=None):
     confidence = max(bullish, bearish, range_prob)
 
     return {
-        "time": datetime.now(pytz.timezone("US/Eastern")),
+        "time":      datetime.now(pytz.timezone("US/Eastern")),
         "timeframe": minutes,
         "direction": direction,
         "confidence": round(confidence, 3),
-        "high": round(pred_high, 2),
-        "low": round(pred_low, 2),
-        "reasons": reasons
+        "high":      round(pred_high, 2),
+        "low":       round(pred_low,  2),
+        "reasons":   reasons,
     }

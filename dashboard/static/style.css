@@ -585,6 +585,16 @@ html, body {
 .desk-pnl.profit { color: #1a5a1a; }
 .desk-pnl.loss   { color: #8a1e1e; }
 .desk-pnl.neutral{ color: rgba(40,20,0,0.5); }
+.desk-wr {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.desk-wr.wr-none  { color: rgba(40,20,0,0.4); }
+.desk-wr.wr-bad   { color: #8a1e1e; }
+.desk-wr.wr-ok    { color: #8a6e00; }
+.desk-wr.wr-good  { color: #3a7a2a; }
+.desk-wr.wr-great { color: #1a5a1a; font-size: 11px; }
 
 /* Items on desk: laptop/notebook + status dot */
 .desk-items-row {
@@ -1596,6 +1606,28 @@ html, body {
 }
 
 /* Profile grid in drawer */
+.d-strategy-desc {
+  background: rgba(255,255,255,0.75);
+  border: 1px solid rgba(0,0,0,0.08);
+  border-left: 3px solid var(--wood-mid);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.d-strategy-desc-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.d-strategy-desc-body {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text);
+  margin: 0;
+}
 .d-profile-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

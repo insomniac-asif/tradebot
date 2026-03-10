@@ -310,11 +310,42 @@ async def get_sim(sim_id: str):
 
     data = _load_sim(sim_id)
     if data is None:
+        bs = float(profile.get("balance_start", 25000))
+        _cfg_syms = profile.get("symbols") or ([profile.get("symbol")] if profile.get("symbol") else ["SPY"])
+        stub_stats = {
+            "sim_id": sim_id,
+            "name": profile.get("name", sim_id),
+            "signal_mode": profile.get("signal_mode", ""),
+            "strategy_family": profile.get("signal_mode", "").lower().replace("_", " ").title(),
+            "features_enabled": bool(profile.get("features_enabled")),
+            "horizon": profile.get("horizon", ""),
+            "dte_min": profile.get("dte_min"),
+            "dte_max": profile.get("dte_max"),
+            "symbols": _cfg_syms,
+            "balance": bs,
+            "balance_start": bs,
+            "pnl_dollars": 0.0,
+            "pnl_pct": 0.0,
+            "total_trades": 0,
+            "win_rate": None,
+            "avg_pnl": None,
+            "total_pnl": 0.0,
+            "daily_loss": 0.0,
+            "open_count": 0,
+            "open_trade": None,
+            "open_trades": [],
+            "best_trade": None,
+            "worst_trade": None,
+            "max_drawdown_pct": 0.0,
+            "symbol_stats": {},
+            "session": {"trades": 0, "open": 0, "pnl": 0.0, "win_rate": None, "best": None, "worst": None},
+            "streak": None,
+        }
         return {
             "sim_id": sim_id,
             "name": profile.get("name", sim_id),
             "profile": {k: v for k, v in profile.items() if not str(k).startswith("_")},
-            "stats": None,
+            "stats": stub_stats,
             "open_trades": [],
             "recent_trades": [],
             "balance_history": [],

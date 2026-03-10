@@ -63,3 +63,11 @@ build/
 .vscode/
 *.swp
 node_modules/
+
+# ── Claude Code project files ─────────────────────────────────────
+.claude/
+
+# ── Shell history / misc ──────────────────────────────────────────
+*.bak
+runbot.sh
+start_recorder.sh

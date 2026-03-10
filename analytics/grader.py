@@ -254,6 +254,13 @@ def check_predictions(trade=None):
 
     preds.to_csv(PRED_FILE, index=False)
 
+    # Refresh learned predictor bias weights from updated graded history
+    try:
+        from analytics.predictor_optimizer import update_predictor_weights
+        update_predictor_weights()
+    except Exception:
+        pass
+
 
 def update_edge_stats(graded):
 

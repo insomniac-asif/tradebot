@@ -862,6 +862,171 @@ SIM23:
   zscore_window: 30
   iv_series_window: 200
 
+SIM24:
+  name: "4H FVG Swing"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "FVG_4H"
+  features_enabled: false
+  dte_min: 1
+  dte_max: 3
+  otm_pct: 0.005
+  hold_min_seconds: 1800
+  hold_max_seconds: 14400
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.01
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.35
+  profit_target_pct: 0.65
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+
+SIM25:
+  name: "5M FVG Scalp"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "scalp"
+  signal_mode: "FVG_5M"
+  features_enabled: false
+  dte_min: 0
+  dte_max: 0
+  otm_pct: 0.005
+  hold_min_seconds: 60
+  hold_max_seconds: 900
+  cutoff_time_et: "15:45"
+  balance_start: 25000
+  risk_per_trade_pct: 0.01
+  daily_loss_limit_pct: 0.02
+  max_open_trades: 3
+  exposure_cap_pct: 0.10
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.25
+  profit_target_pct: 0.40
+  trailing_stop_activate_pct: null
+  trailing_stop_trail_pct: null
+
+SIM26:
+  name: "Liquidity Sweep"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "LIQUIDITY_SWEEP"
+  features_enabled: false
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 300
+  hold_max_seconds: 2700
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.01
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.30
+  profit_target_pct: 0.55
+  trailing_stop_activate_pct: 0.15
+  trailing_stop_trail_pct: 0.08
+
+SIM27:
+  name: "FVG+Sweep Combo"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "FVG_SWEEP_COMBO"
+  features_enabled: false
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 300
+  hold_max_seconds: 3600
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0125
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.30
+  profit_target_pct: 0.60
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+
+SIM28:
+  name: "Flow Divergence"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "FLOW_DIVERGENCE"
+  features_enabled: false
+  dte_min: 1
+  dte_max: 2
+  otm_pct: 0.008
+  hold_min_seconds: 900
+  hold_max_seconds: 7200
+  cutoff_time_et: "15:00"
+  balance_start: 25000
+  risk_per_trade_pct: 0.01
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.35
+  profit_target_pct: 0.70
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+
 # ── Symbol Registry ────────────────────────────────────────────────────────
 # Each entry names the per-symbol 1-minute candle CSV and asset type.
 # Adding a new symbol here is the ONLY code change required — everything else

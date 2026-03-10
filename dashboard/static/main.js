@@ -1,6 +1,47 @@
 /* ═══════════════════════════════════════════════════════ SpyBot Dashboard */
 'use strict';
 
+// ─────────────────────────────────────────────── STRATEGY DESCRIPTIONS
+const STRATEGY_DESCRIPTIONS = {
+  TREND_PULLBACK: `Trades in the direction of the dominant short-term trend by entering exactly when price pulls back to the EMA9 dynamic support/resistance line. The signal fires when EMA9 is above EMA20 (uptrend) and the current close is within ±0.1% of EMA9 — meaning price has retraced to the fast moving average but the trend structure is still intact. The edge is that EMA9 reliably absorbs selling pressure in trending conditions and launches the next leg higher; entry right at the line minimises risk relative to chasing the move. In downtrends the same logic applies in reverse: EMA9 < EMA20 and price bouncing up to the EMA9 level from below. Best in trending, directional sessions. Be cautious when EMA9 and EMA20 are converging — that is a sign of trend exhaustion and the pullback may turn into a full reversal.`,
+
+  MEAN_REVERSION: `A contrarian strategy that fades short-term price extremes. Entry is triggered when RSI14 drops below 30 AND price is below VWAP (buy call), or RSI14 exceeds 70 AND price is above VWAP (buy put). Both conditions must be true simultaneously — RSI alone is too noisy intraday, and VWAP displacement alone can persist in trending markets. The combination identifies moments where price has deviated significantly from both its statistical momentum baseline and the intraday volume-weighted fair value. The edge comes from the mathematical tendency of RSI to revert toward 50 and price toward VWAP after extreme readings. Highest win rate in range-bound, choppy sessions (e.g. consolidation days, low-news afternoons). In strong trending environments, RSI can stay overbought/oversold for 30+ minutes, so this signal will fire early and require a wide stop.`,
+
+  BREAKOUT: `A momentum breakout strategy that enters when price closes beyond the highest high or lowest low of the previous 20 bars. A close above the 20-bar rolling high signals a BULLISH breakout (buy call); a close below the 20-bar low signals a BEARISH breakdown (buy put). The 20-bar window captures roughly 20 minutes of price action, so this is an intraday momentum signal. The edge: a genuine close beyond the recent range signals that supply or demand has been decisively overcome and momentum should carry the move further. The biggest risk is the false breakout — price pierces the level momentarily then reverses, trapping late buyers. This is especially common in the first 30 minutes of the session. Works best on volume-confirmed moves (large candles, not just a thin poke above the high).`,
+
+  SWING_TREND: `A trend-following signal that requires both price and the EMA20 to be moving in the same direction simultaneously. Bullish: EMA20 is rising (current value > value 10 bars ago) AND price closes above EMA20. Bearish: EMA20 is falling AND price closes below EMA20. This is intentionally less precise than TREND_PULLBACK — it fires whenever the market is in a confirmed swing trend, not just at pullback entry points. This means more trades but later entries (you're already above EMA20, not touching it). Best used to capture extended trending days when the market makes a clear directional move from open to close. The 10-bar slope check prevents entries into exhausted moves where EMA20 has already flattened out.`,
+
+  OPPORTUNITY: `An adaptive multi-factor conviction model that combines momentum, VWAP positioning, RSI, and market structure into a numeric conviction score. Based on the score and current volatility state, it dynamically selects the trade horizon: DAYTRADE (conviction ≤ 3 or high volatility), SWING (moderate conviction, normal vol), or WEEKLY (conviction ≥ 6 or low volatility). Each horizon maps to different DTE ranges and prediction windows. After 50 completed trades, an ML prediction filter activates: if the bot's own price forecast disagrees with the signal direction at ≥60% confidence, the trade is blocked. This self-filtering means early trades are unfiltered (maximum learning), and later trades are increasingly selective. The most adaptive signal in the system — it changes what it looks for based on market conditions and its own historical performance.`,
+
+  ORB_BREAKOUT: `Opening Range Breakout using the first 30-minute high/low as the reference range. A close above the opening range high triggers a BULLISH entry (calls); a close below the opening range low triggers a BEARISH entry (puts). This strategy is grounded in the institutional behavior at the open: the first 30 minutes often defines the day's directional bias, and a clean break of that range tends to follow through for several percent. Two configurable filters sharpen entries: (1) vol_z threshold — only trade when current volume is statistically elevated versus recent average, confirming institutional participation rather than thin-volume noise; (2) require_trend_bias — only take bullish ORB breaks when EMA9 > EMA20 (trend confirmation), reducing counter-trend breakout failures. Best on high-conviction open days (economic data, earnings reactions) and avoid on choppy, mean-reverting sessions.`,
+
+  VWAP_REVERSION: `Fades overextended VWAP deviations, optionally using machine-learning feature snapshots when features_enabled is true. In basic mode, fires when RSI plus raw VWAP distance exceed thresholds. With features enabled, uses the vwap_z score (number of standard deviations from intraday VWAP) plus RSI: bullish when VWAP-Z is deeply negative and RSI is oversold, bearish when VWAP-Z is deeply positive and RSI is overbought. The VWAP is the institutional benchmark for intraday value; large deviations are unsustainable because market makers and algorithms actively work price back toward it throughout the session. Edge deteriorates in strong trending sessions where VWAP itself is sloping aggressively — in those cases VWAP-Z can stay elevated for the entire afternoon.`,
+
+  ZSCORE_BOUNCE: `Pure statistical mean reversion using a rolling z-score of close prices. Calculates how many standard deviations the current price is from its recent rolling mean, using feature_snapshot data when available. A z-score below -2.0 triggers a BULLISH entry (statistically cheap); above +2.0 triggers a BEARISH entry (statistically expensive). RSI is used as a secondary confirmation filter. Blocked if EMA9/EMA20 spread is too large, since strong trends can sustain extreme z-scores indefinitely. The edge is purely quantitative — no subjectivity required. Works best in oscillating, low-trend markets. In trending sessions this signal fires against the prevailing momentum and suffers from being persistently early; sizing down and widening stops is essential on trend days.`,
+
+  FAILED_BREAKOUT_REVERSAL: `Identifies false breakout traps and trades the reversal. Uses a 20-bar reference window to establish the range. A bearish failed breakout fires when: the previous bar's high exceeded the 20-bar reference high (attempted breakout) but its close fell back below that level (rejection), AND the current bar confirms downward continuation. The bullish version mirrors this for false breakdowns. A four-factor structure score captures quality: (1) wick rejection ≥50% of bar range, (2) break magnitude > 0.1%, (3) current volume above recent average, (4) strong current-bar confirmation close. The edge: trapped bulls at the breakout level become forced sellers as their stops trigger, fueling the reversal. This is one of the most reliable patterns because it exploits predictable stop-loss placement by retail traders who chased the breakout.`,
+
+  VWAP_CONTINUATION: `A trend-following entry that combines EMA alignment with a VWAP bounce. Requires: EMA9 > EMA20 (uptrend), current price just above VWAP (within a configurable 0.5% band by default), AND price touched VWAP or came within 0.2% of it in the last 5 bars. The three-condition requirement makes this more selective than raw trend signals: the EMA alignment confirms the macro trend, the proximity to VWAP ensures you're not entering too extended, and the recent VWAP touch confirms that VWAP is acting as active support (not just a distant reference). The edge: every time price bounces off VWAP with EMA alignment, the path of least resistance is continuation. Entries right off VWAP also provide a natural, tight stop — a close back through VWAP would invalidate the thesis.`,
+
+  OPENING_DRIVE: `Captures sustained directional momentum from the open. Measures the percentage move from the first bar's open price over a 15-bar window. Fires BULLISH when that move exceeds 0.3% (configurable) upward. An exhaustion filter blocks the signal if the last three bars are moving counter to the drive direction (three consecutive lower closes during an upward drive), since that indicates the momentum is fading. Bonus structure score if a mid-session pullback occurred (bars 4-12 dipped and then price resumed) — this pullback-and-resume pattern is the hallmark of a genuine Trend Day rather than an early spike that quickly reverses. Best for capturing the classic strong open → brief consolidation → continuation pattern that occurs on high-conviction directional days.`,
+
+  AFTERNOON_BREAKOUT: `Volatility compression-to-expansion breakout. Uses the last 12 bars to establish a compressed range and calculate the average bar range during that compression. Fires BULLISH when current bar: (1) closes above the compression period high AND (2) has a bar range ≥1.5× the average compression bar range, indicating genuine expansion rather than a slow drift above the range. ATR comparison provides a secondary expansion confirmation. This strategy is specifically designed for afternoon consolidation breakouts — the common pattern where the market chops tightly for 30-60 minutes midday then breaks out sharply. The compression period acts as a coiled spring. The expansion ratio filter (1.5× default) prevents false signals where price barely creeps above the range with no real momentum.`,
+
+  TREND_RECLAIM: `A three-bar EMA9 cross reclaim pattern. Specifically looks for: bar[-3] was on the wrong side of EMA9 (failed), bar[-2] crossed back over and reclaimed EMA9, bar[-1] (current) is holding the reclaim. Additionally requires EMA9 to be on the correct side of EMA20 — this ensures you're reclaiming into a trend, not just bouncing in a range. Optional VWAP alignment filter adds a third confirmation layer. The edge: a clean EMA9 reclaim after a brief failure is a high-probability continuation signal because it traps both the stops from the initial EMA9 break AND the momentum from the new cross. The stop-hunting from the temporary dip below EMA9 clears out weak hands before the real move. Works best when the EMA9-EMA20 spread is meaningful (confirmed trend) rather than flat (choppy).`,
+
+  EXTREME_EXTENSION_FADE: `Requires features_enabled: true. Fades price at statistically extreme VWAP deviations using a two-filter approach. The primary filter is VWAP-Z score (standard deviations from intraday VWAP): bearish fade fires when VWAP-Z ≥ 2.5, bullish fade fires when VWAP-Z ≤ -2.5. The secondary filter is RSI: bearish requires RSI ≥ 76, bullish requires RSI ≤ 24. Both must be true. A trend environment blocker prevents entries when EMA spread exceeds 0.5% — in strongly trending markets even extreme VWAP-Z readings can persist. This is the most statistically selective fade signal in the system. The edge: a VWAP-Z of 2.5 combined with overbought RSI represents a confluence of two independent statistical extremes simultaneously — the probability of mean reversion at that point is significantly higher than either filter alone.`,
+
+  FVG_4H: `Smart Money Concept — Fair Value Gap on 4-hour bars. Aggregates 1-minute candles into 240-minute bars and scans for price imbalances (FVGs). A bullish FVG exists when bar[i].high < bar[i+2].low — a gap in price where bar i and bar i+2 have no overlapping range, meaning bar[i+1] moved so fast it left an unfilled imbalance. Entry fires when current price re-enters (retests) an unfilled FVG zone. The 4-hour timeframe gives institutional context: large players move size quickly, leaving behind these gaps. Institutional algorithms and smart money tend to return to fill these imbalances, making them high-probability entry zones. The zone is tracked until filled; once price passes through the entire zone, it's discarded. 60-bar cooldown prevents re-entering the same zone repeatedly. Best during trending sessions when institutional order flow is directional.`,
+
+  FVG_5M: `Fair Value Gap on 5-minute aggregated bars — a shorter-timeframe, more tactical version of FVG_4H. 1-minute bars are aggregated into 5-minute bars and the same three-candle gap logic applies. Entry fires when current price revisits an unfilled 5-minute FVG. An important filter: only FVG zones formed on bars with volume ≥ 1× the 20-bar volume average are considered, ensuring the gap was created with meaningful participation rather than thin-air movement during dead periods. 10-bar cooldown allows more frequent intraday entries. Because 5-minute FVGs are more numerous and less structurally significant than 4-hour ones, this signal fires more often and works best in volatile, liquid sessions where price action is directional. In choppy conditions, 5-minute FVGs fill and reverse frequently, so win rate drops.`,
+
+  LIQUIDITY_SWEEP: `Smart Money Concept — Stop Hunt Reversal. Scans the last 60 bars for structural swing highs and lows (5-bar left/right look-around). A buyside sweep (BEARISH signal) fires when price spikes above a swing high, then closes back below it within 3 bars on a full-bodied candle (body ≥ 50% of bar range). This represents stop-hunting of retail long positions sitting above the swing high; the reversal entry fades the institutional players who just collected that liquidity. The minimum break threshold (0.01% above the swing level) ensures the sweep was genuine and not just noise. A sellside sweep (BULLISH signal) is the mirror: spike below swing low, recovery close above. 15-bar cooldown. The edge: liquidity sweeps are one of the most reliable reversal signals in SMC theory because they represent documented institutional accumulation/distribution activity — the smart money taking the other side of retail stops.`,
+
+  FVG_SWEEP_COMBO: `A high-conviction confluence signal requiring two independent SMC conditions to align simultaneously. First, a liquidity sweep must be detected (see LIQUIDITY_SWEEP). Then, within that same directional bias, price must be inside an unfilled 5-minute FVG zone. Both the sweep and the FVG must point in the same direction. The logic: a sweep provides the directional catalyst (institutional order flow reversal), while a nearby FVG in the same direction acts as a magnetic target that price is likely to fill. Entry at the intersection of both conditions creates a layered edge — you have confirmation from both price structure (the sweep) and order flow imbalance (the FVG). 20-bar cooldown to prevent over-trading. This fires significantly less often than individual SMC signals but has a higher expected win quality when it does trigger.`,
+
+  FLOW_DIVERGENCE: `A flow-divergence reversal signal that uses TREND_PULLBACK as a directional baseline and then looks for contradicting evidence from three independent flow measures. Fires BEARISH when the EMA-based baseline says BULLISH but: (1) price momentum over 10 bars is negative beyond -0.5 ATR (price is actually falling despite EMA alignment), (2) volume is spiking ≥1.5× the 20-bar average (high-volume selling disguised within an uptrend), and (3) VWAP slope is declining over the last 10 bars. All three must confirm the divergence. This signal specifically hunts institutional distribution: the market looks constructive on EMAs (attracting late buyers) but the actual flow tells a different story. 30-bar cooldown. The bullish version catches institutional accumulation hidden within a downward EMA structure. Because this is a counter-trend signal, it requires higher quality (all three flow factors) to fire.`,
+};
+
 const POLL_INTERVAL = 30000; // 30s
 let symbolCharts = {};   // { SPY: ApexChartsInstance, ... }
 let _focusedSym = null;
@@ -210,14 +251,11 @@ function renderRecentTrades(panel) {
   const visible  = filtered.slice(0, limit);
   const openCnt  = filtered.filter(t => t.status === 'open').length;
 
-  const simOpts = _rtSims.map(s => `<option value="${s}">${s}</option>`).join('');
-  const symOpts = _rtSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
-
   if (!filtered.length) {
     panel.innerHTML = `<div class="rt-panel">
       <div class="rt-header-row">
         <div class="rt-title">RECENT TRADES <span class="rt-subtitle">no results</span></div>
-        ${_rtFilterBar(simOpts, symOpts)}
+        ${_rtFilterBar()}
       </div></div>`;
     return;
   }
@@ -294,7 +332,7 @@ function renderRecentTrades(panel) {
     <div class="rt-panel">
       <div class="rt-header-row">
         <div class="rt-title">RECENT TRADES <span class="rt-subtitle">${subtitle}</span></div>
-        ${_rtFilterBar(simOpts, symOpts)}
+        ${_rtFilterBar()}
       </div>
       <div class="rt-scroll">
         <table class="rt-table">
@@ -309,17 +347,21 @@ function renderRecentTrades(panel) {
     </div>`;
 }
 
-function _rtFilterBar(simOpts, symOpts) {
+function _rtFilterBar() {
   const curSim   = (document.getElementById('rt-f-sim')   || {}).value || '';
   const curSym   = (document.getElementById('rt-f-sym')   || {}).value || '';
   const curMinEP = (document.getElementById('rt-f-minep') || {}).value || '';
   const curMaxEP = (document.getElementById('rt-f-maxep') || {}).value || '';
+  const simOpts  = _rtSims.map(s =>
+    `<option value="${s}"${s === curSim ? ' selected' : ''}>${s}</option>`).join('');
+  const symOpts  = _rtSymbols.map(s =>
+    `<option value="${s}"${s === curSym ? ' selected' : ''}>${s}</option>`).join('');
   return `<div class="rt-filters">
     <select id="rt-f-sim" class="rt-filter-sel" onchange="applyRtFilter()">
-      <option value="">All Sims</option>${simOpts}
+      <option value=""${!curSim ? ' selected' : ''}>All Sims</option>${simOpts}
     </select>
     <select id="rt-f-sym" class="rt-filter-sel" onchange="applyRtFilter()">
-      <option value="">All Symbols</option>${symOpts}
+      <option value=""${!curSym ? ' selected' : ''}>All Symbols</option>${symOpts}
     </select>
     <input id="rt-f-minep" type="text" inputmode="decimal" class="rt-filter-input" placeholder="Min entry $"
            value="${curMinEP}" onchange="applyRtFilter()" onkeydown="if(event.key==='Enter')applyRtFilter()"/>
@@ -390,7 +432,7 @@ function renderDesks(sims) {
     (groups[p] = groups[p] || []).push(sim);
   });
   STRATEGY_ORDER.forEach(k => {
-    if (groups[k]) groups[k].sort((a, b) => b.pnl_dollars - a.pnl_dollars);
+    if (groups[k]) groups[k].sort((a, b) => (b.win_rate ?? -1) - (a.win_rate ?? -1));
   });
 
   function appendRow(label, group, extraClass) {
@@ -419,10 +461,21 @@ function buildSeat(sim) {
   const active      = sim.open_count > 0;
   const mood        = sim.pnl_dollars > 0 ? 'happy' : sim.pnl_dollars < 0 ? 'sad' : 'neutral';
   const colorIdx    = Math.max(0, parseInt(sim.sim_id.replace('SIM', ''), 10) - 1);
-  const pnlSign     = sim.pnl_dollars > 0 ? '+' : '';
-  const pnlClass    = sim.pnl_dollars > 0 ? 'profit' : sim.pnl_dollars < 0 ? 'loss' : 'neutral';
   const personality = getPersonality(sim.signal_mode);
   const bubbleText  = buildBubbleText(sim);
+
+  // Win rate display with colour coding
+  const wr = sim.win_rate;  // already a percentage number, e.g. 62.5
+  let wrText, wrClass;
+  if (wr == null || sim.total_trades === 0) {
+    wrText = '—'; wrClass = 'wr-none';
+  } else {
+    wrText = wr.toFixed(0) + '%';
+    if      (wr >= 85) wrClass = 'wr-great';
+    else if (wr >= 75) wrClass = 'wr-good';
+    else if (wr >= 50) wrClass = 'wr-ok';
+    else               wrClass = 'wr-bad';
+  }
 
   const seat = document.createElement('div');
   const wasSelected = currentSimId === sim.sim_id;
@@ -430,7 +483,7 @@ function buildSeat(sim) {
   seat.dataset.simId = sim.sim_id;
   seat.onclick = () => openDrawer(sim.sim_id);
 
-  const notebookClass = 'notebook ' + (sim.pnl_dollars > 0 ? 'profit' : sim.pnl_dollars < 0 ? 'loss' : '');
+  const notebookClass = 'notebook ' + (wr == null || sim.total_trades === 0 ? '' : wr >= 50 ? 'profit' : 'loss');
 
   const streakBadge = (() => {
     const s = sim.streak;
@@ -456,7 +509,7 @@ function buildSeat(sim) {
     <div class="seat-info">
       <div class="seat-info-row">
         <span class="desk-id">${sim.sim_id}</span>
-        <span class="desk-pnl ${pnlClass}">${pnlSign}$${fmt2(sim.pnl_dollars)}</span>
+        <span class="desk-wr ${wrClass}">${wrText}</span>
       </div>
       <div class="desk-footer">${shortName(sim.signal_mode || '')}</div>
       ${sim.symbols && sim.symbols.length ? `<div class="desk-symbols">${sim.symbols.join(' · ')}</div>` : ''}
@@ -714,15 +767,37 @@ function _makeApexOptions(sym, height) {
     tooltip: {
       theme: 'dark',
       x: { format: 'HH:mm' },
-      shared: false,
-      custom: ({ seriesIndex, dataPointIndex, w }) => {
-        if (seriesIndex === 0) return ''; // let ApexCharts default handle candles
-        const s = w.config.series[seriesIndex];
-        const pt = s.data[dataPointIndex];
-        if (!pt) return '';
-        const label = seriesIndex === 1 ? 'Pred (cur)' : 'Pred (prev)';
-        const color = seriesIndex === 1 ? '#4499ff' : '#aa66ff';
-        return `<div style="padding:4px 8px;font-size:10px;color:#fff">${label}: <b>$${parseFloat(pt.y).toFixed(2)}</b></div>`;
+      shared: true,
+      intersect: false,
+      custom: ({ dataPointIndex, w }) => {
+        // OHLCV from candle series (series 0)
+        const cpt = w.config.series[0]?.data?.[dataPointIndex];
+        let html = '';
+        if (cpt && Array.isArray(cpt.y) && cpt.y.length >= 4) {
+          const [o, h, l, c] = cpt.y;
+          const up = c >= o;
+          const cc = up ? '#88ee88' : '#ee8888';
+          const _td = new Date(cpt.x);
+          const time = String(_td.getUTCHours()).padStart(2,'0') + ':' + String(_td.getUTCMinutes()).padStart(2,'0');
+          html += `<div style="padding:6px 10px 4px;font-size:10px;font-family:monospace;line-height:1.7">
+            <div style="color:#88aa88;font-size:9px;margin-bottom:3px">${time}</div>
+            <div><span style="color:#667766;display:inline-block;width:10px">O</span> <b style="color:${cc}">${o.toFixed(2)}</b></div>
+            <div><span style="color:#667766;display:inline-block;width:10px">H</span> <b style="color:#88ee88">${h.toFixed(2)}</b></div>
+            <div><span style="color:#667766;display:inline-block;width:10px">L</span> <b style="color:#ee8888">${l.toFixed(2)}</b></div>
+            <div><span style="color:#667766;display:inline-block;width:10px">C</span> <b style="color:${cc}">${c.toFixed(2)}</b></div>
+          </div>`;
+        }
+        // Check if hovered x falls within a prediction segment
+        if (cpt) {
+          const cx = cpt.x;
+          [[1, 'Pred (cur)', '#4499ff'], [2, 'Pred (prev)', '#aa66ff']].forEach(([si, label, color]) => {
+            const pd = w.config.series[si]?.data || [];
+            if (pd.length === 2 && cx >= pd[0].x && cx <= pd[1].x) {
+              html += `<div style="padding:3px 10px 5px;font-size:10px;border-top:1px solid rgba(255,255,255,0.08)">${label}: <b style="color:${color}">$${parseFloat(pd[0].y).toFixed(2)}</b></div>`;
+            }
+          });
+        }
+        return html || '<div style="padding:4px 8px;font-size:10px;color:#88aa88">—</div>';
       },
     },
   };
@@ -842,10 +917,13 @@ function _updateSymbolCard(sym, candles, preds, xMin, xMax) {
 
   const PRED_DUR = 30 * 60 * 1000; // 30 min in ms
 
-  // Sort predictions newest-first; prev must be ≥30 min older than latest
-  const sorted = [...(preds || [])].sort((a, b) => new Date(b.time) - new Date(a.time));
-  const latestPred = sorted[0] || null;
+  // Only show a prediction after its 30-min window has elapsed
   const THIRTY_MIN_MS = 30 * 60 * 1000;
+  const now = Date.now();
+  const sorted = [...(preds || [])].sort((a, b) => new Date(b.time) - new Date(a.time));
+  // latestPred = most recent prediction that is ≥30 min old (completed window)
+  const latestPred = sorted.find(p => (now - new Date(p.time).getTime()) >= THIRTY_MIN_MS) || null;
+  // prevPred = most recent completed prediction that is ≥30 min older than latestPred
   const prevPred = latestPred
     ? (sorted.find(p => new Date(latestPred.time) - new Date(p.time) >= THIRTY_MIN_MS) || null)
     : null;
@@ -1053,6 +1131,7 @@ function populateDrawer(d) {
         <div class="d-open-trade-title">🟢 Open Position · ${symLabel}</div>
         <div class="d-open-trade-grid">
           ${dOtItem('Direction', `<span class="dir-badge ${ot.direction}">${ot.direction || '—'}</span>`)}
+          ${dOtItem('Entered',  fmtDateTime(ot.entry_time))}
           ${dOtItem('Strike',  op ? '$' + op.strike : (ot.strike || '—'))}
           ${dOtItem('Type',    op ? op.type : '—')}
           ${dOtItem('Expiry',  op ? op.expiry : (ot.expiry || '—'))}
@@ -1074,7 +1153,14 @@ function populateDrawer(d) {
 
   // ── PROFILE TAB ──
   const profPanel = document.getElementById('dpanel-profile');
-  profPanel.innerHTML = `<div class="d-profile-grid">${
+  const signalMode = (stats.signal_mode || profile.signal_mode || '').toUpperCase();
+  const descText = STRATEGY_DESCRIPTIONS[signalMode] || null;
+  const descHtml = descText ? `
+    <div class="d-strategy-desc">
+      <div class="d-strategy-desc-title">Strategy Overview</div>
+      <p class="d-strategy-desc-body">${descText}</p>
+    </div>` : '';
+  profPanel.innerHTML = descHtml + `<div class="d-profile-grid">${
     Object.entries(profile)
       .filter(([k]) => !k.startsWith('_'))
       .map(([k, v]) => `
@@ -1274,6 +1360,16 @@ function fmtTime(iso) {
     const d = new Date(iso);
     return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   } catch { return iso.slice(11, 16) || iso; }
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    return `${date} ${time}`;
+  } catch { return iso.slice(0, 16) || iso; }
 }
 
 // Close drawer on Escape
