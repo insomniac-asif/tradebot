@@ -155,6 +155,7 @@ SIM03:
 
 SIM04:
   name: "Intraday Range Fade"
+  blocked_sessions: [OPEN, MIDDAY, AFTERNOON, POWER]  # disabled: superseded by SIM12/SIM13
   symbols:
     - SPY
     - QQQ
@@ -188,6 +189,7 @@ SIM04:
 
 SIM05:
   name: "1DTE Afternoon Continuation"
+  blocked_sessions: [OPEN, MIDDAY, AFTERNOON, POWER]  # disabled: superseded by SIM11/SIM29
   symbols:
     - SPY
     - QQQ
@@ -1026,6 +1028,246 @@ SIM28:
   profit_target_pct: 0.70
   trailing_stop_activate_pct: 0.12
   trailing_stop_trail_pct: 0.06
+
+SIM29:
+  name: "Trend Pullback (POWER Hour)"
+  # session_filter: POWER  — informational only; not consumed by engine yet
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "TREND_PULLBACK"
+  features_enabled: true
+  atr_expansion_min: 1.2
+  dte_min: 1
+  dte_max: 3
+  otm_pct: 0.01
+  hold_min_seconds: 300
+  hold_max_seconds: 7200
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.18
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.35
+  profit_target_pct: 0.60
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+  zscore_window: 30
+  iv_series_window: 200
+
+SIM30:
+  name: "Multi-TF EMA Confirm"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "MULTI_TF_CONFIRM"
+  features_enabled: false
+  dte_min: 1
+  dte_max: 3
+  otm_pct: 0.008
+  hold_min_seconds: 300
+  hold_max_seconds: 5400
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.18
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.35
+  profit_target_pct: 0.60
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+
+SIM31:
+  name: "VPOC Reversion"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "VPOC_REVERSION"
+  features_enabled: true
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 300
+  hold_max_seconds: 3600
+  cutoff_time_et: "15:00"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.03
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.30
+  profit_target_pct: 0.55
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
+  zscore_window: 30
+  iv_series_window: 200
+
+SIM32:
+  name: "Gap Fade"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "scalp"
+  signal_mode: "GAP_FADE"
+  features_enabled: false
+  dte_min: 0
+  dte_max: 0
+  otm_pct: 0.006
+  hold_min_seconds: 120
+  hold_max_seconds: 2700
+  cutoff_time_et: "10:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.005
+  daily_loss_limit_pct: 0.02
+  max_open_trades: 1
+  exposure_cap_pct: 0.10
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.25
+  profit_target_pct: 0.45
+  trailing_stop_activate_pct: 0.10
+  trailing_stop_trail_pct: 0.05
+
+SIM33:
+  name: "Opening Range Reclaim"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "OPENING_RANGE_RECLAIM"
+  execution_mode: "paper"
+  features_enabled: false
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.008
+  hold_min_seconds: 300
+  hold_max_seconds: 14400
+  cutoff_time_et: "15:00"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.02
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.015
+  profit_target_pct: 0.03
+  trailing_stop_activate_pct: 0.02
+  trailing_stop_trail_pct: 0.01
+
+SIM34:
+  name: "Vol Compression Breakout"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "VOL_COMPRESSION_BREAKOUT"
+  execution_mode: "paper"
+  features_enabled: false
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.008
+  hold_min_seconds: 300
+  hold_max_seconds: 21600
+  cutoff_time_et: "15:30"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.02
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.02
+  profit_target_pct: 0.05
+  trailing_stop_activate_pct: 0.03
+  trailing_stop_trail_pct: 0.015
+
+SIM35:
+  name: "Vol Spike Fade"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - VXX
+    - TSLA
+    - AAPL
+    - NVDA
+    - MSFT
+  horizon: "intraday"
+  signal_mode: "VOL_SPIKE_FADE"
+  execution_mode: "paper"
+  features_enabled: false
+  dte_min: 0
+  dte_max: 0
+  otm_pct: 0.006
+  hold_min_seconds: 120
+  hold_max_seconds: 7200
+  cutoff_time_et: "15:00"
+  balance_start: 25000
+  risk_per_trade_pct: 0.0075
+  daily_loss_limit_pct: 0.02
+  max_open_trades: 2
+  exposure_cap_pct: 0.15
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.02
+  profit_target_pct: 0.04
+  trailing_stop_activate_pct: 0.025
+  trailing_stop_trail_pct: 0.012
 
 # ── Symbol Registry ────────────────────────────────────────────────────────
 # Each entry names the per-symbol 1-minute candle CSV and asset type.

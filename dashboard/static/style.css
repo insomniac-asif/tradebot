@@ -585,6 +585,12 @@ html, body {
 .desk-pnl.profit { color: #1a5a1a; }
 .desk-pnl.loss   { color: #8a1e1e; }
 .desk-pnl.neutral{ color: rgba(40,20,0,0.5); }
+.desk-trades {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: rgba(40,20,0,0.45);
+}
 .desk-wr {
   font-size: 10px;
   font-weight: 700;

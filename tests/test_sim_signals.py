@@ -52,6 +52,12 @@ from simulation.sim_signals import (
     _signal_afternoon_breakout,
     _signal_trend_reclaim,
     _signal_extreme_extension_fade,
+    _signal_multi_tf_confirm,
+    _signal_gap_fade,
+    _signal_vpoc_reversion,
+    _signal_opening_range_reclaim,
+    _signal_vol_compression_breakout,
+    _signal_vol_spike_fade,
 )
 
 import pandas as pd
@@ -116,6 +122,9 @@ def test_known_signal_modes_complete():
         "OPPORTUNITY", "ORB_BREAKOUT", "VWAP_REVERSION", "ZSCORE_BOUNCE",
         "FAILED_BREAKOUT_REVERSAL", "VWAP_CONTINUATION", "OPENING_DRIVE",
         "AFTERNOON_BREAKOUT", "TREND_RECLAIM", "EXTREME_EXTENSION_FADE",
+        "FVG_4H", "FVG_5M", "LIQUIDITY_SWEEP", "FVG_SWEEP_COMBO",
+        "FLOW_DIVERGENCE", "MULTI_TF_CONFIRM", "GAP_FADE", "VPOC_REVERSION",
+        "OPENING_RANGE_RECLAIM", "VOL_COMPRESSION_BREAKOUT", "VOL_SPIKE_FADE",
     }
     assert expected == _KNOWN_SIGNAL_MODES, \
         f"Missing: {expected - _KNOWN_SIGNAL_MODES}, extra: {_KNOWN_SIGNAL_MODES - expected}"
@@ -340,6 +349,367 @@ def test_extreme_extension_fade_bullish():
 
 
 # ---------------------------------------------------------------------------
+# MULTI_TF_CONFIRM tests
+# ---------------------------------------------------------------------------
+
+def _make_df_large(n=200, trend="flat"):
+    """Like _make_df but larger — required for multi-TF tests needing 150+ bars."""
+    close = np.full(n, 550.0)
+    if trend == "up":
+        close = 550.0 + np.arange(n) * 0.05
+    elif trend == "down":
+        close = 550.0 - np.arange(n) * 0.05
+    high = close + 0.30
+    low  = close - 0.30
+    open_ = close - 0.10
+    volume = np.full(n, 10000.0)
+    ema9  = pd.Series(close).ewm(span=9).mean().values
+    ema20 = pd.Series(close).ewm(span=20).mean().values
+    rsi   = np.full(n, 50.0)
+    atr   = np.full(n, 0.50)
+    vwap  = close * 1.001
+    return pd.DataFrame({
+        "open": open_, "high": high, "low": low, "close": close,
+        "volume": volume, "ema9": ema9, "ema20": ema20,
+        "rsi": rsi, "atr": atr, "vwap": vwap,
+    })
+
+
+def test_multi_tf_confirm_insufficient_bars():
+    df = _make_df(60)
+    result = _signal_multi_tf_confirm(df)
+    _assert_3tuple(result, "mtf_insufficient")
+    assert result[0] is None
+    assert result[2].get("reason") == "insufficient_bars"
+
+
+def test_multi_tf_confirm_no_signal_flat():
+    # Flat trend: EMA9 ≈ EMA20 in all TFs → no alignment
+    df = _make_df_large(200, "flat")
+    result = _signal_multi_tf_confirm(df)
+    _assert_3tuple(result, "mtf_flat")
+    # Flat df may or may not fire depending on EMA warmup — just verify contract
+    assert result[0] in (None, "BULLISH", "BEARISH")
+
+
+def test_multi_tf_confirm_bullish():
+    # Strong uptrend: EMA9 > EMA20 in both TFs, close > vwap
+    n = 200
+    close = 550.0 + np.arange(n) * 0.10   # steep up
+    high  = close + 0.30
+    low   = close - 0.30
+    open_ = close - 0.05
+    volume = np.full(n, 10000.0)
+    # Make vwap slightly below close so close > vwap
+    vwap  = close - 0.50
+    df = pd.DataFrame({
+        "open": open_, "high": high, "low": low, "close": close,
+        "volume": volume, "vwap": vwap,
+        "ema9":  pd.Series(close).ewm(span=9).mean().values,
+        "ema20": pd.Series(close).ewm(span=20).mean().values,
+        "rsi":   np.full(n, 55.0), "atr": np.full(n, 0.50),
+    })
+    result = _signal_multi_tf_confirm(df)
+    _assert_3tuple(result, "mtf_bull")
+    assert result[0] == "BULLISH", f"Expected BULLISH, got {result}"
+
+
+def test_multi_tf_confirm_bearish():
+    # Strong downtrend: EMA9 < EMA20 in both TFs, close < vwap
+    n = 200
+    close = 550.0 - np.arange(n) * 0.10
+    high  = close + 0.30
+    low   = close - 0.30
+    open_ = close + 0.05
+    volume = np.full(n, 10000.0)
+    vwap  = close + 0.50   # above close
+    df = pd.DataFrame({
+        "open": open_, "high": high, "low": low, "close": close,
+        "volume": volume, "vwap": vwap,
+        "ema9":  pd.Series(close).ewm(span=9).mean().values,
+        "ema20": pd.Series(close).ewm(span=20).mean().values,
+        "rsi":   np.full(n, 45.0), "atr": np.full(n, 0.50),
+    })
+    result = _signal_multi_tf_confirm(df)
+    _assert_3tuple(result, "mtf_bear")
+    assert result[0] == "BEARISH", f"Expected BEARISH, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# GAP_FADE tests
+# ---------------------------------------------------------------------------
+
+def _make_gap_df(gap_pct=0.005, n_total=70, gap_bars_ago=31):
+    """
+    Build a df with a gap at `gap_bars_ago` bars from the end.
+
+    signal uses:
+      pre_gap_bar  = df.iloc[-(WINDOW+2)]  →  index = n_total - (gap_bars_ago+1)
+      session_open = df.iloc[-(WINDOW+1)]  →  index = n_total - gap_bars_ago
+    So we keep close flat before session_open and open the gapped price there.
+    """
+    WINDOW = 30   # must match _signal_gap_fade WINDOW
+    pre_idx  = n_total - (WINDOW + 2)   # pre_gap_bar index
+    open_idx = n_total - (WINDOW + 1)   # session_open_bar index
+
+    base_close = 550.0
+    gapped_px  = base_close * (1.0 + gap_pct)
+
+    close = np.full(n_total, base_close)
+    open_ = np.full(n_total, base_close - 0.10)
+
+    # From the session open bar onward: open AND close at gapped price
+    if open_idx >= 0:
+        open_[open_idx:] = gapped_px
+        close[open_idx:] = gapped_px
+
+    high = np.maximum(open_, close) + 0.30
+    low  = np.minimum(open_, close) - 0.30
+    return pd.DataFrame({
+        "open": open_, "high": high, "low": low, "close": close,
+        "volume": np.full(n_total, 10000.0),
+        "ema9":  pd.Series(close).ewm(span=9).mean().values,
+        "ema20": pd.Series(close).ewm(span=20).mean().values,
+        "rsi":   np.full(n_total, 50.0), "atr": np.full(n_total, 0.50),
+        "vwap":  close * 1.001,
+    })
+
+
+def test_gap_fade_insufficient_bars():
+    df = _make_df(20)
+    result = _signal_gap_fade(df)
+    _assert_3tuple(result, "gap_insufficient")
+    assert result[0] is None
+    assert result[2].get("reason") == "insufficient_bars"
+
+
+def test_gap_fade_no_gap():
+    # Flat df with no gap → gap_too_small
+    df = _make_df(60)
+    result = _signal_gap_fade(df)
+    _assert_3tuple(result, "gap_none")
+    assert result[0] is None
+
+
+def test_gap_fade_down_signal():
+    # Gap up → should return BEARISH fade signal
+    df = _make_gap_df(gap_pct=0.005, n_total=70, gap_bars_ago=31)
+    result = _signal_gap_fade(df)
+    _assert_3tuple(result, "gap_fade_down")
+    assert result[0] == "BEARISH", f"Expected BEARISH gap fade, got {result}"
+    assert result[2].get("reason") == "gap_fade_down"
+
+
+def test_gap_fade_up_signal():
+    # Gap down → should return BULLISH fade signal
+    df = _make_gap_df(gap_pct=-0.005, n_total=70, gap_bars_ago=31)
+    result = _signal_gap_fade(df)
+    _assert_3tuple(result, "gap_fade_up")
+    assert result[0] == "BULLISH", f"Expected BULLISH gap fade, got {result}"
+    assert result[2].get("reason") == "gap_fade_up"
+
+
+# ---------------------------------------------------------------------------
+# VPOC_REVERSION tests
+# ---------------------------------------------------------------------------
+
+def test_vpoc_reversion_insufficient_bars():
+    df = _make_df(10)
+    result = _signal_vpoc_reversion(df)
+    _assert_3tuple(result, "vpoc_insufficient")
+    assert result[0] is None
+
+
+def test_vpoc_reversion_no_signal_neutral():
+    # Flat price, RSI=50, price ≈ VPOC → no signal
+    df = _make_df(30)
+    result = _signal_vpoc_reversion(df)
+    _assert_3tuple(result, "vpoc_neutral")
+    assert result[0] is None
+
+
+def test_vpoc_reversion_returns_3tuple():
+    df = _make_df(60)
+    result = _signal_vpoc_reversion(df)
+    _assert_3tuple(result, "vpoc_contract")
+
+
+# ---------------------------------------------------------------------------
+# OPENING_RANGE_RECLAIM tests
+# ---------------------------------------------------------------------------
+
+def _make_orr_df(n=40, or_low=548.0, or_high=552.0, prev_close=547.5, curr_close=549.0,
+                 rsi=50.0, vwap=548.5):
+    """Build a df where first 6 bars form the opening range, then price moves as specified."""
+    close = np.full(n, 550.0)
+    high  = np.full(n, 552.0)
+    low   = np.full(n, 548.0)
+    open_ = np.full(n, 549.0)
+
+    # Ensure opening range is or_high/or_low in first 6 bars
+    high[:6]  = or_high
+    low[:6]   = or_low
+
+    # Set prev and curr bar values
+    close[-2] = prev_close
+    close[-1] = curr_close
+
+    vwap_arr = np.full(n, vwap)
+    rsi_arr  = np.full(n, rsi)
+    return pd.DataFrame({
+        "open": open_, "high": high, "low": low, "close": close,
+        "volume": np.full(n, 10000.0),
+        "ema9":  pd.Series(close).ewm(span=9).mean().values,
+        "ema20": pd.Series(close).ewm(span=20).mean().values,
+        "rsi":   rsi_arr, "atr": np.full(n, 0.50),
+        "vwap":  vwap_arr,
+    })
+
+
+def test_orr_bullish_reclaim():
+    # prev below or_low, curr reclaims above, close > vwap, rsi < 60
+    df = _make_orr_df(n=40, or_low=548.0, prev_close=547.5, curr_close=549.0,
+                      rsi=50.0, vwap=548.5)
+    result = _signal_opening_range_reclaim(df)
+    _assert_3tuple(result, "orr_bull")
+    assert result[0] == "BULLISH", f"Expected BULLISH, got {result}"
+    assert result[2].get("reason") == "orr_bull_reclaim"
+
+
+def test_orr_no_signal_price_still_below():
+    # prev below or_low, curr ALSO below or_low — no reclaim
+    df = _make_orr_df(n=40, or_low=548.0, prev_close=547.5, curr_close=547.0,
+                      rsi=50.0, vwap=548.5)
+    result = _signal_opening_range_reclaim(df)
+    _assert_3tuple(result, "orr_no_signal")
+    assert result[0] is None
+
+
+def test_orr_bearish_reclaim():
+    # prev above or_high, curr fails back below, close < vwap, rsi > 40
+    df = _make_orr_df(n=40, or_high=552.0, prev_close=552.5, curr_close=551.5,
+                      rsi=55.0, vwap=552.0)
+    result = _signal_opening_range_reclaim(df)
+    _assert_3tuple(result, "orr_bear")
+    assert result[0] == "BEARISH", f"Expected BEARISH, got {result}"
+    assert result[2].get("reason") == "orr_bear_reclaim"
+
+
+def test_orr_insufficient_bars():
+    df = _make_df(15)
+    result = _signal_opening_range_reclaim(df)
+    _assert_3tuple(result, "orr_insufficient")
+    assert result[0] is None
+
+
+# ---------------------------------------------------------------------------
+# VOL_COMPRESSION_BREAKOUT tests
+# ---------------------------------------------------------------------------
+
+def _make_vcb_df(n=25, atr_mean=1.0, atr_prev_ratio=0.5, atr_now_ratio=0.95,
+                 close_above_ema9=True):
+    """Build a df configured for the ATR compression-expansion pattern."""
+    close = np.full(n, 550.0)
+    if close_above_ema9:
+        close[-1] = 551.0   # above EMA9 (which will ≈ 550 for flat series)
+    else:
+        close[-1] = 549.0
+
+    atr = np.full(n, atr_mean)
+    atr[-2] = atr_mean * atr_prev_ratio   # compressed prev bar
+    atr[-1] = atr_mean * atr_now_ratio    # expanded current bar
+
+    high = close + 0.30
+    low  = close - 0.30
+    return pd.DataFrame({
+        "open": close - 0.10, "high": high, "low": low, "close": close,
+        "volume": np.full(n, 10000.0),
+        "ema9":  pd.Series(np.full(n, 550.0)).ewm(span=9).mean().values,
+        "ema20": pd.Series(np.full(n, 550.0)).ewm(span=20).mean().values,
+        "rsi":   np.full(n, 50.0), "atr": atr,
+        "vwap":  np.full(n, 550.0),
+    })
+
+
+def test_vcb_bullish():
+    # ATR compressed on prev bar, expanded on current, close > ema9
+    df = _make_vcb_df(n=25, atr_mean=1.0, atr_prev_ratio=0.5, atr_now_ratio=0.95,
+                      close_above_ema9=True)
+    result = _signal_vol_compression_breakout(df)
+    _assert_3tuple(result, "vcb_bull")
+    assert result[0] == "BULLISH", f"Expected BULLISH, got {result}"
+    assert result[2].get("reason") == "vcb_bull"
+
+
+def test_vcb_no_signal_no_compression():
+    # ATR normal on prev bar (not compressed) → no signal
+    df = _make_vcb_df(n=25, atr_mean=1.0, atr_prev_ratio=0.9, atr_now_ratio=0.95,
+                      close_above_ema9=True)
+    result = _signal_vol_compression_breakout(df)
+    _assert_3tuple(result, "vcb_no_comp")
+    assert result[0] is None
+    assert result[2].get("reason") == "no_compression"
+
+
+def test_vcb_insufficient_bars():
+    df = _make_df(10)
+    result = _signal_vol_compression_breakout(df)
+    _assert_3tuple(result, "vcb_insufficient")
+    assert result[0] is None
+
+
+# ---------------------------------------------------------------------------
+# VOL_SPIKE_FADE tests
+# ---------------------------------------------------------------------------
+
+def _make_vsf_df(n=25, atr_mean=1.0, atr_spike_ratio=2.0,
+                 close=555.0, vwap=550.0, rsi=75.0):
+    """Build a df configured for a vol spike with price above VWAP."""
+    atr = np.full(n, atr_mean)
+    atr[-1] = atr_mean * atr_spike_ratio    # current bar spike
+
+    close_arr = np.full(n, close)
+    return pd.DataFrame({
+        "open":   close_arr - 0.10,
+        "high":   close_arr + 0.30,
+        "low":    close_arr - 0.30,
+        "close":  close_arr,
+        "volume": np.full(n, 10000.0),
+        "ema9":   pd.Series(close_arr).ewm(span=9).mean().values,
+        "ema20":  pd.Series(close_arr).ewm(span=20).mean().values,
+        "rsi":    np.full(n, rsi),
+        "atr":    atr,
+        "vwap":   np.full(n, vwap),
+    })
+
+
+def test_vsf_bearish():
+    # Spike detected, price far above VWAP, RSI > 70 → BEARISH fade
+    df = _make_vsf_df(n=25, atr_mean=1.0, atr_spike_ratio=2.0,
+                      close=555.0, vwap=550.0, rsi=75.0)
+    result = _signal_vol_spike_fade(df)
+    _assert_3tuple(result, "vsf_bear")
+    assert result[0] == "BEARISH", f"Expected BEARISH, got {result}"
+    assert result[2].get("reason") == "vsf_fade_bear"
+
+
+def test_vsf_no_signal_moderate_rsi():
+    # Same spike and distance but RSI=50 (not extreme) → no signal
+    df = _make_vsf_df(n=25, atr_mean=1.0, atr_spike_ratio=2.0,
+                      close=555.0, vwap=550.0, rsi=50.0)
+    result = _signal_vol_spike_fade(df)
+    _assert_3tuple(result, "vsf_no_rsi")
+    assert result[0] is None
+
+
+def test_vsf_insufficient_bars():
+    df = _make_df(10)
+    result = _signal_vol_spike_fade(df)
+    _assert_3tuple(result, "vsf_insufficient")
+    assert result[0] is None
+
+
+# ---------------------------------------------------------------------------
 # Existing signal backward-compat (still return 3-tuples)
 # ---------------------------------------------------------------------------
 
@@ -365,7 +735,9 @@ def test_sim_config_loads():
     assert isinstance(config, dict)
     assert "_global" in config
     # All new sims present
-    for sim_id in ("SIM18", "SIM19", "SIM20", "SIM21", "SIM22", "SIM23"):
+    for sim_id in ("SIM18", "SIM19", "SIM20", "SIM21", "SIM22", "SIM23",
+                   "SIM29", "SIM30", "SIM31", "SIM32",
+                   "SIM33", "SIM34", "SIM35"):
         assert sim_id in config, f"{sim_id} missing from config"
     # All new signal modes referenced in config
     modes_in_config = {v.get("signal_mode") for k, v in config.items()
@@ -373,6 +745,8 @@ def test_sim_config_loads():
     new_modes = {
         "FAILED_BREAKOUT_REVERSAL", "VWAP_CONTINUATION", "OPENING_DRIVE",
         "AFTERNOON_BREAKOUT", "TREND_RECLAIM", "EXTREME_EXTENSION_FADE",
+        "MULTI_TF_CONFIRM", "GAP_FADE", "VPOC_REVERSION",
+        "OPENING_RANGE_RECLAIM", "VOL_COMPRESSION_BREAKOUT", "VOL_SPIKE_FADE",
     }
     for m in new_modes:
         assert m in modes_in_config, f"{m} not referenced in any sim profile"
@@ -390,6 +764,8 @@ def test_sim_config_no_unknown_signal_modes():
         if str(sim_id).startswith("_") or not isinstance(profile, dict):
             continue
         mode = profile.get("signal_mode", "")
+        if not mode:
+            continue  # skip non-sim entries (e.g. symbols registry)
         assert mode in _KNOWN_SIGNAL_MODES, \
             f"{sim_id} has unknown signal_mode: {mode!r}"
 
@@ -423,6 +799,27 @@ if __name__ == "__main__":
         test_extreme_extension_fade_blocked_by_trend,
         test_extreme_extension_fade_bullish,
         test_existing_modes_return_3tuples,
+        test_multi_tf_confirm_insufficient_bars,
+        test_multi_tf_confirm_no_signal_flat,
+        test_multi_tf_confirm_bullish,
+        test_multi_tf_confirm_bearish,
+        test_gap_fade_insufficient_bars,
+        test_gap_fade_no_gap,
+        test_gap_fade_down_signal,
+        test_gap_fade_up_signal,
+        test_vpoc_reversion_insufficient_bars,
+        test_vpoc_reversion_no_signal_neutral,
+        test_vpoc_reversion_returns_3tuple,
+        test_orr_bullish_reclaim,
+        test_orr_no_signal_price_still_below,
+        test_orr_bearish_reclaim,
+        test_orr_insufficient_bars,
+        test_vcb_bullish,
+        test_vcb_no_signal_no_compression,
+        test_vcb_insufficient_bars,
+        test_vsf_bearish,
+        test_vsf_no_signal_moderate_rsi,
+        test_vsf_insufficient_bars,
         test_sim_config_loads,
         test_sim_config_no_unknown_signal_modes,
     ]

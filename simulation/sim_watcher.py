@@ -28,6 +28,11 @@ from interface.fmt import (
     pct_col,
 )
 
+try:
+    from workspace.workspace_logger import log_event as _ws_log_event
+except ImportError:
+    _ws_log_event = None
+
 ENTRY_INTERVAL_SECONDS = 60
 EXIT_INTERVAL_SECONDS = 30
 EOD_REPORT_TIME_ET = time(16, 0)
@@ -65,6 +70,13 @@ SIM_CHANNEL_MAP = {
     "SIM26": 1480709627170525285,
     "SIM27": 1480709642735718440,
     "SIM28": 1480709656660672648,
+    "SIM29": 1480727396918366359,
+    "SIM30": 1480727662120140931,
+    "SIM31": 1480728633696981062,
+    "SIM32": 1480727817275838536,
+    "SIM33": 1480733191596802108,
+    "SIM34": 1480737061458939985,
+    "SIM35": 1480737079616077844,
 }
 
 _SIM_BOT = None
@@ -1116,6 +1128,15 @@ async def sim_entry_loop() -> None:
                             entry_embed = _build_entry_embed(sim_id, result)
                             await _post_sim_event(sim_id, entry_embed)
                             _SIM_LAST_SKIP_REASON.pop(sim_id, None)
+                            if _ws_log_event:
+                                try:
+                                    _ws_log_event("trade_entry", {
+                                        "sim_id": sim_id,
+                                        "direction": result.get("direction"),
+                                        "price": result.get("fill_price"),
+                                    })
+                                except Exception:
+                                    pass
                         elif sim_id and status == "skipped":
                             reason = result.get("reason") or "unknown"
                             if reason == "insufficient_trade_history":
@@ -1261,6 +1282,15 @@ async def sim_exit_loop() -> None:
                     if sim_id and status == "closed":
                         exit_embed = _build_exit_embed(sim_id, result)
                         await _post_sim_event(sim_id, exit_embed)
+                        if _ws_log_event:
+                            try:
+                                _ws_log_event("trade_exit", {
+                                    "sim_id": sim_id,
+                                    "exit_reason": result.get("exit_reason"),
+                                    "pnl": result.get("pnl"),
+                                })
+                            except Exception:
+                                pass
                         try:
                             from analytics.grader import check_predictions
                             check_predictions(result)
@@ -1399,6 +1429,77 @@ async def sim_weekly_leaderboard_loop(channel_id: int) -> None:
         except Exception:
             logging.exception("sim_weekly_leaderboard_error")
         await asyncio.sleep(60)
+
+async def sim_weekly_behavior_report_loop(channel_id: int) -> None:
+    """Post weekly behavior gap report every Friday, 5 minutes after the leaderboard."""
+    global _SIM_WEEKLY_LEADERBOARD_DATE
+    _weekly_behavior_report_date = None
+    _WEEKLY_BEHAVIOR_REPORT_TIME_ET = time(16, 15)
+    while True:
+        try:
+            now_et = _now_et()
+            if now_et.weekday() != 4:
+                await asyncio.sleep(300)
+                continue
+            if now_et.time() < _WEEKLY_BEHAVIOR_REPORT_TIME_ET:
+                await asyncio.sleep(30)
+                continue
+            if _weekly_behavior_report_date == now_et.date():
+                await asyncio.sleep(300)
+                continue
+
+            try:
+                from research.behavior_divergence import generate_all_reports
+                reports = generate_all_reports()
+                lines = []
+                for r in reports:
+                    sid = r.get("sim_id", "?")
+                    status = r.get("status", "error")
+                    if status == "ok":
+                        wr = r.get("win_rate", 0)
+                        gaps = r.get("gaps", {})
+                        hold = gaps.get("hold_time", {})
+                        tod = gaps.get("time_of_day", {})
+                        best_bucket = tod.get("best_bucket") or "?"
+                        w_hold = hold.get("winners_avg_sec")
+                        hold_text = f"{w_hold:.0f}s" if w_hold is not None else "?"
+                        lines.append(
+                            f"{A(sid, 'cyan', bold=True)}: {wr_col(wr)} WR | best: {A(best_bucket, 'white')} | winners hold {A(hold_text, 'green')}"
+                        )
+                    elif status == "insufficient_data":
+                        lines.append(f"{A(sid, 'cyan')}: {A('<10 trades', 'gray')}")
+
+                if not lines:
+                    _weekly_behavior_report_date = now_et.date()
+                    await asyncio.sleep(300)
+                    continue
+
+                chunks, current, current_len = [], [], 0
+                for line in lines:
+                    if current and current_len + len(line) + 1 > 3800:
+                        chunks.append(current)
+                        current, current_len = [], 0
+                    current.append(line)
+                    current_len += len(line) + 1
+                if current:
+                    chunks.append(current)
+
+                if _SIM_BOT is not None and channel_id:
+                    channel = _SIM_BOT.get_channel(channel_id)
+                    if channel is not None:
+                        for idx, chunk in enumerate(chunks):
+                            title = f"📊 Weekly Behavior Gap Report — {now_et.date().isoformat()}" if idx == 0 else "📊 Weekly Behavior Gap Report (cont.)"
+                            embed = discord.Embed(title=title, description=ab(*chunk), color=0x3498DB)
+                            embed.set_footer(text=_format_et(now_et))
+                            await channel.send(embed=embed)
+            except Exception as e:
+                logging.error("sim_weekly_behavior_report_error: %s", e)
+
+            _weekly_behavior_report_date = now_et.date()
+        except Exception:
+            logging.exception("sim_weekly_behavior_report_loop_error")
+        await asyncio.sleep(60)
+
 
 async def sim_session_leaderboard_loop(channel_id: int) -> None:
     """Post a paginated session leaderboard once at 16:00 ET."""

@@ -41,6 +41,7 @@ from simulation.sim_watcher import (
     sim_eod_report_loop,
     sim_daily_summary_loop,
     sim_weekly_leaderboard_loop,
+    sim_weekly_behavior_report_loop,
     sim_session_leaderboard_loop,
     set_sim_bot,
     get_sim_last_skip_state,
@@ -61,7 +62,6 @@ from execution.option_executor import get_option_price
 from core.session_scope import get_rth_session_view
 from core.account_repository import load_account
 from core.paths import DATA_DIR
-from core.account_repository import load_account
 
 # -------- Decision --------
 
@@ -90,26 +90,14 @@ from simulation.sim_contract import select_sim_contract_with_reason
 
 # -------- AI --------
 from interface.ai_assistant import ask_ai
-from interface.fmt import (
-    ab,
-    A,
-    lbl,
-    pnl_col,
-    conf_col,
-    dir_col,
-    regime_col,
-    vol_col,
-    delta_col,
-    ml_col,
-    result_col,
-    exit_reason_col,
-    balance_col,
-    wr_col,
-    tier_col,
-    drawdown_col,
-    pct_col,
-)
 from research.train_ai import train_direction_model, train_edge_model
+try:
+    from research.behavior_divergence import find_behavior_gaps, generate_all_reports
+    from research.hypothesis_builder import build_hypothesis, save_hypothesis, load_hypotheses
+    from research.sim_generator import suggest_signal_mode
+    _RESEARCH_AVAILABLE = True
+except ImportError:
+    _RESEARCH_AVAILABLE = False
 from logs.recorder import start_recorder_background
 from core.startup_sync import perform_startup_broker_sync
 from core.reconciler import full_reconcile
@@ -347,6 +335,9 @@ class QQQBot(commands.Bot):
         )
         self.loop.create_task(
             self.safe_task(sim_weekly_leaderboard_loop, EOD_REPORT_CHANNEL_ID)
+        )
+        self.loop.create_task(
+            self.safe_task(sim_weekly_behavior_report_loop, EOD_REPORT_CHANNEL_ID)
         )
         self.loop.create_task(
             self.safe_task(sim_session_leaderboard_loop, 1478675253780807795)
@@ -5437,6 +5428,13 @@ async def ask(ctx, *, question=None):
         "SIM09": "Opportunity follower. Uses opportunity output to set direction/DTE/hold.",
         "SIM10": "ORB breakout. Trades opening‑range breaks; requires features.",
         "SIM11": "Vol‑expansion trend. TREND_PULLBACK gated by ATR expansion; requires features.",
+        "SIM29": "Power‑hour trend pullback. TREND_PULLBACK active only in final power hour; requires features.",
+        "SIM30": "Multi‑timeframe confirm. Requires EMA alignment on both 5m and 15m bars plus price above VWAP.",
+        "SIM31": "VPOC reversion. Fades displacement from the session volume point of control; requires features.",
+        "SIM32": "Gap fade scalp. 0DTE fade of the opening gap back toward the pre‑gap close.",
+        "SIM33": "Opening range reclaim. Enters on confirmed re‑entry into the 6‑bar opening range after a failed break.",
+        "SIM34": "Vol compression breakout. Enters on the first ATR expansion bar after a compression period.",
+        "SIM35": "Vol spike fade. Fades extreme ATR spikes when price is overextended from VWAP and RSI is at extremes.",
     }
 
     def _build_sim_context(question_text: str) -> str | None:
@@ -6202,5 +6200,312 @@ async def _ask_trade_impl(ctx, symbol: str):
 
     except Exception as e:
         await ctx.send(f"❌ Error running !ask: {e}")
+
+@bot.command(name="research")
+async def research_cmd(ctx, subcmd: str | None = None, *args):
+    if not _RESEARCH_AVAILABLE:
+        embed = discord.Embed(title="Research Unavailable", description="Research modules failed to import.", color=0xE74C3C)
+        _append_footer(embed)
+        await ctx.send(embed=embed)
+        return
+
+    subcmd = (subcmd or "").lower()
+
+    # ── gaps ──────────────────────────────────────────────────────────────────
+    if subcmd == "gaps":
+        if not args:
+            embed = discord.Embed(
+                title="Usage",
+                description=ab(A("!research gaps <SIM_ID>", "cyan"), A("!research gaps all", "cyan")),
+                color=0x3498DB,
+            )
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+            return
+
+        target = args[0].upper()
+
+        if target == "ALL":
+            try:
+                reports = generate_all_reports()
+                lines = []
+                for r in reports:
+                    sid = r.get("sim_id", "?")
+                    status = r.get("status", "error")
+                    if status == "ok":
+                        wr = r.get("win_rate", 0)
+                        best = (r.get("gaps", {}).get("time_of_day", {}).get("best_bucket") or "?")
+                        lines.append(f"{A(sid, 'cyan', bold=True)}: {wr_col(wr)} WR | best: {A(best, 'white')}")
+                    elif status == "insufficient_data":
+                        lines.append(f"{A(sid, 'cyan')}: {A('<10 trades', 'gray')}")
+                    else:
+                        lines.append(f"{A(sid, 'cyan')}: {A('error', 'red')}")
+
+                # Split into ≤4096-char embeds
+                chunks, current, current_len = [], [], 0
+                for line in lines:
+                    if current and current_len + len(line) + 1 > 3800:
+                        chunks.append(current)
+                        current, current_len = [], 0
+                    current.append(line)
+                    current_len += len(line) + 1
+                if current:
+                    chunks.append(current)
+
+                for idx, chunk in enumerate(chunks):
+                    title = "Behavior Gap Summary — All Sims" if idx == 0 else "Behavior Gap Summary (cont.)"
+                    embed = discord.Embed(title=title, description=ab(*chunk), color=0x3498DB)
+                    _append_footer(embed)
+                    await ctx.send(embed=embed)
+            except Exception as e:
+                embed = discord.Embed(title="Research Error", description=str(e), color=0xE74C3C)
+                _append_footer(embed)
+                await ctx.send(embed=embed)
+            return
+
+        # Single sim gap report
+        try:
+            report = find_behavior_gaps(target)
+            status = report.get("status", "error")
+            if status == "insufficient_data":
+                embed = discord.Embed(
+                    title=f"Behavior Gap Report — {target}",
+                    description=ab(A(f"Need 10+ closed trades to analyze {target}.", "gray")),
+                    color=0x95A5A6,
+                )
+                _append_footer(embed)
+                await ctx.send(embed=embed)
+                return
+            if status == "error":
+                embed = discord.Embed(
+                    title=f"Behavior Gap Report — {target}",
+                    description=ab(A(f"Error analyzing {target}.", "red")),
+                    color=0xE74C3C,
+                )
+                _append_footer(embed)
+                await ctx.send(embed=embed)
+                return
+
+            wr = report.get("win_rate", 0)
+            gaps = report.get("gaps", {})
+            hold = gaps.get("hold_time", {})
+            tod  = gaps.get("time_of_day", {})
+            exits = gaps.get("exit_reason", {})
+
+            w_hold = hold.get("winners_avg_sec")
+            l_hold = hold.get("losers_avg_sec")
+            best_bucket   = tod.get("best_bucket") or "—"
+            worst_bucket  = tod.get("worst_bucket") or "—"
+            winner_exit   = exits.get("winner_dominant") or "—"
+            loser_exit    = exits.get("loser_dominant") or "—"
+
+            color = 0x27AE60 if wr > 0.5 else (0xE74C3C if wr < 0.4 else 0xF39C12)
+            embed = discord.Embed(title=f"Behavior Gap Report — {target}", color=color)
+            embed.add_field(
+                name="Performance",
+                value=ab(
+                    f"{lbl('Win Rate')} {wr_col(wr)}",
+                    f"{lbl('Trades')} {A(str(report.get('trade_count', '?')), 'white', bold=True)}",
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Hold Time",
+                value=ab(
+                    f"{lbl('Winner Avg Hold')} {A(f'{w_hold:.0f}s' if w_hold is not None else '—', 'green')}",
+                    f"{lbl('Loser Avg Hold')} {A(f'{l_hold:.0f}s' if l_hold is not None else '—', 'red')}",
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Time of Day",
+                value=ab(
+                    f"{lbl('Best Bucket')} {A(best_bucket, 'green')}",
+                    f"{lbl('Worst Bucket')} {A(worst_bucket, 'red')}",
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Exit Reasons",
+                value=ab(
+                    f"{lbl('Winner Exit')} {A(winner_exit, 'green')}",
+                    f"{lbl('Loser Exit')} {A(loser_exit, 'red')}",
+                ),
+                inline=False,
+            )
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(title="Research Error", description=str(e), color=0xE74C3C)
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+
+    # ── hypotheses ────────────────────────────────────────────────────────────
+    elif subcmd == "hypotheses":
+        try:
+            hyps = load_hypotheses()
+            if not hyps:
+                embed = discord.Embed(
+                    title="Research Hypotheses",
+                    description=ab(A("No hypotheses recorded yet.", "gray")),
+                    color=0x9B59B6,
+                )
+                _append_footer(embed)
+                await ctx.send(embed=embed)
+                return
+            lines = []
+            for h in hyps:
+                hid    = h.get("id", "?")
+                status = h.get("status", "?")
+                claim  = str(h.get("claim", ""))[:60]
+                lines.append(f"{A(hid, 'cyan', bold=True)} {A(f'[{status}]', 'white')} — {claim}")
+            embed = discord.Embed(title="Research Hypotheses", description=ab(*lines), color=0x9B59B6)
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(title="Research Error", description=str(e), color=0xE74C3C)
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+
+    # ── create ────────────────────────────────────────────────────────────────
+    elif subcmd == "create":
+        if len(args) < 4:
+            embed = discord.Embed(
+                title="Usage",
+                description=ab(
+                    A('!research create "<source>" "<claim>" "<counter>" "<features>"', "cyan"),
+                    A("Features are comma-separated: volatility,compression", "gray"),
+                ),
+                color=0x3498DB,
+            )
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+            return
+        try:
+            source, claim, counter, features_raw = args[0], args[1], args[2], args[3]
+            features = [f.strip() for f in features_raw.split(",") if f.strip()]
+            hyp = build_hypothesis(source, claim, counter, features)
+            save_hypothesis(hyp)
+            signal_mode = suggest_signal_mode(features)
+            embed = discord.Embed(title="Hypothesis Created", color=0x27AE60)
+            embed.add_field(
+                name="Details",
+                value=ab(
+                    f"{lbl('ID')} {A(hyp['id'], 'cyan', bold=True)}",
+                    f"{lbl('Source')} {A(source, 'white')}",
+                    f"{lbl('Status')} {A(hyp['status'], 'yellow')}",
+                    f"{lbl('Features')} {A(', '.join(features) or '—', 'white')}",
+                    f"{lbl('Suggested Mode')} {A(signal_mode, 'green')}",
+                ),
+                inline=False,
+            )
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(title="Research Error", description=str(e), color=0xE74C3C)
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+
+    # ── compare ───────────────────────────────────────────────────────────────
+    elif subcmd == "compare":
+        if len(args) < 2:
+            embed = discord.Embed(
+                title="Usage",
+                description=ab(A("!research compare <SIM_A> <SIM_B>", "cyan")),
+                color=0x3498DB,
+            )
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+            return
+        try:
+            sim_a = args[0].upper()
+            sim_b = args[1].upper()
+            rep_a = find_behavior_gaps(sim_a)
+            rep_b = find_behavior_gaps(sim_b)
+
+            for sid, rep in ((sim_a, rep_a), (sim_b, rep_b)):
+                if rep.get("status") == "insufficient_data":
+                    embed = discord.Embed(
+                        title=f"Behavior Comparison — {sim_a} vs {sim_b}",
+                        description=ab(A(f"Need 10+ closed trades to analyze {sid}.", "gray")),
+                        color=0x95A5A6,
+                    )
+                    _append_footer(embed)
+                    await ctx.send(embed=embed)
+                    return
+                if rep.get("status") == "error":
+                    embed = discord.Embed(
+                        title=f"Behavior Comparison — {sim_a} vs {sim_b}",
+                        description=ab(A(f"Error analyzing {sid}.", "red")),
+                        color=0xE74C3C,
+                    )
+                    _append_footer(embed)
+                    await ctx.send(embed=embed)
+                    return
+
+            def _g(rep, *keys):
+                obj = rep.get("gaps", {})
+                for k in keys:
+                    obj = obj.get(k) if isinstance(obj, dict) else None
+                return obj
+
+            wr_a = rep_a.get("win_rate", 0)
+            wr_b = rep_b.get("win_rate", 0)
+            wh_a = _g(rep_a, "hold_time", "winners_avg_sec")
+            wh_b = _g(rep_b, "hold_time", "winners_avg_sec")
+            lh_a = _g(rep_a, "hold_time", "losers_avg_sec")
+            lh_b = _g(rep_b, "hold_time", "losers_avg_sec")
+            bb_a = _g(rep_a, "time_of_day", "best_bucket") or "—"
+            bb_b = _g(rep_b, "time_of_day", "best_bucket") or "—"
+            we_a = _g(rep_a, "exit_reason", "winner_dominant") or "—"
+            we_b = _g(rep_b, "exit_reason", "winner_dominant") or "—"
+            le_a = _g(rep_a, "exit_reason", "loser_dominant") or "—"
+            le_b = _g(rep_b, "exit_reason", "loser_dominant") or "—"
+            tc_a = rep_a.get("trade_count", "?")
+            tc_b = rep_b.get("trade_count", "?")
+
+            def _sec(v):
+                return f"{v:.0f}s" if v is not None else "—"
+
+            embed = discord.Embed(title=f"Behavior Comparison — {sim_a} vs {sim_b}", color=0x3498DB)
+            embed.add_field(name=sim_a, value=ab(
+                f"{lbl('Win Rate')} {wr_col(wr_a)}",
+                f"{lbl('Winner Hold')} {A(_sec(wh_a), 'green')}",
+                f"{lbl('Loser Hold')} {A(_sec(lh_a), 'red')}",
+                f"{lbl('Best Bucket')} {A(bb_a, 'white')}",
+                f"{lbl('Winner Exit')} {A(we_a, 'green')}",
+                f"{lbl('Loser Exit')} {A(le_a, 'red')}",
+            ), inline=True)
+            embed.add_field(name=sim_b, value=ab(
+                f"{lbl('Win Rate')} {wr_col(wr_b)}",
+                f"{lbl('Winner Hold')} {A(_sec(wh_b), 'green')}",
+                f"{lbl('Loser Hold')} {A(_sec(lh_b), 'red')}",
+                f"{lbl('Best Bucket')} {A(bb_b, 'white')}",
+                f"{lbl('Winner Exit')} {A(we_b, 'green')}",
+                f"{lbl('Loser Exit')} {A(le_b, 'red')}",
+            ), inline=True)
+            embed.set_footer(text=f"{sim_a}: {tc_a} trades  |  {sim_b}: {tc_b} trades")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(title="Research Error", description=str(e), color=0xE74C3C)
+            _append_footer(embed)
+            await ctx.send(embed=embed)
+
+    # ── unknown / no subcommand ───────────────────────────────────────────────
+    else:
+        embed = discord.Embed(
+            title="!research — Subcommands",
+            description=ab(
+                f"{A('!research gaps <SIM_ID>', 'cyan')} — behavior gap analysis for one sim",
+                f"{A('!research gaps all', 'cyan')} — gap summary for all sims",
+                f"{A('!research compare <SIM_A> <SIM_B>', 'cyan')} — side-by-side behavior comparison",
+                f"{A('!research hypotheses', 'cyan')} — list saved hypotheses",
+                f'{A("!research create", "cyan")} <source> <claim> <counter> <features> — create hypothesis',
+            ),
+            color=0x3498DB,
+        )
+        _append_footer(embed)
+        await ctx.send(embed=embed)
+
 
 bot.run(DISCORD_TOKEN)
