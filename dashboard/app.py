@@ -434,6 +434,33 @@ async def api_strategy_performance():
 
 
 # ---------------------------------------------------------------------------
+# Backtest endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/backtest/results")
+async def get_backtest_results():
+    path = os.path.join(BASE_DIR, "backtest", "results", "dashboard_data.json")
+    if not os.path.exists(path):
+        return {"error": "No backtest results found. Run: python -m backtest.runner --start YYYY-MM-DD --end YYYY-MM-DD"}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        return {"error": f"Failed to load backtest results: {e}"}
+
+
+@app.get("/api/backtest/results/{sim_id}")
+async def get_backtest_results_sim(sim_id: str):
+    all_data = await get_backtest_results()
+    if "error" in all_data:
+        return all_data
+    sim_id_upper = sim_id.upper()
+    if sim_id_upper in all_data:
+        return all_data[sim_id_upper]
+    return {"error": f"No backtest data for {sim_id}"}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

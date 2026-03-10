@@ -6,7 +6,7 @@
 <title>Trader Sim Classroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=20260310b">
+<link rel="stylesheet" href="/static/style.css?v=20260310e">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
 </head>
 <body>
@@ -34,6 +34,7 @@
   <button class="subnav-tab active" onclick="navTo('charts',this)">📊 Charts</button>
   <button class="subnav-tab" onclick="navTo('trades',this)">📋 Trades</button>
   <button class="subnav-tab" onclick="navTo('roster',this)">🎓 Roster</button>
+  <button class="subnav-tab" onclick="navTo('backtest',this)">🔬 Backtest</button>
 </nav>
 
 <!-- ══════════════════════════════════════ FRONT WALL: CHALKBOARD -->
@@ -186,6 +187,34 @@
   </div>
 </div>
 
+<!-- ══════════════════════════════════════ BACKTEST PANEL -->
+<div class="classroom-floor hidden" id="section-backtest">
+  <div class="floor-header">
+    <span class="roster-label">BACKTEST RESULTS</span>
+    <span class="roster-count" id="backtest-count"></span>
+    <span style="font-size:11px;color:#888;margin-left:8px">Run: <code>python -m backtest.runner --start YYYY-MM-DD --end YYYY-MM-DD</code></span>
+  </div>
+  <div id="backtest-table-wrap" style="padding:8px 12px">
+    <div class="loading-msg" id="backtest-loading">Loading backtest data…</div>
+    <table class="backtest-table hidden" id="backtest-table">
+      <thead>
+        <tr>
+          <th>Sim</th>
+          <th>Signal Mode</th>
+          <th>Runs</th>
+          <th>Blown</th>
+          <th>Target Hits</th>
+          <th>Avg Win Rate</th>
+          <th>Avg Max DD</th>
+          <th>Avg Trades/Run</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="backtest-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
 <!-- ══════════════════════════════════════ SIM INSPECTOR DRAWER -->
 <div class="sim-drawer" id="sim-drawer">
   <div class="drawer-header">
@@ -203,14 +232,16 @@
     <button class="dtab" onclick="switchDrawerTab('trade',this)">Active Trade</button>
     <button class="dtab" onclick="switchDrawerTab('history',this)">History</button>
     <button class="dtab" onclick="switchDrawerTab('profile',this)">Profile</button>
+    <button class="dtab" onclick="switchDrawerTab('backtest',this)">Backtest</button>
   </div>
   <div class="drawer-panel" id="dpanel-overview"></div>
   <div class="drawer-panel hidden" id="dpanel-trade"></div>
   <div class="drawer-panel hidden" id="dpanel-history"></div>
   <div class="drawer-panel hidden" id="dpanel-profile"></div>
+  <div class="drawer-panel hidden" id="dpanel-backtest"></div>
 </div>
 <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
 
-<script src="/static/main.js?v=20260310d"></script>
+<script src="/static/main.js?v=20260310e"></script>
 </body>
 </html>

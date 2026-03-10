@@ -80,3 +80,7 @@ workspace/daily_logs/*.md
 *.bak
 runbot.sh
 start_recorder.sh
+
+# ── Backtest cache and results ─────────────────────────────────────
+backtest/cache/
+backtest/results/

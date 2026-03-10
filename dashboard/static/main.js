@@ -241,7 +241,30 @@ function navTo(section, btn) {
     charts: '#section-charts',
     trades: '#section-trades',
     roster: '#section-roster',
+    backtest: '#section-backtest',
   };
+  // Show/hide sections: backtest section is managed as a hidden panel
+  const backtestPanel = document.getElementById('section-backtest');
+  if (section === 'backtest') {
+    if (backtestPanel) {
+      backtestPanel.classList.remove('hidden');
+    }
+    // Hide non-backtest sections
+    ['section-charts', 'section-trades', 'section-roster'].forEach(id => {
+      const el2 = document.getElementById(id);
+      if (el2) el2.classList.add('hidden');
+    });
+    document.querySelectorAll('.subnav-tab').forEach(t => t.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    renderBacktestTab();
+    return;
+  } else {
+    if (backtestPanel) backtestPanel.classList.add('hidden');
+    ['section-charts', 'section-trades', 'section-roster'].forEach(id => {
+      const el2 = document.getElementById(id);
+      if (el2) el2.classList.remove('hidden');
+    });
+  }
   const el = document.querySelector(targets[section]);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   document.querySelectorAll('.subnav-tab').forEach(t => t.classList.remove('active'));
@@ -2479,6 +2502,10 @@ function closeDrawer() {
 function switchDrawerTab(name, btn) {
   document.querySelectorAll('.drawer-panel').forEach(p => p.classList.add('hidden'));
   document.querySelectorAll('.dtab').forEach(b => b.classList.remove('active'));
+  // Load backtest tab lazily
+  if (name === 'backtest' && currentSimId) {
+    renderDrawerBacktestTab(currentSimId);
+  }
   const panel = document.getElementById('dpanel-' + name);
   if (panel) panel.classList.remove('hidden');
   if (btn) btn.classList.add('active');
@@ -3202,4 +3229,261 @@ function renderNarrative(narr) {
   loading.classList.add('hidden');
   content.classList.remove('hidden');
   panel.classList.remove('hidden');
+}
+
+
+// ═══════════════════════════════════════════════════ BACKTEST TAB
+
+let _backtestCache = null;  // cached dashboard_data.json response
+let _btEquityChart = null;  // ApexCharts equity curve instance
+let _btWinRateChart = null; // ApexCharts backtest win rate instance
+
+async function fetchBacktestData() {
+  try {
+    const res = await fetch('/api/backtest/results');
+    const data = await res.json();
+    if (data && !data.error) {
+      _backtestCache = data;
+    }
+    return data;
+  } catch (e) {
+    return { error: 'Network error: ' + e };
+  }
+}
+
+async function renderBacktestTab() {
+  const loading = document.getElementById('backtest-loading');
+  const table = document.getElementById('backtest-table');
+  const tbody = document.getElementById('backtest-tbody');
+  const countEl = document.getElementById('backtest-count');
+  if (!loading || !table || !tbody) return;
+
+  loading.textContent = 'Loading backtest data…';
+  loading.classList.remove('hidden');
+  table.classList.add('hidden');
+
+  const data = await fetchBacktestData();
+  loading.classList.add('hidden');
+
+  if (!data || data.error) {
+    loading.textContent = data ? data.error : 'No backtest data available.';
+    loading.classList.remove('hidden');
+    return;
+  }
+
+  const simIds = Object.keys(data).sort((a, b) => {
+    const na = parseInt(a.replace('SIM','')) || 0;
+    const nb = parseInt(b.replace('SIM','')) || 0;
+    return na - nb;
+  });
+
+  if (countEl) countEl.textContent = `${simIds.length} sim${simIds.length !== 1 ? 's' : ''}`;
+
+  tbody.innerHTML = '';
+  simIds.forEach(simId => {
+    const entry = data[simId];
+    const s = entry.summary || {};
+    const tr = document.createElement('tr');
+    const blown = s.blown_count || 0;
+    const runs = s.total_runs || 0;
+    const targetHits = s.target_hit_count || 0;
+    const wr = ((s.avg_win_rate || 0) * 100).toFixed(1);
+    const dd = ((s.avg_max_drawdown || 0) * 100).toFixed(1);
+    const avgTrades = (s.avg_trades_per_run || 0).toFixed(0);
+    const wrClass = parseFloat(wr) >= 50 ? 'color:var(--win-text)' : 'color:var(--loss-text)';
+    tr.innerHTML = `
+      <td><strong>${simId}</strong></td>
+      <td style="font-size:11px">${s.signal_mode || '—'}</td>
+      <td>${runs}</td>
+      <td style="color:var(--loss-text)">${blown}</td>
+      <td style="color:var(--win-text)">${targetHits}</td>
+      <td style="${wrClass}">${wr}%</td>
+      <td style="color:var(--loss-text)">${dd}%</td>
+      <td>${avgTrades}</td>
+      <td><button class="btn-xs" onclick="openDrawer('${simId}');setTimeout(()=>switchDrawerTabByName('backtest'),300)">Details</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  table.classList.remove('hidden');
+}
+
+function switchDrawerTabByName(name) {
+  const btn = document.querySelector(`.dtab[onclick*="'${name}'"]`);
+  switchDrawerTab(name, btn);
+}
+
+async function renderDrawerBacktestTab(simId) {
+  const panel = document.getElementById('dpanel-backtest');
+  if (!panel) return;
+
+  panel.innerHTML = '<div style="padding:16px;color:#888;font-size:12px">Loading backtest data…</div>';
+
+  let data = _backtestCache;
+  if (!data) {
+    data = await fetchBacktestData();
+  }
+
+  if (!data || data.error) {
+    panel.innerHTML = `<div style="padding:16px;font-size:12px;color:var(--loss-text)">${data ? data.error : 'No backtest results. Run backtest first.'}</div>`;
+    return;
+  }
+
+  const entry = data[simId.toUpperCase()];
+  if (!entry) {
+    panel.innerHTML = `<div style="padding:16px;font-size:12px;color:#888">No backtest data for ${simId}.<br>Run: <code>python -m backtest.runner --start YYYY-MM-DD --end YYYY-MM-DD --sims ${simId}</code></div>`;
+    return;
+  }
+
+  const s = entry.summary || {};
+  const runs = s.runs || [];
+  const blown = s.blown_count || 0;
+  const targetHits = s.target_hit_count || 0;
+  const wr = ((s.avg_win_rate || 0) * 100).toFixed(1);
+  const dd = ((s.avg_max_drawdown || 0) * 100).toFixed(1);
+  const avgTrades = (s.avg_trades_per_run || 0).toFixed(0);
+  const pf = runs.length ? (runs.reduce((a, r) => a + (r.profit_factor || 0), 0) / runs.length).toFixed(2) : '—';
+
+  const wrClass = parseFloat(wr) >= 50 ? 'var(--win-text)' : 'var(--loss-text)';
+
+  panel.innerHTML = `
+    <div style="padding:12px 16px">
+      <div class="session-label">BACKTEST SUMMARY · ${s.signal_mode || ''}</div>
+      <div class="stat-grid" style="margin:8px 0 12px">
+        <div class="stat-item"><div class="stat-label">Runs</div><div class="stat-value">${s.total_runs || 0}</div></div>
+        <div class="stat-item"><div class="stat-label">Blown</div><div class="stat-value" style="color:var(--loss-text)">${blown}</div></div>
+        <div class="stat-item"><div class="stat-label">Target Hits</div><div class="stat-value" style="color:var(--win-text)">${targetHits}</div></div>
+        <div class="stat-item"><div class="stat-label">Avg Win Rate</div><div class="stat-value" style="color:${wrClass}">${wr}%</div></div>
+        <div class="stat-item"><div class="stat-label">Avg Max DD</div><div class="stat-value" style="color:var(--loss-text)">${dd}%</div></div>
+        <div class="stat-item"><div class="stat-label">Avg Trades/Run</div><div class="stat-value">${avgTrades}</div></div>
+        <div class="stat-item"><div class="stat-label">Avg Prof Factor</div><div class="stat-value">${pf}</div></div>
+      </div>
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:12px">WIN RATE PROGRESSION (BACKTEST RUNS)</div>
+      <div class="drawer-chart-wrap"><div id="bt-winrate-chart"></div></div>
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:16px">EQUITY CURVES</div>
+      <div class="drawer-chart-wrap" style="height:200px"><div id="bt-equity-chart"></div></div>
+    </div>
+  `;
+
+  // Render charts after DOM update
+  setTimeout(() => {
+    renderBtWinRateChart(entry.win_rate_chart || { runs: [] });
+    renderEquityCurveChart(entry.equity_curves || [], 'bt-equity-chart');
+  }, 60);
+}
+
+function renderBtWinRateChart(winRateChart) {
+  if (_btWinRateChart) { _btWinRateChart.destroy(); _btWinRateChart = null; }
+  const el = document.getElementById('bt-winrate-chart');
+  if (!el) return;
+
+  const runs = (winRateChart || {}).runs || [];
+  const validRuns = runs.filter(r => r.points && r.points.length > 0);
+
+  if (!validRuns.length) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:#888;font-size:12px">No trade data</div>';
+    return;
+  }
+
+  const hasMultipleRuns = validRuns.length > 1;
+  const maxTrades = Math.max(...validRuns.map(r => r.points.length));
+
+  const series = validRuns.map(run => ({
+    name: run.is_current ? 'Last Run' : `Run #${run.run_number}`,
+    data: run.points.map(p => ({ x: p.trade_num, y: p.win_rate })),
+  }));
+
+  const colors = validRuns.map(run => run.is_current ? '#4f8ef7' : 'rgba(79,142,247,0.25)');
+  const strokeWidths = validRuns.map(run => run.is_current ? 2.5 : 1.0);
+
+  _btWinRateChart = new ApexCharts(el, {
+    chart: {
+      type: 'line', height: 160, background: 'transparent',
+      toolbar: { show: false }, animations: { enabled: false }, foreColor: '#888',
+    },
+    series,
+    stroke: { curve: 'smooth', width: strokeWidths },
+    colors,
+    xaxis: {
+      type: 'numeric',
+      tickAmount: Math.min(10, maxTrades - 1),
+      labels: { style: { colors: '#64748b', fontSize: '9px' }, formatter: v => Number.isInteger(+v) ? String(Math.round(v)) : '' },
+      axisBorder: { show: false }, axisTicks: { show: false },
+    },
+    yaxis: {
+      min: 0, max: 100, tickAmount: 5,
+      labels: { style: { colors: '#64748b', fontSize: '9px' }, formatter: v => v + '%' },
+    },
+    grid: { borderColor: 'rgba(0,0,0,0.08)', strokeDashArray: 4 },
+    tooltip: {
+      theme: 'light',
+      x: { formatter: v => 'Trade #' + Math.round(v) },
+      y: { formatter: (v, { seriesIndex }) => `Run #${validRuns[seriesIndex].run_number} WR: ${(v||0).toFixed(1)}%` },
+    },
+    legend: { show: hasMultipleRuns && validRuns.length <= 10, position: 'top', horizontalAlign: 'right', fontSize: '9px', labels: { colors: '#888' } },
+    dataLabels: { enabled: false },
+    markers: { size: maxTrades <= 30 ? 3 : 0, hover: { size: 5 } },
+  });
+  _btWinRateChart.render();
+}
+
+function renderEquityCurveChart(equityCurves, containerId) {
+  if (_btEquityChart) { _btEquityChart.destroy(); _btEquityChart = null; }
+  const el = document.getElementById(containerId || 'bt-equity-chart');
+  if (!el) return;
+
+  if (!equityCurves || !equityCurves.length) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:#888;font-size:12px">No equity data</div>';
+    return;
+  }
+
+  // Group by run_number
+  const byRun = {};
+  equityCurves.forEach(pt => {
+    const rn = pt.run_number || 1;
+    if (!byRun[rn]) byRun[rn] = [];
+    byRun[rn].push(pt);
+  });
+
+  const runNums = Object.keys(byRun).map(Number).sort((a, b) => a - b);
+  const lastRun = runNums[runNums.length - 1];
+
+  const series = runNums.map(rn => ({
+    name: rn === lastRun ? 'Last Run' : `Run #${rn}`,
+    data: byRun[rn].map((pt, i) => ({ x: i + 1, y: pt.balance })),
+  }));
+
+  const colors = runNums.map(rn => rn === lastRun ? '#4f8ef7' : 'rgba(79,142,247,0.20)');
+  const strokeWidths = runNums.map(rn => rn === lastRun ? 2 : 1);
+
+  _btEquityChart = new ApexCharts(el, {
+    chart: {
+      type: 'area', height: 190, background: 'transparent',
+      toolbar: { show: false }, animations: { enabled: false }, foreColor: '#888',
+    },
+    series,
+    stroke: { curve: 'smooth', width: strokeWidths },
+    fill: { type: 'solid', opacity: runNums.map(rn => rn === lastRun ? 0.08 : 0) },
+    colors,
+    xaxis: {
+      type: 'numeric',
+      labels: { style: { colors: '#64748b', fontSize: '9px' } },
+      axisBorder: { show: false }, axisTicks: { show: false },
+    },
+    yaxis: {
+      labels: {
+        style: { colors: '#64748b', fontSize: '9px' },
+        formatter: v => '$' + (v >= 1000 ? (v/1000).toFixed(1) + 'k' : Math.round(v)),
+      },
+    },
+    grid: { borderColor: 'rgba(0,0,0,0.08)', strokeDashArray: 4 },
+    tooltip: {
+      theme: 'light',
+      y: { formatter: v => '$' + (v || 0).toFixed(2) },
+    },
+    legend: { show: runNums.length > 1 && runNums.length <= 8, position: 'top', fontSize: '9px', labels: { colors: '#888' } },
+    dataLabels: { enabled: false },
+    markers: { size: 0 },
+  });
+  _btEquityChart.render();
 }
