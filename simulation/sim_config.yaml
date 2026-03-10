@@ -155,7 +155,7 @@ SIM03:
 
 SIM04:
   name: "Intraday Range Fade"
-  blocked_sessions: [OPEN, MIDDAY, AFTERNOON, POWER]  # disabled: superseded by SIM12/SIM13
+  blocked_sessions: [PREMARKET, OPENING_HOUR, MIDDAY, POWER_HOUR, CLOSING]  # disabled: superseded by SIM12/SIM13
   symbols:
     - SPY
     - QQQ
@@ -189,7 +189,7 @@ SIM04:
 
 SIM05:
   name: "1DTE Afternoon Continuation"
-  blocked_sessions: [OPEN, MIDDAY, AFTERNOON, POWER]  # disabled: superseded by SIM11/SIM29
+  blocked_sessions: [PREMARKET, OPENING_HOUR, MIDDAY, POWER_HOUR, CLOSING]  # disabled: superseded by SIM11/SIM29
   symbols:
     - SPY
     - QQQ
@@ -1031,7 +1031,7 @@ SIM28:
 
 SIM29:
   name: "Trend Pullback (POWER Hour)"
-  # session_filter: POWER  — informational only; not consumed by engine yet
+  session_filter: POWER_HOUR
   symbols:
     - SPY
     - QQQ
@@ -1196,10 +1196,10 @@ SIM33:
   max_spread_pct: 0.15
   entry_slippage: 0.01
   exit_slippage: 0.01
-  stop_loss_pct: 0.015
-  profit_target_pct: 0.03
-  trailing_stop_activate_pct: 0.02
-  trailing_stop_trail_pct: 0.01
+  stop_loss_pct: 0.30
+  profit_target_pct: 0.55
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
 
 SIM34:
   name: "Vol Compression Breakout"
@@ -1230,10 +1230,10 @@ SIM34:
   max_spread_pct: 0.15
   entry_slippage: 0.01
   exit_slippage: 0.01
-  stop_loss_pct: 0.02
-  profit_target_pct: 0.05
-  trailing_stop_activate_pct: 0.03
-  trailing_stop_trail_pct: 0.015
+  stop_loss_pct: 0.25
+  profit_target_pct: 0.50
+  trailing_stop_activate_pct: 0.12
+  trailing_stop_trail_pct: 0.06
 
 SIM35:
   name: "Vol Spike Fade"
@@ -1264,10 +1264,10 @@ SIM35:
   max_spread_pct: 0.15
   entry_slippage: 0.01
   exit_slippage: 0.01
-  stop_loss_pct: 0.02
-  profit_target_pct: 0.04
-  trailing_stop_activate_pct: 0.025
-  trailing_stop_trail_pct: 0.012
+  stop_loss_pct: 0.25
+  profit_target_pct: 0.45
+  trailing_stop_activate_pct: 0.10
+  trailing_stop_trail_pct: 0.05
 
 # ── Symbol Registry ────────────────────────────────────────────────────────
 # Each entry names the per-symbol 1-minute candle CSV and asset type.

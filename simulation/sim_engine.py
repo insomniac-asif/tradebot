@@ -13,8 +13,8 @@ from simulation.sim_executor import sim_try_fill, sim_compute_risk_dollars, sim_
 from simulation.sim_contract import select_sim_contract, select_sim_contract_with_reason, get_iv_series
 from simulation.sim_live_router import sim_live_router, manage_live_exit
 from execution.option_executor import get_option_price
-from simulation.sim_watcher import _get_time_of_day_bucket
 from simulation.sim_signals import derive_sim_signal, get_signal_family
+from core.market_clock import get_time_bucket
 from simulation.sim_ml import predict_sim_trade, record_sim_trade_close
 from analytics.sim_features import compute_sim_features
 from core.md_state import is_md_enabled
@@ -35,11 +35,384 @@ def _load_profiles() -> dict:
         return {}
 
 
+def _load_global_config() -> dict:
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            raw = yaml.safe_load(f) or {}
+        return raw.get("_global") or {}
+    except Exception:
+        return {}
+
+
 _PROFILES = _load_profiles()
+_GLOBAL_CONFIG = _load_global_config()
 _LAST_CHAIN_CALL_TS = 0.0
 _CHAIN_CALL_MIN_INTERVAL = 1.0  # seconds between Alpaca snapshot calls
 DAYTRADE_EOD_CUTOFF = time(15, 55)  # ET cutoff for day-trading sims to flatten
 EXPIRY_EOD_CUTOFF = time(15, 55)    # ET cutoff for same-day expiries
+
+
+# ---------------------------------------------------------------------------
+# Private helpers (extracted to reduce run_sim_entries / run_sim_exits size)
+# ---------------------------------------------------------------------------
+
+def _check_circuit_breaker(sim, profile, sim_id: str):
+    """Check the circuit-breaker gate for a live sim.
+
+    Returns (should_skip, result_dict).  When should_skip is True the caller
+    should append result_dict and continue to the next iteration.
+    """
+    cb_config = profile.get("circuit_breaker")
+    if not (isinstance(cb_config, dict) and cb_config.get("enabled")):
+        return False, None
+
+    cb_source_id = cb_config.get("source_sim")
+    cb_window = int(cb_config.get("rolling_window", 20))
+    cb_min_wr = float(cb_config.get("min_win_rate", 0.35))
+    cb_min_exp = float(cb_config.get("min_expectancy", -50.0))
+    cb_recover_wr = float(cb_config.get("recovery_win_rate", 0.45))
+    cb_recover_exp = float(cb_config.get("recovery_expectancy", 0.0))
+
+    if not cb_source_id:
+        return False, None
+
+    try:
+        cb_src_profile = _PROFILES.get(cb_source_id, {})
+        cb_src_sim = SimPortfolio(cb_source_id, cb_src_profile)
+        cb_src_sim.load()
+        cb_log = cb_src_sim.trade_log if isinstance(cb_src_sim.trade_log, list) else []
+        cb_recent = cb_log[-cb_window:] if len(cb_log) >= cb_window else cb_log
+
+        if len(cb_recent) >= cb_window:
+            cb_wins = 0
+            cb_pnl_total = 0.0
+            for t in cb_recent:
+                pnl = t.get("realized_pnl_dollars")
+                if pnl is None:
+                    continue
+                try:
+                    pnl_f = float(pnl)
+                except (TypeError, ValueError):
+                    continue
+                cb_pnl_total += pnl_f
+                if pnl_f > 0:
+                    cb_wins += 1
+            cb_wr = cb_wins / len(cb_recent) if cb_recent else 0
+            cb_exp = cb_pnl_total / len(cb_recent) if cb_recent else 0
+
+            was_tripped = sim.profile.get("_circuit_breaker_tripped", False)
+
+            if not was_tripped:
+                if cb_wr < cb_min_wr or cb_exp < cb_min_exp:
+                    sim.profile["_circuit_breaker_tripped"] = True
+                    return True, {
+                        "sim_id": sim_id,
+                        "status": "circuit_breaker_tripped",
+                        "reason": "source_performance_degraded",
+                        "source_sim": cb_source_id,
+                        "source_wr": round(cb_wr, 3),
+                        "source_exp": round(cb_exp, 2),
+                        "threshold_wr": cb_min_wr,
+                        "threshold_exp": cb_min_exp,
+                        "window": cb_window,
+                    }
+            else:
+                if cb_wr >= cb_recover_wr and cb_exp >= cb_recover_exp:
+                    sim.profile["_circuit_breaker_tripped"] = False
+                    return False, {
+                        "sim_id": sim_id,
+                        "status": "circuit_breaker_recovered",
+                        "source_sim": cb_source_id,
+                        "source_wr": round(cb_wr, 3),
+                        "source_exp": round(cb_exp, 2),
+                    }
+                else:
+                    return True, {
+                        "sim_id": sim_id,
+                        "status": "circuit_breaker_held",
+                        "reason": "source_still_degraded",
+                        "source_sim": cb_source_id,
+                        "source_wr": round(cb_wr, 3),
+                        "source_exp": round(cb_exp, 2),
+                    }
+    except Exception:
+        logging.exception("circuit_breaker_check_error")
+
+    return False, None
+
+
+def _evaluate_exit_conditions(trade, profile, sim, current_price, elapsed_seconds, now_et):
+    """Evaluate all exit conditions for a paper trade.
+
+    Returns (should_exit, exit_reason, exit_context, spread_guard_bypass).
+    Does NOT perform the actual exit — only decides whether to exit and why.
+    May mutate trade dict (peak_price, trailing_stop_high, tp2_activated, etc.)
+    and call sim.save() when intermediate trade state is persisted.
+    """
+    should_exit = False
+    exit_reason = None
+    exit_context = None
+    spread_guard_bypass = False
+
+    stop_loss_pct = trade.get("stop_loss_pct", profile.get("stop_loss_pct"))
+    if stop_loss_pct is not None and is_md_enabled() and trade.get("sim_id") != "SIM09":
+        try:
+            stop_loss_pct = max(float(stop_loss_pct) * 0.7, 0.05)
+        except (TypeError, ValueError):
+            pass
+    if stop_loss_pct is not None:
+        try:
+            entry_price = float(trade.get("entry_price", 0))
+            if entry_price > 0:
+                peak_price = float(trade.get("peak_price") or 0)
+                if current_price > entry_price and current_price > peak_price:
+                    trade["peak_price"] = current_price
+                    sim.save()
+                    peak_price = current_price
+
+                loss_pct = (current_price - entry_price) / entry_price
+                effective_sl_pct = abs(float(stop_loss_pct))
+                original_sl_price = entry_price * (1 - effective_sl_pct)
+                effective_sl_price = max(original_sl_price, entry_price) if peak_price > entry_price else original_sl_price
+
+                if current_price <= effective_sl_price:
+                    should_exit = True
+                    spread_guard_bypass = True
+                    if effective_sl_price > original_sl_price:
+                        exit_reason = "breakeven_stop"
+                        exit_context = f"price={current_price:.4f} locked_floor={effective_sl_price:.4f} peak={peak_price:.4f}"
+                    else:
+                        exit_reason = "stop_loss"
+                        exit_context = f"loss_pct={loss_pct:.3%} <= -{effective_sl_pct:.3%}"
+        except (TypeError, ValueError):
+            pass
+
+    profit_target_pct = profile.get("profit_target_pct")
+    entry_price = None
+    gain_pct = None
+    try:
+        entry_price = float(trade.get("entry_price", 0))
+        if entry_price > 0:
+            gain_pct = (current_price - entry_price) / entry_price
+    except (TypeError, ValueError):
+        gain_pct = None
+
+    # Greeks-aware exit: theta burn acceleration
+    if not should_exit and gain_pct is not None and gain_pct <= 0.02:
+        dte_at_entry = trade.get("dte_bucket")
+        try:
+            dte_val = int(dte_at_entry) if dte_at_entry is not None else None
+        except (TypeError, ValueError):
+            dte_val = None
+        if dte_val is not None and dte_val <= 1:
+            try:
+                expiry_raw = trade.get("expiry")
+                if isinstance(expiry_raw, str):
+                    expiry_date = datetime.fromisoformat(expiry_raw).date()
+                    if expiry_date == now_et.date():
+                        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+                        remaining_seconds = (market_close - now_et).total_seconds()
+                        if 0 < remaining_seconds < 7200 and gain_pct <= 0.02:
+                            should_exit = True
+                            exit_reason = "theta_burn"
+                            exit_context = f"gain_pct={gain_pct:.3%} remaining={remaining_seconds:.0f}s dte={dte_val}"
+                            spread_guard_bypass = True
+            except Exception:
+                pass
+
+    # Greeks-aware exit: IV crush detection
+    if not should_exit and gain_pct is not None and gain_pct < 0:
+        iv_at_entry = trade.get("iv_at_entry")
+        if isinstance(iv_at_entry, (int, float)) and float(iv_at_entry) > 0:
+            try:
+                iv_entry = float(iv_at_entry)
+                stop_pct = float(profile.get("stop_loss_pct", 0.30))
+                if abs(gain_pct) > stop_pct * 0.3:
+                    tightened_stop = stop_pct * 0.6
+                    if gain_pct <= -abs(tightened_stop):
+                        should_exit = True
+                        exit_reason = "iv_crush_stop"
+                        exit_context = f"gain_pct={gain_pct:.3%} iv_entry={iv_entry:.3f} tightened_stop={tightened_stop:.3%}"
+                        spread_guard_bypass = True
+            except (TypeError, ValueError):
+                pass
+
+    # Near-TP adaptive lock + TP2 (optional)
+    if not should_exit and profit_target_pct is not None and gain_pct is not None:
+        try:
+            base_target = abs(float(profit_target_pct))
+            if base_target > 0 and profile.get("tp2_enabled", True):
+                near_ratio = float(profile.get("near_tp_trigger_ratio", 0.85))
+                grade_min = float(profile.get("near_tp_grade_min", 0.6))
+                tp2_mult = float(profile.get("tp2_multiplier", 1.3))
+                grade = _trade_grade(trade)
+                if grade is not None and grade >= grade_min and gain_pct >= base_target * near_ratio:
+                    if not trade.get("tp2_activated"):
+                        lock_pct = trade.get("lock_profit_pct")
+                        if lock_pct is None:
+                            lock_pct = max(0.05, min(base_target * 0.5, base_target - 0.02))
+                        trade["lock_profit_pct"] = float(lock_pct)
+                        trade["tp2_target_pct"] = float(base_target * tp2_mult)
+                        trade["tp2_activated"] = True
+                        sim.save()
+        except (TypeError, ValueError):
+            pass
+
+    # Profit lock: exit if retrace below locked profit level after TP2 activation
+    lock_pct = trade.get("lock_profit_pct")
+    if not should_exit and gain_pct is not None and trade.get("tp2_activated") and isinstance(lock_pct, (int, float)):
+        try:
+            if gain_pct <= float(lock_pct):
+                should_exit = True
+                exit_reason = "profit_lock"
+                exit_context = f"gain_pct={gain_pct:.3%} <= lock_pct={float(lock_pct):.3%}"
+        except (TypeError, ValueError):
+            pass
+
+    effective_target = profit_target_pct
+    if trade.get("tp2_activated") and trade.get("tp2_target_pct") is not None:
+        effective_target = trade.get("tp2_target_pct")
+
+    if not should_exit and effective_target is not None:
+        try:
+            if entry_price is None:
+                entry_price = float(trade.get("entry_price", 0))
+            if entry_price > 0:
+                if gain_pct is None:
+                    gain_pct = (current_price - entry_price) / entry_price
+                target_val = abs(float(effective_target))
+                if gain_pct >= target_val:
+                    should_exit = True
+                    exit_reason = "profit_target_2" if trade.get("tp2_activated") else "profit_target"
+                    exit_context = f"gain_pct={gain_pct:.3%} >= {target_val:.3%}"
+        except (TypeError, ValueError):
+            pass
+
+    trailing_activate = profile.get("trailing_stop_activate_pct")
+    trailing_trail = profile.get("trailing_stop_trail_pct")
+    if not should_exit and trailing_activate is not None and trailing_trail is not None:
+        try:
+            entry_price = float(trade.get("entry_price", 0))
+            if entry_price > 0:
+                gain_pct = (current_price - entry_price) / entry_price
+                trailing_activate_f = abs(float(trailing_activate))
+                trailing_trail_f = abs(float(trailing_trail))
+                if not trade.get("trailing_stop_activated", False):
+                    if gain_pct >= trailing_activate_f:
+                        trade["trailing_stop_activated"] = True
+                        trade["trailing_stop_high"] = current_price
+                        sim.save()
+                else:
+                    if current_price > trade.get("trailing_stop_high", 0):
+                        trade["trailing_stop_high"] = current_price
+                        sim.save()
+                    trail_high = float(trade.get("trailing_stop_high", 0))
+                    if trail_high > 0:
+                        drop_from_high = (current_price - trail_high) / trail_high
+                        if drop_from_high <= -trailing_trail_f:
+                            should_exit = True
+                            exit_reason = "trailing_stop"
+                            exit_context = f"drop_from_high={drop_from_high:.3%} <= -{trailing_trail_f:.3%} (high={trail_high:.4f})"
+        except (TypeError, ValueError):
+            pass
+
+    return should_exit, exit_reason, exit_context, spread_guard_bypass
+
+
+def _sim_close_record(sim, trade, exit_data: dict, pnl_val):
+    """Persist a paper trade close: portfolio record + ML close + strategy perf store."""
+    sim.record_close(trade["trade_id"], exit_data)
+    sim.save()
+    record_sim_trade_close(trade, pnl_val)
+    try:
+        from analytics.strategy_performance import PERF_STORE
+        entry_price = trade.get("entry_price")
+        qty_val = trade.get("qty")
+        _pnl_d = float(pnl_val or 0)
+        _cost = float(entry_price or 0) * float(qty_val or 0) * 100
+        _pnl_pct = _pnl_d / _cost if _cost > 0 else 0.0
+        PERF_STORE.record_close(
+            strategy=trade.get("signal_mode", ""),
+            regime=trade.get("regime_at_entry", "UNKNOWN"),
+            time_bucket=trade.get("time_of_day_bucket", "UNKNOWN"),
+            pnl=_pnl_d,
+            pnl_pct=_pnl_pct,
+            hold_seconds=float(exit_data.get("time_in_trade_seconds") or 0),
+            grade=trade.get("grade"),
+            spread_pct=trade.get("spread_pct"),
+        )
+    except Exception:
+        pass
+
+
+def _build_paper_trade_dict(
+    sim_id, contract, fill_result, qty, direction, regime,
+    time_of_day_bucket, signal_mode, signal_meta, ml_prediction,
+    effective_profile, profile, feature_snapshot, underlying_price, df,
+):
+    """Build the trade dict that is recorded into SimPortfolio after a paper fill."""
+    import re as _re
+    _opt_sym = contract["option_symbol"] or ""
+    _underlying = (_re.match(r'^([A-Z]{1,6})', _opt_sym) or [None, ''])[1] or 'SPY'
+
+    trade = {
+        "trade_id": f"{sim_id}__{uuid.uuid4()}",
+        "sim_id": sim_id,
+        "symbol": _underlying,
+        "option_symbol": contract["option_symbol"],
+        "entry_price": fill_result["fill_price"],
+        "qty": qty,
+        "entry_time": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+        "horizon": effective_profile.get("horizon", profile.get("horizon")),
+        "dte_bucket": str(contract["dte"]),
+        "otm_pct": contract["otm_pct_applied"],
+        "direction": direction,
+        "strike": contract["strike"],
+        "expiry": contract["expiry"],
+        "contract_type": contract["contract_type"],
+        "hold_min_seconds": int(effective_profile.get("hold_min_seconds", profile.get("hold_min_seconds"))),
+        "hold_max_seconds": int(effective_profile.get("hold_max_seconds", profile.get("hold_max_seconds"))),
+        "entry_price_source": fill_result.get("price_source", "mid_plus_slippage"),
+    }
+    if feature_snapshot:
+        trade["feature_snapshot"] = feature_snapshot
+    if sim_id == "SIM09" or str(signal_mode).upper() == "OPPORTUNITY":
+        vol_state = volatility_state(df)
+        vol_stop_map = {
+            "DEAD": 0.03,
+            "LOW": 0.04,
+            "NORMAL": 0.06,
+            "HIGH": 0.08,
+        }
+        dynamic_stop = vol_stop_map.get(str(vol_state).upper(), 0.06)
+        trade["stop_loss_pct"] = min(0.10, max(0.01, float(dynamic_stop)))
+    trade["regime_at_entry"] = regime
+    trade["time_of_day_bucket"] = time_of_day_bucket
+    trade["signal_mode"] = signal_mode
+    trade["strategy_family"] = get_signal_family(str(signal_mode).upper())
+    if isinstance(signal_meta, dict):
+        trade["structure_score"] = signal_meta.get("structure_score")
+    trade["entry_context"] = None  # caller sets this
+    trade["iv_at_entry"] = contract.get("iv")
+    trade["delta_at_entry"] = contract.get("delta")
+    trade["gamma_at_entry"] = contract.get("gamma")
+    trade["theta_at_entry"] = contract.get("theta")
+    trade["vega_at_entry"] = contract.get("vega")
+    if isinstance(ml_prediction, dict):
+        trade["predicted_direction"] = ml_prediction.get("predicted_direction")
+        trade["prediction_confidence"] = ml_prediction.get("prediction_confidence")
+        trade["direction_prob"] = ml_prediction.get("direction_prob")
+        trade["edge_prob"] = ml_prediction.get("edge_prob")
+        trade["regime"] = ml_prediction.get("regime")
+        trade["volatility"] = ml_prediction.get("volatility")
+        trade["conviction_score"] = ml_prediction.get("conviction_score")
+        trade["impulse"] = ml_prediction.get("impulse")
+        trade["follow_through"] = ml_prediction.get("follow_through")
+        trade["setup"] = ml_prediction.get("setup")
+        trade["style"] = ml_prediction.get("style")
+        trade["confidence"] = ml_prediction.get("confidence")
+        trade["ml_probability"] = ml_prediction.get("edge_prob")
+    return trade
 
 
 def _trade_grade(tr) -> float | None:
@@ -97,1135 +470,9 @@ def _count_family_directional_exposure(family: str, direction: str, symbol: str 
     return count
 
 
-async def run_sim_entries(
-    df,
-    regime: str | None = None
-) -> list[dict]:
-    global _LAST_CHAIN_CALL_TS
-    results = []
-    if not _PROFILES:
-        return [{"sim_id": None, "status": "error", "reason": "no_profiles_loaded"}]
-    try:
-        from core.runtime_state import RUNTIME
-        if not RUNTIME.can_run_paper_sims():
-            return [{"sim_id": None, "status": "skipped", "reason": f"runtime_{RUNTIME.state.value.lower()}"}]
-    except ImportError:
-        pass
-    time_of_day_bucket = _get_time_of_day_bucket()
-
-    # ── Pre-fetch each unique symbol's df ONCE (avoids 24x repeated blocking calls) ──
-    _all_syms: set[str] = set()
-    for _pid, _prof in _PROFILES.items():
-        if str(_pid).startswith("_"):
-            continue
-        _syms = _prof.get("symbols")
-        if _syms and isinstance(_syms, list):
-            _all_syms.update(str(s).upper() for s in _syms)
-        elif _prof.get("symbol"):
-            _all_syms.add(str(_prof["symbol"]).upper())
-    _sym_df_cache: dict = {"SPY": df}
-    for _sym in _all_syms:
-        if _sym == "SPY":
-            continue
-        try:
-            _cached = get_symbol_dataframe(_sym)
-            if _cached is not None and len(_cached) > 30:
-                _sym_df_cache[_sym] = _cached
-        except Exception:
-            pass
-
-    # Shuffle paper sims so no single sim always gets first access to
-    # directional capacity. SIM00 (live) is always evaluated last so that
-    # source sims have been processed before the graduation gate runs.
-    _all_sim_ids = [sid for sid in _PROFILES if not str(sid).startswith("_")]
-    _paper_ids = [sid for sid in _all_sim_ids if sid != "SIM00"]
-    random.shuffle(_paper_ids)
-    _ordered_ids = _paper_ids + (["SIM00"] if "SIM00" in _all_sim_ids else [])
-
-    for sim_id in _ordered_ids:
-        profile = _PROFILES[sim_id]
-        try:
-            sim = SimPortfolio(sim_id, profile)
-            sim.load()
-
-            signal_mode = sim.profile.get("signal_mode", "TREND_PULLBACK")
-
-            # ── 0. Blocked-session gate (sim-level, checked once) ─────────
-            blocked_sessions = profile.get("blocked_sessions")
-            if blocked_sessions and time_of_day_bucket:
-                if isinstance(blocked_sessions, list) and time_of_day_bucket in blocked_sessions:
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": "blocked_session",
-                        "session": time_of_day_bucket,
-                        "signal_mode": signal_mode,
-                    })
-                    continue
-
-            # ── Determine symbol list for this sim ───────────────────────
-            _sim_symbols = profile.get("symbols")
-            if not _sim_symbols or not isinstance(_sim_symbols, list):
-                _fallback = profile.get("symbol", "SPY")
-                _sim_symbols = [_fallback] if _fallback else ["SPY"]
-            _sim_symbols = list(_sim_symbols)
-            random.shuffle(_sim_symbols)
-
-            # ── Loop over each symbol this sim trades ────────────────────
-            for _trade_symbol in _sim_symbols:
-                _trade_symbol = str(_trade_symbol).upper()
-
-                # Reload sim state so open_trades reflects any entries made
-                # earlier in this symbol loop iteration
-                sim.load()
-                trade_count = len(sim.trade_log) if isinstance(sim.trade_log, list) else 0
-
-                # ── Load this symbol's df from pre-fetched cache ─────────
-                sim_df = _sym_df_cache.get(_trade_symbol, df)
-
-                signal_meta = None
-                direction = None
-                underlying_price = None
-                effective_profile = dict(profile)
-
-                # ── 1. Derive signal FIRST ──────────────────────────────
-                feature_snapshot = None
-                if profile.get("features_enabled"):
-                    try:
-                        feature_snapshot = compute_sim_features(
-                            sim_df,
-                            {
-                                "direction": None,
-                                "price": None,
-                                "regime": regime,
-                                "signal_mode": signal_mode,
-                                "horizon": effective_profile.get("horizon", profile.get("horizon")),
-                                "dte_min": effective_profile.get("dte_min"),
-                                "dte_max": effective_profile.get("dte_max"),
-                                "orb_minutes": effective_profile.get("orb_minutes", profile.get("orb_minutes", 15)),
-                                "zscore_window": effective_profile.get("zscore_window", profile.get("zscore_window", 30)),
-                                "iv_series": get_iv_series(profile.get("iv_series_window", 200)),
-                            },
-                        )
-                    except Exception:
-                        feature_snapshot = None
-
-                sig = derive_sim_signal(
-                    sim_df,
-                    signal_mode,
-                    {
-                        "trade_count": trade_count,
-                        "atr_expansion_min": profile.get("atr_expansion_min"),
-                        "vol_z_min": profile.get("vol_z_min"),
-                        "require_trend_bias": profile.get("require_trend_bias"),
-                        "iv_rank_max": profile.get("iv_rank_max"),
-                        "vwap_z_min": profile.get("vwap_z_min"),
-                        "close_z_min": profile.get("close_z_min"),
-                    },
-                    feature_snapshot=feature_snapshot,
-                    profile=profile,
-                    signal_params=profile.get("signal_params") or {},
-                )
-                if isinstance(sig, tuple):
-                    if len(sig) >= 2:
-                        direction = sig[0]
-                        underlying_price = sig[1]
-                    if len(sig) >= 3:
-                        signal_meta = sig[2]
-
-                # ── 2. Apply signal_meta overrides ──────────────────────
-                if isinstance(signal_meta, dict):
-                    for k in [
-                        "dte_min",
-                        "dte_max",
-                        "hold_min_seconds",
-                        "hold_max_seconds",
-                        "horizon",
-                        "orb_minutes",
-                        "zscore_window",
-                    ]:
-                        if signal_meta.get(k) is not None:
-                            effective_profile[k] = signal_meta.get(k)
-
-                # ── 3. Build entry_context AFTER signal_meta ────────────
-                entry_context = f"signal_mode={signal_mode} | regime={regime or 'N/A'} | bucket={time_of_day_bucket or 'N/A'}"
-                if isinstance(signal_meta, dict) and signal_meta.get("entry_context"):
-                    entry_context = f"{entry_context} | {signal_meta.get('entry_context')}"
-                if isinstance(signal_meta, dict) and signal_meta.get("reason"):
-                    entry_context = f"{entry_context} | reason={signal_meta.get('reason')}"
-
-                # ── 4. Early exit if no signal ─────────────────────────
-                if direction is None or underlying_price is None:
-                    if isinstance(signal_meta, dict) and signal_meta.get("reason"):
-                        results.append({
-                            "sim_id": sim_id,
-                            "status": "skipped",
-                            "reason": signal_meta.get("reason"),
-                            "entry_context": entry_context,
-                            "signal_mode": signal_mode,
-                        })
-                    # Candidate: signal evaluated but did not fire
-                    try:
-                        from decision.candidate import Candidate
-                        from analytics.candidate_logger import log_candidate
-                        log_candidate(Candidate(
-                            sim_id=sim_id, strategy=signal_mode,
-                            symbol=_trade_symbol, direction=None, fired=False,
-                            regime=regime or "", time_bucket=time_of_day_bucket or "",
-                            signal_params=profile.get("signal_params") or {},
-                        ))
-                    except Exception:
-                        pass
-                    continue
-
-                # ── Cross-sim directional exposure guard ─────────────────
-                global_config = _PROFILES.get("_global", {})
-                if global_config.get("cross_sim_guard_enabled", False):
-                    try:
-                        max_dir_sims = int(global_config.get("max_directional_sims", 4))
-                    except (TypeError, ValueError):
-                        max_dir_sims = 4
-                    current_dir_count = _count_directional_exposure(direction, _trade_symbol)
-                    if current_dir_count >= max_dir_sims:
-                        results.append({
-                            "sim_id": sim_id,
-                            "status": "skipped",
-                            "reason": "directional_exposure_limit",
-                            "direction": direction,
-                            "symbol": _trade_symbol,
-                            "current_count": current_dir_count,
-                            "max_allowed": max_dir_sims,
-                            "entry_context": entry_context,
-                            "signal_mode": signal_mode,
-                        })
-                        continue
-
-                # ── Cross-sim family crowding guard ───────────────────────
-                if global_config.get("cross_sim_guard_enabled", False):
-                    max_family_concurrent = None
-                    try:
-                        v = global_config.get("max_family_concurrent")
-                        if v is not None:
-                            max_family_concurrent = int(v)
-                    except (TypeError, ValueError):
-                        pass
-                    if max_family_concurrent is not None:
-                        sig_family = get_signal_family(str(signal_mode).upper())
-                        if sig_family not in ("unknown", "adaptive"):
-                            family_count = _count_family_directional_exposure(sig_family, direction, _trade_symbol)
-                            if family_count >= max_family_concurrent:
-                                results.append({
-                                    "sim_id": sim_id,
-                                    "status": "skipped",
-                                    "reason": "family_crowding_limit",
-                                    "family": sig_family,
-                                    "direction": direction,
-                                    "family_count": family_count,
-                                    "max_allowed": max_family_concurrent,
-                                    "entry_context": entry_context,
-                                    "signal_mode": signal_mode,
-                                })
-                                continue
-
-                # ── 5. ML prediction with real direction/price ─────────
-                ml_context = {
-                    "direction": direction,
-                    "price": underlying_price,
-                    "regime": regime,
-                    "horizon": effective_profile.get("horizon"),
-                    "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-                }
-                ml_prediction = predict_sim_trade(df, ml_context)
-
-                # ── 6. Continue with regime_filter, execution_mode, etc. ─
-                regime_filter = sim.profile.get("regime_filter")
-                if regime_filter is not None:
-                    filtered_out = False
-                    if isinstance(regime_filter, list):
-                        filtered_out = regime not in regime_filter
-                    elif regime_filter == "TREND_ONLY":
-                        filtered_out = regime != "TREND"
-                    elif regime_filter == "RANGE_ONLY":
-                        filtered_out = regime != "RANGE"
-                    elif regime_filter == "VOLATILE_ONLY":
-                        filtered_out = regime != "VOLATILE"
-                    if filtered_out:
-                        results.append({
-                            "sim_id": sim_id,
-                            "status": "skipped",
-                            "reason": "regime_filter",
-                            "entry_context": entry_context,
-                            "signal_mode": signal_mode,
-                        })
-                        continue
-
-                execution_mode = sim.profile.get("execution_mode")
-                if execution_mode == "live":
-                    # Graduation gate: this sim activates only after a source sim
-                    # (e.g. SIM03) has logged enough closed paper trades.
-                    source_sim_id = sim.profile.get("source_sim")
-                    min_source_trades = 0
-                    try:
-                        min_source_trades = int(sim.profile.get("min_source_trades", 0))
-                    except (TypeError, ValueError):
-                        min_source_trades = 0
-                    if source_sim_id and min_source_trades > 0:
-                        src_trade_count = 0
-                        try:
-                            src_profile = _PROFILES.get(source_sim_id, {})
-                            src_sim = SimPortfolio(source_sim_id, src_profile)
-                            src_sim.load()
-                            src_trade_count = len(src_sim.trade_log) if isinstance(src_sim.trade_log, list) else 0
-                        except Exception:
-                            src_trade_count = 0
-                        if src_trade_count < min_source_trades:
-                            results.append({
-                                "sim_id": sim_id,
-                                "status": "skipped",
-                                "reason": "insufficient_trade_history",
-                                "trade_count": src_trade_count,
-                                "min_trades_for_live": min_source_trades,
-                                "entry_context": entry_context,
-                                "signal_mode": signal_mode,
-                            })
-                            continue
-
-                    # ── Circuit breaker: continuous performance check ──
-                    cb_config = sim.profile.get("circuit_breaker")
-                    if isinstance(cb_config, dict) and cb_config.get("enabled"):
-                        cb_source_id = cb_config.get("source_sim")
-                        cb_window = int(cb_config.get("rolling_window", 20))
-                        cb_min_wr = float(cb_config.get("min_win_rate", 0.35))
-                        cb_min_exp = float(cb_config.get("min_expectancy", -50.0))
-                        cb_recover_wr = float(cb_config.get("recovery_win_rate", 0.45))
-                        cb_recover_exp = float(cb_config.get("recovery_expectancy", 0.0))
-
-                        if cb_source_id:
-                            try:
-                                cb_src_profile = _PROFILES.get(cb_source_id, {})
-                                cb_src_sim = SimPortfolio(cb_source_id, cb_src_profile)
-                                cb_src_sim.load()
-                                cb_log = cb_src_sim.trade_log if isinstance(cb_src_sim.trade_log, list) else []
-                                cb_recent = cb_log[-cb_window:] if len(cb_log) >= cb_window else cb_log
-
-                                if len(cb_recent) >= cb_window:
-                                    cb_wins = 0
-                                    cb_pnl_total = 0.0
-                                    for t in cb_recent:
-                                        pnl = t.get("realized_pnl_dollars")
-                                        if pnl is None:
-                                            continue
-                                        try:
-                                            pnl_f = float(pnl)
-                                        except (TypeError, ValueError):
-                                            continue
-                                        cb_pnl_total += pnl_f
-                                        if pnl_f > 0:
-                                            cb_wins += 1
-                                    cb_wr = cb_wins / len(cb_recent) if cb_recent else 0
-                                    cb_exp = cb_pnl_total / len(cb_recent) if cb_recent else 0
-
-                                    was_tripped = sim.profile.get("_circuit_breaker_tripped", False)
-
-                                    if not was_tripped:
-                                        if cb_wr < cb_min_wr or cb_exp < cb_min_exp:
-                                            results.append({
-                                                "sim_id": sim_id,
-                                                "status": "circuit_breaker_tripped",
-                                                "reason": "source_performance_degraded",
-                                                "source_sim": cb_source_id,
-                                                "source_wr": round(cb_wr, 3),
-                                                "source_exp": round(cb_exp, 2),
-                                                "threshold_wr": cb_min_wr,
-                                                "threshold_exp": cb_min_exp,
-                                                "window": cb_window,
-                                            })
-                                            sim.profile["_circuit_breaker_tripped"] = True
-                                            continue
-                                    else:
-                                        if cb_wr >= cb_recover_wr and cb_exp >= cb_recover_exp:
-                                            results.append({
-                                                "sim_id": sim_id,
-                                                "status": "circuit_breaker_recovered",
-                                                "source_sim": cb_source_id,
-                                                "source_wr": round(cb_wr, 3),
-                                                "source_exp": round(cb_exp, 2),
-                                            })
-                                            sim.profile["_circuit_breaker_tripped"] = False
-                                        else:
-                                            results.append({
-                                                "sim_id": sim_id,
-                                                "status": "circuit_breaker_held",
-                                                "reason": "source_still_degraded",
-                                                "source_sim": cb_source_id,
-                                                "source_wr": round(cb_wr, 3),
-                                                "source_exp": round(cb_exp, 2),
-                                            })
-                                            continue
-                            except Exception:
-                                logging.exception("circuit_breaker_check_error")
-
-                    if not sim.profile.get("enabled"):
-                        results.append({"sim_id": sim_id, "status": "skipped", "reason": "live_disabled"})
-                        continue
-                    ok, reason = sim_should_trade_now(effective_profile)
-                    if not ok:
-                        results.append({
-                            "sim_id": sim_id,
-                            "status": "skipped",
-                            "reason": reason,
-                            "entry_context": entry_context,
-                            "signal_mode": signal_mode,
-                        })
-                        continue
-                    ok, reason = sim.can_trade()
-                    if not ok:
-                        results.append({
-                            "sim_id": sim_id,
-                            "status": "skipped",
-                            "reason": reason,
-                            "entry_context": entry_context,
-                            "signal_mode": signal_mode,
-                        })
-                        continue
-                    elapsed = _time.monotonic() - _LAST_CHAIN_CALL_TS
-                    if elapsed < _CHAIN_CALL_MIN_INTERVAL:
-                        await asyncio.sleep(_CHAIN_CALL_MIN_INTERVAL - elapsed)
-                    _LAST_CHAIN_CALL_TS = _time.monotonic()
-                    live_result = await sim_live_router(
-                        sim_id=sim_id,
-                        direction=direction,
-                        price=underlying_price,
-                        ml_prediction=ml_prediction,
-                        regime=regime,
-                        time_of_day_bucket=time_of_day_bucket,
-                        signal_mode=signal_mode,
-                        entry_context=entry_context,
-                        feature_snapshot=feature_snapshot,
-                    )
-                    if not isinstance(live_result, dict) or live_result.get("status") != "success":
-                        results.append({
-                            "sim_id": sim_id,
-                            "status": "error",
-                            "reason": (live_result or {}).get("message", "live_order_failed")
-                        })
-                        continue
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "live_submitted",
-                        "option_symbol": live_result.get("option_symbol"),
-                        "qty": live_result.get("qty"),
-                        "fill_price": live_result.get("fill_price"),
-                        "entry_price": live_result.get("fill_price"),
-                        "direction": direction,
-                        "risk_dollars": live_result.get("risk_dollars"),
-                        "strike": live_result.get("strike"),
-                        "expiry": live_result.get("expiry"),
-                        "dte": live_result.get("dte"),
-                        "spread_pct": live_result.get("spread_pct"),
-                        "regime": regime,
-                        "time_bucket": time_of_day_bucket,
-                        "mode": "LIVE",
-                        "balance": live_result.get("balance_after"),
-                        "entry_context": live_result.get("entry_context") or entry_context,
-                        "signal_mode": live_result.get("signal_mode") or signal_mode,
-                        "predicted_direction": live_result.get("predicted_direction") or ml_prediction.get("predicted_direction"),
-                        "prediction_confidence": live_result.get("prediction_confidence") or ml_prediction.get("prediction_confidence"),
-                        "edge_prob": live_result.get("edge_prob") or ml_prediction.get("edge_prob"),
-                        "direction_prob": live_result.get("direction_prob") or ml_prediction.get("direction_prob"),
-                    })
-                    continue
-
-                ok, reason = sim_should_trade_now(effective_profile)
-                if not ok:
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": reason,
-                        "entry_context": entry_context,
-                        "signal_mode": signal_mode,
-                    })
-                    continue
-
-                ok, reason = sim.can_trade()
-                if not ok:
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": reason,
-                        "entry_context": entry_context,
-                        "signal_mode": signal_mode,
-                    })
-                    continue
-
-                elapsed = _time.monotonic() - _LAST_CHAIN_CALL_TS
-                if elapsed < _CHAIN_CALL_MIN_INTERVAL:
-                    await asyncio.sleep(_CHAIN_CALL_MIN_INTERVAL - elapsed)
-                _LAST_CHAIN_CALL_TS = _time.monotonic()
-
-                contract, contract_reason = select_sim_contract_with_reason(direction, underlying_price, {**effective_profile, "sim_id": sim_id}, symbol=_trade_symbol)
-                if contract is None:
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": contract_reason or "no_contract",
-                        "entry_context": entry_context,
-                        "signal_mode": signal_mode,
-                    })
-                    continue
-
-                bid = contract["bid"]
-                ask = contract["ask"]
-
-                fill_result, err = sim_try_fill(
-                    contract["option_symbol"],
-                    qty=1,
-                    bid=bid,
-                    ask=ask,
-                    profile=profile,
-                    side="entry"
-                )
-                if err or fill_result is None:
-                    results.append({
-                        "sim_id": sim_id,
-                        "status": "skipped",
-                        "reason": err,
-                        "entry_context": entry_context,
-                        "signal_mode": signal_mode,
-                    })
-                    continue
-
-                fill_price = fill_result["fill_price"]
-                risk_dollars = sim_compute_risk_dollars(sim.balance, profile)
-                qty = max(1, math.floor(risk_dollars / (fill_price * 100)))
-
-                fill_result, err = sim_try_fill(
-                    contract["option_symbol"],
-                    qty=qty,
-                    bid=bid,
-                    ask=ask,
-                    profile=profile,
-                    side="entry"
-                )
-                if err or fill_result is None:
-                    results.append({"sim_id": sim_id, "status": "skipped", "reason": err})
-                    continue
-
-                # Extract underlying symbol from OCC option_symbol (alphabetic prefix)
-                import re as _re
-                _opt_sym = contract["option_symbol"] or ""
-                _underlying = (_re.match(r'^([A-Z]{1,6})', _opt_sym) or [None,''])[1] or 'SPY'
-
-                trade = {
-                    "trade_id": f"{sim_id}__{uuid.uuid4()}",
-                    "sim_id": sim_id,
-                    "symbol": _underlying,
-                    "option_symbol": contract["option_symbol"],
-                    "entry_price": fill_result["fill_price"],
-                    "qty": qty,
-                    "entry_time": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-                    "horizon": effective_profile.get("horizon", profile.get("horizon")),
-                    "dte_bucket": str(contract["dte"]),
-                    "otm_pct": contract["otm_pct_applied"],
-                    "direction": direction,
-                    "strike": contract["strike"],
-                    "expiry": contract["expiry"],
-                    "contract_type": contract["contract_type"],
-                    "hold_min_seconds": int(effective_profile.get("hold_min_seconds", profile.get("hold_min_seconds"))),
-                    "hold_max_seconds": int(effective_profile.get("hold_max_seconds", profile.get("hold_max_seconds"))),
-                    "entry_price_source": fill_result.get("price_source", "mid_plus_slippage"),
-                }
-                if feature_snapshot:
-                    trade["feature_snapshot"] = feature_snapshot
-                if sim_id == "SIM09" or str(signal_mode).upper() == "OPPORTUNITY":
-                    vol_state = volatility_state(df)
-                    vol_stop_map = {
-                        "DEAD": 0.03,
-                        "LOW": 0.04,
-                        "NORMAL": 0.06,
-                        "HIGH": 0.08,
-                    }
-                    dynamic_stop = vol_stop_map.get(str(vol_state).upper(), 0.06)
-                    trade["stop_loss_pct"] = min(0.10, max(0.01, float(dynamic_stop)))
-                trade["regime_at_entry"] = regime
-                trade["time_of_day_bucket"] = time_of_day_bucket
-                trade["signal_mode"] = signal_mode
-                trade["strategy_family"] = get_signal_family(str(signal_mode).upper())
-                if isinstance(signal_meta, dict):
-                    trade["structure_score"] = signal_meta.get("structure_score")
-                trade["entry_context"] = entry_context
-                # greeks at entry (from contract snapshot)
-                trade["iv_at_entry"] = contract.get("iv")
-                trade["delta_at_entry"] = contract.get("delta")
-                trade["gamma_at_entry"] = contract.get("gamma")
-                trade["theta_at_entry"] = contract.get("theta")
-                trade["vega_at_entry"] = contract.get("vega")
-                if isinstance(ml_prediction, dict):
-                    trade["predicted_direction"] = ml_prediction.get("predicted_direction")
-                    trade["prediction_confidence"] = ml_prediction.get("prediction_confidence")
-                    trade["direction_prob"] = ml_prediction.get("direction_prob")
-                    trade["edge_prob"] = ml_prediction.get("edge_prob")
-                    trade["regime"] = ml_prediction.get("regime")
-                    trade["volatility"] = ml_prediction.get("volatility")
-                    trade["conviction_score"] = ml_prediction.get("conviction_score")
-                    trade["impulse"] = ml_prediction.get("impulse")
-                    trade["follow_through"] = ml_prediction.get("follow_through")
-                    trade["setup"] = ml_prediction.get("setup")
-                    trade["style"] = ml_prediction.get("style")
-                    trade["confidence"] = ml_prediction.get("confidence")
-                    trade["ml_probability"] = ml_prediction.get("edge_prob")
-
-                sim.record_open(trade)
-                sim.save()
-
-                # Candidate: signal fired and trade opened
-                try:
-                    from decision.candidate import Candidate
-                    from analytics.candidate_logger import log_candidate
-                    log_candidate(Candidate(
-                        sim_id=sim_id, strategy=signal_mode,
-                        symbol=_trade_symbol, direction=direction, fired=True,
-                        entry_ref=float(underlying_price) if underlying_price else None,
-                        regime=regime or "", time_bucket=time_of_day_bucket or "",
-                        traded=True, trade_id=trade.get("trade_id"),
-                        conviction=int(trade.get("conviction_score") or 0) or None,
-                        signal_params=profile.get("signal_params") or {},
-                    ))
-                except Exception:
-                    pass
-
-                results.append({
-                    "sim_id": sim_id,
-                    "status": "opened",
-                    "symbol": _trade_symbol,
-                    "trade_id": trade["trade_id"],
-                    "fill_price": trade["entry_price"],
-                    "entry_price": trade["entry_price"],
-                    "qty": qty,
-                    "option_symbol": trade["option_symbol"],
-                    "expiry": contract["expiry"],
-                    "strike": contract["strike"],
-                    "dte": contract["dte"],
-                    "spread_pct": contract["spread_pct"],
-                    "direction": direction,
-                    "risk_dollars": risk_dollars,
-                    "regime": regime,
-                    "time_bucket": time_of_day_bucket,
-                    "mode": "SIM",
-                    "balance": sim.balance,
-                    "entry_context": entry_context,
-                    "signal_mode": signal_mode,
-                    "predicted_direction": trade.get("predicted_direction"),
-                    "prediction_confidence": trade.get("prediction_confidence"),
-                    "edge_prob": trade.get("edge_prob"),
-                    "direction_prob": trade.get("direction_prob"),
-                })
-        except Exception as e:
-            logging.exception("run_sim_entries_error: %s", e)
-            results.append({"sim_id": sim_id, "status": "error", "reason": str(e)})
-
-    # Batch-log candidates for skipped/blocked and live_submitted results.
-    # "opened" + "no-fire" are already logged inline above.
-    try:
-        from decision.candidate import Candidate
-        from analytics.candidate_logger import log_candidate
-        # Reasons that indicate signal fired but gate blocked it
-        _PRE_SIGNAL_REASONS = frozenset({"blocked_session"})
-        for _r in results:
-            _sid = _r.get("sim_id")
-            _status = _r.get("status")
-            if not _sid or _status in ("error", "opened"):
-                continue
-            if _status == "skipped":
-                _reason = _r.get("reason", "")
-                _fired = _reason not in _PRE_SIGNAL_REASONS
-                log_candidate(Candidate(
-                    sim_id=_sid,
-                    strategy=_r.get("signal_mode", ""),
-                    symbol="",
-                    direction=None,
-                    fired=_fired,
-                    blocked=True,
-                    block_reason=_reason,
-                    regime="",
-                    time_bucket=time_of_day_bucket or "",
-                ))
-            elif _status == "live_submitted":
-                log_candidate(Candidate(
-                    sim_id=_sid,
-                    strategy=_r.get("signal_mode", ""),
-                    symbol=_r.get("option_symbol", ""),
-                    direction=_r.get("direction"),
-                    fired=True,
-                    entry_ref=_r.get("entry_price"),
-                    regime=_r.get("regime", ""),
-                    time_bucket=_r.get("time_bucket", ""),
-                    traded=True,
-                    trade_id=_r.get("trade_id"),
-                ))
-    except Exception:
-        pass
-
-    return results
-
-
-async def run_sim_exits() -> list[dict]:
-    global _LAST_CHAIN_CALL_TS
-    results = []
-    if not _PROFILES:
-        return [{"sim_id": None, "status": "error", "reason": "no_profiles_loaded"}]
-    eastern = pytz.timezone("US/Eastern")
-
-    for sim_id, profile in _PROFILES.items():
-        try:
-            sim = SimPortfolio(sim_id, profile)
-            sim.load()
-        except Exception as e:
-            logging.exception("run_sim_exits_load_error: %s", e)
-            results.append({
-                "sim_id": sim_id,
-                "status": "error",
-                "reason": str(e)
-            })
-            continue
-        if profile.get("execution_mode") == "live" and profile.get("enabled"):
-            for trade in list(sim.open_trades):
-                try:
-                    live_result = await manage_live_exit(sim, trade)
-                    if live_result and live_result.get("status") == "success":
-                        results.append({
-                            "sim_id": sim_id,
-                            "trade_id": trade.get("trade_id"),
-                            "status": "closed",
-                            "exit_price": live_result.get("exit_price"),
-                        "exit_reason": live_result.get("exit_reason"),
-                        "exit_context": live_result.get("exit_context"),
-                        "option_symbol": live_result.get("option_symbol"),
-                            "strike": live_result.get("strike") or trade.get("strike"),
-                            "expiry": live_result.get("expiry") or trade.get("expiry"),
-                            "direction": live_result.get("direction") or trade.get("direction"),
-                            "qty": live_result.get("qty"),
-                            "entry_price": live_result.get("entry_price"),
-                            "pnl": live_result.get("pnl"),
-                            "mode": "LIVE",
-                            "balance_after": live_result.get("balance_after"),
-                            "time_in_trade_seconds": live_result.get("time_in_trade_seconds"),
-                            "predicted_direction": live_result.get("predicted_direction"),
-                            "prediction_confidence": live_result.get("prediction_confidence"),
-                            "edge_prob": live_result.get("edge_prob"),
-                        "direction_prob": live_result.get("direction_prob"),
-                    })
-                except Exception as e:
-                    logging.exception("run_sim_exits_live_error: %s", e)
-                    results.append({
-                        "sim_id": sim_id,
-                        "trade_id": trade.get("trade_id"),
-                        "status": "error",
-                        "reason": str(e)
-                    })
-            continue
-        for trade in list(sim.open_trades):
-            try:
-                now_et = datetime.now(eastern)
-                entry_time_et = datetime.fromisoformat(trade["entry_time"])
-                if entry_time_et.tzinfo is None:
-                    entry_time_et = eastern.localize(entry_time_et)
-                elapsed_seconds = (now_et - entry_time_et).total_seconds()
-                elapsed = _time.monotonic() - _LAST_CHAIN_CALL_TS
-                if elapsed < _CHAIN_CALL_MIN_INTERVAL:
-                    await asyncio.sleep(_CHAIN_CALL_MIN_INTERVAL - elapsed)
-                _LAST_CHAIN_CALL_TS = _time.monotonic()
-                current_price = get_option_price(trade["option_symbol"])
-                if current_price is None:
-                    logging.warning("sim_exit_missing_quote: %s", trade["trade_id"])
-                    continue
-                sim.update_open_trade_excursion(trade["trade_id"], current_price)
-                should_exit = False
-                exit_reason = None
-                exit_context = None
-                spread_guard_bypass = False
-
-                # Force exit for same-day expiry (all sims) before market close
-                expiry_date = None
-                try:
-                    expiry_raw = trade.get("expiry")
-                    if isinstance(expiry_raw, str):
-                        expiry_date = datetime.fromisoformat(expiry_raw).date()
-                except Exception:
-                    expiry_date = None
-                if expiry_date == now_et.date() and now_et.time() >= EXPIRY_EOD_CUTOFF:
-                    should_exit = True
-                    exit_reason = "expiry_close"
-                    spread_guard_bypass = True
-                    expiry_text = expiry_date.isoformat() if expiry_date else "unknown"
-                    exit_context = f"expiry={expiry_text} cutoff={EXPIRY_EOD_CUTOFF.strftime('%H:%M')}"
-
-                # Force exit for day-trading sims before market close
-                is_daytrade = int(profile.get("dte_max", 0)) == 0
-                if not should_exit and is_daytrade and now_et.time() >= DAYTRADE_EOD_CUTOFF:
-                    should_exit = True
-                    exit_reason = "eod_daytrade_close"
-                    spread_guard_bypass = True
-                    exit_context = f"daytrade_cutoff={DAYTRADE_EOD_CUTOFF.strftime('%H:%M')}"
-                if not should_exit and elapsed_seconds < trade["hold_min_seconds"]:
-                    continue
-
-                stop_loss_pct = trade.get("stop_loss_pct", profile.get("stop_loss_pct"))
-                if stop_loss_pct is not None and is_md_enabled() and sim_id != "SIM09":
-                    try:
-                        stop_loss_pct = max(float(stop_loss_pct) * 0.7, 0.05)
-                    except (TypeError, ValueError):
-                        pass
-                if stop_loss_pct is not None:
-                    try:
-                        entry_price = float(trade.get("entry_price", 0))
-                        if entry_price > 0:
-                            # Track peak price for profit-lock SL
-                            peak_price = float(trade.get("peak_price") or 0)
-                            if current_price > entry_price and current_price > peak_price:
-                                trade["peak_price"] = current_price
-                                sim.save()
-                                peak_price = current_price
-
-                            loss_pct = (current_price - entry_price) / entry_price
-                            effective_sl_pct = abs(float(stop_loss_pct))
-                            original_sl_price = entry_price * (1 - effective_sl_pct)
-
-                            # Profit-lock: once trade has been profitable, SL floors at breakeven
-                            effective_sl_price = max(original_sl_price, entry_price) if peak_price > entry_price else original_sl_price
-
-                            if current_price <= effective_sl_price:
-                                should_exit = True
-                                spread_guard_bypass = True
-                                if effective_sl_price > original_sl_price:
-                                    exit_reason = "breakeven_stop"
-                                    exit_context = f"price={current_price:.4f} locked_floor={effective_sl_price:.4f} peak={peak_price:.4f}"
-                                else:
-                                    exit_reason = "stop_loss"
-                                    exit_context = f"loss_pct={loss_pct:.3%} <= -{effective_sl_pct:.3%}"
-                    except (TypeError, ValueError):
-                        pass
-
-                profit_target_pct = profile.get("profit_target_pct")
-                entry_price = None
-                gain_pct = None
-                try:
-                    entry_price = float(trade.get("entry_price", 0))
-                    if entry_price > 0:
-                        gain_pct = (current_price - entry_price) / entry_price
-                except (TypeError, ValueError):
-                    gain_pct = None
-
-                # ── Greeks-aware exit: theta burn acceleration ────────
-                if not should_exit and gain_pct is not None and gain_pct <= 0.02:
-                    dte_at_entry = trade.get("dte_bucket")
-                    try:
-                        dte_val = int(dte_at_entry) if dte_at_entry is not None else None
-                    except (TypeError, ValueError):
-                        dte_val = None
-                    if dte_val is not None and dte_val <= 1:
-                        try:
-                            expiry_raw = trade.get("expiry")
-                            if isinstance(expiry_raw, str):
-                                expiry_date = datetime.fromisoformat(expiry_raw).date()
-                                if expiry_date == now_et.date():
-                                    market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-                                    remaining_seconds = (market_close - now_et).total_seconds()
-                                    if 0 < remaining_seconds < 7200 and gain_pct <= 0.02:
-                                        should_exit = True
-                                        exit_reason = "theta_burn"
-                                        exit_context = f"gain_pct={gain_pct:.3%} remaining={remaining_seconds:.0f}s dte={dte_val}"
-                                        spread_guard_bypass = True
-                        except Exception:
-                            pass
-
-                # ── Greeks-aware exit: IV crush detection ─────────────
-                if not should_exit and gain_pct is not None and gain_pct < 0:
-                    iv_at_entry = trade.get("iv_at_entry")
-                    if isinstance(iv_at_entry, (int, float)) and float(iv_at_entry) > 0:
-                        try:
-                            iv_entry = float(iv_at_entry)
-                            stop_pct = float(profile.get("stop_loss_pct", 0.30))
-                            if abs(gain_pct) > stop_pct * 0.3:
-                                tightened_stop = stop_pct * 0.6
-                                if gain_pct <= -abs(tightened_stop):
-                                    should_exit = True
-                                    exit_reason = "iv_crush_stop"
-                                    exit_context = f"gain_pct={gain_pct:.3%} iv_entry={iv_entry:.3f} tightened_stop={tightened_stop:.3%}"
-                                    spread_guard_bypass = True
-                        except (TypeError, ValueError):
-                            pass
-
-                # Near-TP adaptive lock + TP2 (optional)
-                if not should_exit and profit_target_pct is not None and gain_pct is not None:
-                    try:
-                        base_target = abs(float(profit_target_pct))
-                        if base_target > 0 and profile.get("tp2_enabled", True):
-                            near_ratio = float(profile.get("near_tp_trigger_ratio", 0.85))
-                            grade_min = float(profile.get("near_tp_grade_min", 0.6))
-                            tp2_mult = float(profile.get("tp2_multiplier", 1.3))
-                            grade = _trade_grade(trade)
-                            if grade is not None and grade >= grade_min and gain_pct >= base_target * near_ratio:
-                                if not trade.get("tp2_activated"):
-                                    lock_pct = trade.get("lock_profit_pct")
-                                    if lock_pct is None:
-                                        # Lock ~50% of the base target, minimum 5%
-                                        lock_pct = max(0.05, min(base_target * 0.5, base_target - 0.02))
-                                    trade["lock_profit_pct"] = float(lock_pct)
-                                    trade["tp2_target_pct"] = float(base_target * tp2_mult)
-                                    trade["tp2_activated"] = True
-                                    sim.save()
-                    except (TypeError, ValueError):
-                        pass
-
-                # Profit lock: exit if retrace below locked profit level after TP2 activation
-                lock_pct = trade.get("lock_profit_pct")
-                if not should_exit and gain_pct is not None and trade.get("tp2_activated") and isinstance(lock_pct, (int, float)):
-                    try:
-                        if gain_pct <= float(lock_pct):
-                            should_exit = True
-                            exit_reason = "profit_lock"
-                            exit_context = f"gain_pct={gain_pct:.3%} <= lock_pct={float(lock_pct):.3%}"
-                    except (TypeError, ValueError):
-                        pass
-
-                effective_target = profit_target_pct
-                if trade.get("tp2_activated") and trade.get("tp2_target_pct") is not None:
-                    effective_target = trade.get("tp2_target_pct")
-
-                if not should_exit and effective_target is not None:
-                    try:
-                        if entry_price is None:
-                            entry_price = float(trade.get("entry_price", 0))
-                        if entry_price > 0:
-                            if gain_pct is None:
-                                gain_pct = (current_price - entry_price) / entry_price
-                            target_val = abs(float(effective_target))
-                            if gain_pct >= target_val:
-                                should_exit = True
-                                exit_reason = "profit_target_2" if trade.get("tp2_activated") else "profit_target"
-                                exit_context = f"gain_pct={gain_pct:.3%} >= {target_val:.3%}"
-                    except (TypeError, ValueError):
-                        pass
-
-                trailing_activate = profile.get("trailing_stop_activate_pct")
-                trailing_trail = profile.get("trailing_stop_trail_pct")
-                if not should_exit and trailing_activate is not None and trailing_trail is not None:
-                    try:
-                        entry_price = float(trade.get("entry_price", 0))
-                        if entry_price > 0:
-                            gain_pct = (current_price - entry_price) / entry_price
-                            trailing_activate_f = abs(float(trailing_activate))
-                            trailing_trail_f = abs(float(trailing_trail))
-                            if not trade.get("trailing_stop_activated", False):
-                                if gain_pct >= trailing_activate_f:
-                                    trade["trailing_stop_activated"] = True
-                                    trade["trailing_stop_high"] = current_price
-                                    sim.save()
-                            else:
-                                if current_price > trade.get("trailing_stop_high", 0):
-                                    trade["trailing_stop_high"] = current_price
-                                    sim.save()
-                                trail_high = float(trade.get("trailing_stop_high", 0))
-                                if trail_high > 0:
-                                    drop_from_high = (current_price - trail_high) / trail_high
-                                    if drop_from_high <= -trailing_trail_f:
-                                        should_exit = True
-                                        exit_reason = "trailing_stop"
-                                        exit_context = f"drop_from_high={drop_from_high:.3%} <= -{trailing_trail_f:.3%} (high={trail_high:.4f})"
-                    except (TypeError, ValueError):
-                        pass
-
-                if should_exit and exit_reason:
-                    bid = current_price * 0.99
-                    ask = current_price * 1.01
-                    fill_result, err = sim_try_fill(
-                        trade["option_symbol"],
-                        qty=trade["qty"],
-                        bid=bid,
-                        ask=ask,
-                        profile=profile,
-                        side="exit"
-                    )
-                    if err and not spread_guard_bypass:
-                        continue
-                    if err and spread_guard_bypass:
-                        fill_result = None
-                    exit_price = fill_result["fill_price"] if fill_result else current_price
-                    exit_price_source = (
-                        fill_result.get("price_source", "mid_minus_slippage")
-                        if fill_result
-                        else "market_raw_price"
-                    )
-                    exit_data = {
-                        "exit_price": exit_price,
-                        "exit_time": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-                        "exit_reason": exit_reason,
-                        "exit_context": exit_context,
-                        "exit_price_source": exit_price_source,
-                        "exit_quote_model": "market_raw_price" if (spread_guard_bypass and fill_result is None) else "synthetic_1pct",
-                        "entry_price_source": trade.get("entry_price_source", "mid_plus_slippage"),
-                        "time_in_trade_seconds": int(elapsed_seconds),
-                        "spread_guard_bypassed": spread_guard_bypass and fill_result is None,
-                        "mae": trade.get("mae_pct"),
-                        "mfe": trade.get("mfe_pct"),
-                        "regime_at_entry": trade.get("regime_at_entry"),
-                        "time_of_day_bucket": trade.get("time_of_day_bucket"),
-                    }
-                    sim.record_close(trade["trade_id"], exit_data)
-                    sim.save()
-                    entry_price = trade.get("entry_price")
-                    qty_val = trade.get("qty")
-                    pnl_val = None
-                    try:
-                        entry_price_f = float(entry_price)
-                        qty_f = float(qty_val)
-                        pnl_val = (exit_price - entry_price_f) * qty_f * 100
-                    except (TypeError, ValueError):
-                        pnl_val = None
-                    record_sim_trade_close(trade, pnl_val)
-                    # Strategy performance store
-                    try:
-                        from analytics.strategy_performance import PERF_STORE
-                        _pnl_d = float(pnl_val or 0)
-                        _cost = float(entry_price or 0) * float(qty_val or 0) * 100
-                        _pnl_pct = _pnl_d / _cost if _cost > 0 else 0.0
-                        PERF_STORE.record_close(
-                            strategy=trade.get("signal_mode", ""),
-                            regime=trade.get("regime_at_entry", "UNKNOWN"),
-                            time_bucket=trade.get("time_of_day_bucket", "UNKNOWN"),
-                            pnl=_pnl_d,
-                            pnl_pct=_pnl_pct,
-                            hold_seconds=float(exit_data.get("time_in_trade_seconds") or 0),
-                            grade=trade.get("grade"),
-                            spread_pct=trade.get("spread_pct"),
-                        )
-                    except Exception:
-                        pass
-                    results.append({
-                        "sim_id": sim_id,
-                        "symbol": trade.get("symbol"),
-                        "trade_id": trade["trade_id"],
-                        "status": "closed",
-                        "exit_price": exit_price,
-                        "exit_reason": exit_data["exit_reason"],
-                        "exit_context": exit_data.get("exit_context"),
-                        "option_symbol": trade.get("option_symbol"),
-                        "strike": trade.get("strike"),
-                        "expiry": trade.get("expiry"),
-                        "direction": trade.get("direction"),
-                        "qty": qty_val,
-                        "entry_price": entry_price,
-                        "pnl": pnl_val,
-                        "mae": trade.get("mae_pct"),
-                        "mfe": trade.get("mfe_pct"),
-                        "feature_snapshot": trade.get("feature_snapshot"),
-                        "mode": "SIM",
-                        "balance_after": sim.balance,
-                        "time_in_trade_seconds": exit_data.get("time_in_trade_seconds"),
-                        "predicted_direction": trade.get("predicted_direction") or trade.get("direction"),
-                        "prediction_confidence": trade.get("prediction_confidence"),
-                        "edge_prob": trade.get("edge_prob"),
-                        "direction_prob": trade.get("direction_prob"),
-                    })
-                    continue
-                # Hold-max force exit (final fallback only)
-                if elapsed_seconds >= trade["hold_max_seconds"]:
-                    bid = current_price * 0.99
-                    ask = current_price * 1.01
-                    fill_result, err = sim_try_fill(
-                        trade["option_symbol"],
-                        qty=trade["qty"],
-                        bid=bid,
-                        ask=ask,
-                        profile=profile,
-                        side="exit"
-                    )
-                    if err:
-                        fill_result = None
-                    exit_price = fill_result["fill_price"] if fill_result else current_price
-                    exit_price_source = (
-                        fill_result.get("price_source", "mid_minus_slippage")
-                        if fill_result
-                        else "market_raw_price"
-                    )
-                    exit_context = f"elapsed={int(elapsed_seconds)}s >= hold_max={int(trade['hold_max_seconds'])}s"
-                    exit_data = {
-                        "exit_price": exit_price,
-                        "exit_time": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-                        "exit_reason": "hold_max_elapsed",
-                        "exit_context": exit_context,
-                        "exit_price_source": exit_price_source,
-                        "exit_quote_model": "market_raw_price" if fill_result is None else "synthetic_1pct",
-                        "entry_price_source": trade.get("entry_price_source", "mid_plus_slippage"),
-                        "time_in_trade_seconds": int(elapsed_seconds),
-                        "spread_guard_bypassed": fill_result is None,
-                        "mae": trade.get("mae_pct"),
-                        "mfe": trade.get("mfe_pct"),
-                        "regime_at_entry": trade.get("regime_at_entry"),
-                        "time_of_day_bucket": trade.get("time_of_day_bucket"),
-                    }
-                    sim.record_close(trade["trade_id"], exit_data)
-                    sim.save()
-                    entry_price = trade.get("entry_price")
-                    qty_val = trade.get("qty")
-                    pnl_val = None
-                    try:
-                        entry_price_f = float(entry_price)
-                        qty_f = float(qty_val)
-                        pnl_val = (exit_price - entry_price_f) * qty_f * 100
-                    except (TypeError, ValueError):
-                        pnl_val = None
-                    record_sim_trade_close(trade, pnl_val)
-                    # Strategy performance store
-                    try:
-                        from analytics.strategy_performance import PERF_STORE
-                        _pnl_d = float(pnl_val or 0)
-                        _cost = float(entry_price or 0) * float(qty_val or 0) * 100
-                        _pnl_pct = _pnl_d / _cost if _cost > 0 else 0.0
-                        PERF_STORE.record_close(
-                            strategy=trade.get("signal_mode", ""),
-                            regime=trade.get("regime_at_entry", "UNKNOWN"),
-                            time_bucket=trade.get("time_of_day_bucket", "UNKNOWN"),
-                            pnl=_pnl_d,
-                            pnl_pct=_pnl_pct,
-                            hold_seconds=float(exit_data.get("time_in_trade_seconds") or 0),
-                            grade=trade.get("grade"),
-                            spread_pct=trade.get("spread_pct"),
-                        )
-                    except Exception:
-                        pass
-                    results.append({
-                        "sim_id": sim_id,
-                        "trade_id": trade["trade_id"],
-                        "status": "closed",
-                        "exit_price": exit_price,
-                        "exit_reason": "hold_max_elapsed",
-                        "exit_context": exit_context,
-                        "option_symbol": trade.get("option_symbol"),
-                        "strike": trade.get("strike"),
-                        "expiry": trade.get("expiry"),
-                        "direction": trade.get("direction"),
-                        "qty": qty_val,
-                        "entry_price": entry_price,
-                        "pnl": pnl_val,
-                        "mae": trade.get("mae_pct"),
-                        "mfe": trade.get("mfe_pct"),
-                        "feature_snapshot": trade.get("feature_snapshot"),
-                        "mode": "SIM",
-                        "balance_after": sim.balance,
-                        "time_in_trade_seconds": exit_data.get("time_in_trade_seconds"),
-                        "predicted_direction": trade.get("predicted_direction") or trade.get("direction"),
-                        "prediction_confidence": trade.get("prediction_confidence"),
-                        "edge_prob": trade.get("edge_prob"),
-                        "direction_prob": trade.get("direction_prob"),
-                    })
-            except Exception as e:
-                logging.exception("run_sim_exits_error: %s", e)
-                results.append({
-                    "sim_id": sim_id,
-                    "trade_id": trade.get("trade_id"),
-                    "status": "error",
-                    "reason": str(e)
-                })
-    return results
+# ---------------------------------------------------------------------------
+# run_sim_entries / run_sim_exits — extracted to runner modules to reduce size.
+# Re-exported here so existing callers continue to work unchanged.
+# ---------------------------------------------------------------------------
+from simulation.sim_entry_runner import run_sim_entries  # noqa: E402, F401
+from simulation.sim_exit_runner import run_sim_exits     # noqa: E402, F401

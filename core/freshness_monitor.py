@@ -70,6 +70,10 @@ class FreshnessMonitor:
                         self._alerted["panic"] = True
                     continue
 
+                # ── Clear panic alert flag when no longer in PANIC_LOCKDOWN ─
+                if current != SystemState.PANIC_LOCKDOWN and self._alerted.get("panic"):
+                    self._alerted.pop("panic", None)
+
                 # ── Bar EXIT_ONLY ─────────────────────────────────────────
                 if bar_age > _BAR_EXIT_ONLY_SEC and current == SystemState.DEGRADED:
                     if self.runtime.transition(SystemState.EXIT_ONLY, f"bars {bar_age:.0f}s stale"):
@@ -99,7 +103,17 @@ class FreshnessMonitor:
                             self._alerted["degraded"] = True
                     continue
 
-                # ── Recovery ──────────────────────────────────────────────
+                # ── READY → TRADING_ENABLED on market open + fresh data ──
+                if bar_age < _BAR_RECOVER_SEC and current == SystemState.READY:
+                    if self.runtime.transition(SystemState.TRADING_ENABLED, "market open, data fresh"):
+                        self._alerted.clear()
+                        try:
+                            await send_alert_fn("✅ **TRADING ENABLED** — market open, data fresh.")
+                        except Exception:
+                            pass
+                    continue
+
+                # ── Recovery from DEGRADED ────────────────────────────────
                 if bar_age < _BAR_RECOVER_SEC and current == SystemState.DEGRADED:
                     self.runtime.clear_degradation("stale_bars")
                     if not self.runtime.degradation_reasons():

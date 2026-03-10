@@ -1,0 +1,396 @@
+"""
+simulation/sim_entry_runner.py
+Entry loop for paper and live simulation trades.
+Extracted from sim_engine.py to reduce file size.
+"""
+import logging
+import random
+
+from simulation.sim_portfolio import SimPortfolio
+from simulation.sim_contract import get_iv_series
+from execution.option_executor import get_option_price  # noqa: F401 (kept for compat)
+from simulation.sim_signals import derive_sim_signal, get_signal_family
+from core.market_clock import get_time_bucket
+from simulation.sim_ml import predict_sim_trade
+from analytics.sim_features import compute_sim_features
+from core.data_service import get_symbol_dataframe
+
+# Private helpers extracted to keep this file under 500 lines
+from simulation.sim_entry_helpers import (
+    _get_profiles_and_global,
+    _trade_grade,
+    _count_directional_exposure,
+    _count_family_directional_exposure,
+    _check_circuit_breaker,
+    _build_paper_trade_dict,
+    _execute_live_entry,
+    _execute_paper_entry,
+)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+async def run_sim_entries(
+    df,
+    regime: "str | None" = None
+) -> list[dict]:
+    _PROFILES, _GLOBAL_CONFIG = _get_profiles_and_global()
+    results = []
+    if not _PROFILES:
+        return [{"sim_id": None, "status": "error", "reason": "no_profiles_loaded"}]
+    try:
+        from core.runtime_state import RUNTIME
+        if not RUNTIME.can_run_paper_sims():
+            return [{"sim_id": None, "status": "skipped", "reason": f"runtime_{RUNTIME.state.value.lower()}"}]
+    except ImportError:
+        pass
+    time_of_day_bucket = get_time_bucket()
+
+    # ── Pre-fetch each unique symbol's df ONCE (avoids 24x repeated blocking calls) ──
+    _all_syms: set[str] = set()
+    for _pid, _prof in _PROFILES.items():
+        if str(_pid).startswith("_"):
+            continue
+        _syms = _prof.get("symbols")
+        if _syms and isinstance(_syms, list):
+            _all_syms.update(str(s).upper() for s in _syms)
+        elif _prof.get("symbol"):
+            _all_syms.add(str(_prof["symbol"]).upper())
+    _sym_df_cache: dict = {}
+    # Pre-seed SPY from the already-fetched df to avoid a redundant call
+    _spy_df = df if df is not None and len(df) > 30 else None
+    if _spy_df is not None:
+        _sym_df_cache["SPY"] = _spy_df
+    for _sym in _all_syms:
+        if _sym in _sym_df_cache:
+            continue
+        try:
+            _cached = get_symbol_dataframe(_sym)
+            if _cached is not None and len(_cached) > 30:
+                _sym_df_cache[_sym] = _cached
+        except Exception:
+            pass
+
+    # Shuffle paper sims so no single sim always gets first access to
+    # directional capacity. SIM00 (live) is always evaluated last so that
+    # source sims have been processed before the graduation gate runs.
+    _all_sim_ids = [sid for sid in _PROFILES if not str(sid).startswith("_")]
+    _paper_ids = [sid for sid in _all_sim_ids if sid != "SIM00"]
+    random.shuffle(_paper_ids)
+    _ordered_ids = _paper_ids + (["SIM00"] if "SIM00" in _all_sim_ids else [])
+
+    for sim_id in _ordered_ids:
+        profile = _PROFILES[sim_id]
+        try:
+            sim = SimPortfolio(sim_id, profile)
+            sim.load()
+
+            signal_mode = sim.profile.get("signal_mode", "TREND_PULLBACK")
+
+            # ── 0. Blocked-session gate (sim-level, checked once) ─────────
+            blocked_sessions = profile.get("blocked_sessions")
+            if blocked_sessions and time_of_day_bucket:
+                if isinstance(blocked_sessions, list) and time_of_day_bucket in blocked_sessions:
+                    results.append({
+                        "sim_id": sim_id,
+                        "status": "skipped",
+                        "reason": "blocked_session",
+                        "session": time_of_day_bucket,
+                        "signal_mode": signal_mode,
+                    })
+                    continue
+
+            # ── 0b. Session-filter gate (allow-list, exact bucket match) ──
+            session_filter = profile.get("session_filter")
+            if session_filter and time_of_day_bucket:
+                if time_of_day_bucket != str(session_filter).upper():
+                    results.append({
+                        "sim_id": sim_id,
+                        "status": "skipped",
+                        "reason": "session_filter",
+                        "required_session": session_filter,
+                        "current_session": time_of_day_bucket,
+                        "signal_mode": signal_mode,
+                    })
+                    continue
+
+            # ── Determine symbol list for this sim ───────────────────────
+            _sim_symbols = profile.get("symbols")
+            if not _sim_symbols or not isinstance(_sim_symbols, list):
+                _fallback = profile.get("symbol", "SPY")
+                _sim_symbols = [_fallback] if _fallback else ["SPY"]
+            _sim_symbols = list(_sim_symbols)
+            random.shuffle(_sim_symbols)
+
+            # ── Loop over each symbol this sim trades ────────────────────
+            for _trade_symbol in _sim_symbols:
+                _trade_symbol = str(_trade_symbol).upper()
+
+                # Reload sim state so open_trades reflects any entries made
+                # earlier in this symbol loop iteration
+                sim.load()
+                trade_count = len(sim.trade_log) if isinstance(sim.trade_log, list) else 0
+
+                # ── Load this symbol's df from pre-fetched cache ─────────
+                sim_df = _sym_df_cache.get(_trade_symbol)
+                if sim_df is None:
+                    try:
+                        sim_df = get_symbol_dataframe(_trade_symbol)
+                        if sim_df is not None and len(sim_df) > 30:
+                            _sym_df_cache[_trade_symbol] = sim_df
+                        else:
+                            sim_df = None
+                    except Exception:
+                        sim_df = None
+                if sim_df is None:
+                    results.append({"sim_id": sim_id, "status": "skipped",
+                                    "reason": "no_data", "symbol": _trade_symbol})
+                    continue
+
+                signal_meta = None
+                direction = None
+                underlying_price = None
+                effective_profile = dict(profile)
+
+                # ── 1. Derive signal FIRST ──────────────────────────────
+                feature_snapshot = None
+                if profile.get("features_enabled"):
+                    try:
+                        feature_snapshot = compute_sim_features(
+                            sim_df,
+                            {
+                                "direction": None,
+                                "price": None,
+                                "regime": regime,
+                                "signal_mode": signal_mode,
+                                "horizon": effective_profile.get("horizon", profile.get("horizon")),
+                                "dte_min": effective_profile.get("dte_min"),
+                                "dte_max": effective_profile.get("dte_max"),
+                                "orb_minutes": effective_profile.get("orb_minutes", profile.get("orb_minutes", 15)),
+                                "zscore_window": effective_profile.get("zscore_window", profile.get("zscore_window", 30)),
+                                "iv_series": get_iv_series(profile.get("iv_series_window", 200)),
+                            },
+                        )
+                    except Exception:
+                        feature_snapshot = None
+
+                sig = derive_sim_signal(
+                    sim_df,
+                    signal_mode,
+                    {
+                        "trade_count": trade_count,
+                        "atr_expansion_min": profile.get("atr_expansion_min"),
+                        "vol_z_min": profile.get("vol_z_min"),
+                        "require_trend_bias": profile.get("require_trend_bias"),
+                        "iv_rank_max": profile.get("iv_rank_max"),
+                        "vwap_z_min": profile.get("vwap_z_min"),
+                        "close_z_min": profile.get("close_z_min"),
+                    },
+                    feature_snapshot=feature_snapshot,
+                    profile=profile,
+                    signal_params=profile.get("signal_params") or {},
+                )
+                if isinstance(sig, tuple):
+                    if len(sig) >= 2:
+                        direction = sig[0]
+                        underlying_price = sig[1]
+                    if len(sig) >= 3:
+                        signal_meta = sig[2]
+
+                # ── 2. Apply signal_meta overrides ──────────────────────
+                if isinstance(signal_meta, dict):
+                    for k in [
+                        "dte_min", "dte_max", "hold_min_seconds", "hold_max_seconds",
+                        "horizon", "orb_minutes", "zscore_window",
+                    ]:
+                        if signal_meta.get(k) is not None:
+                            effective_profile[k] = signal_meta.get(k)
+
+                # ── 3. Build entry_context AFTER signal_meta ────────────
+                entry_context = f"signal_mode={signal_mode} | regime={regime or 'N/A'} | bucket={time_of_day_bucket or 'N/A'}"
+                if isinstance(signal_meta, dict) and signal_meta.get("entry_context"):
+                    entry_context = f"{entry_context} | {signal_meta.get('entry_context')}"
+                if isinstance(signal_meta, dict) and signal_meta.get("reason"):
+                    entry_context = f"{entry_context} | reason={signal_meta.get('reason')}"
+
+                # ── 4. Early exit if no signal ─────────────────────────
+                if direction is None or underlying_price is None:
+                    if isinstance(signal_meta, dict) and signal_meta.get("reason"):
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "skipped",
+                            "reason": signal_meta.get("reason"),
+                            "entry_context": entry_context,
+                            "signal_mode": signal_mode,
+                        })
+                    # Candidate: signal evaluated but did not fire
+                    try:
+                        from decision.candidate import Candidate
+                        from analytics.candidate_logger import log_candidate
+                        log_candidate(Candidate(
+                            sim_id=sim_id, strategy=signal_mode,
+                            symbol=_trade_symbol, direction=None, fired=False,
+                            regime=regime or "", time_bucket=time_of_day_bucket or "",
+                            signal_params=profile.get("signal_params") or {},
+                        ))
+                    except Exception:
+                        pass
+                    continue
+
+                # ── Cross-sim directional exposure guard ─────────────────
+                global_config = _GLOBAL_CONFIG
+                if global_config.get("cross_sim_guard_enabled", False):
+                    try:
+                        max_dir_sims = int(global_config.get("max_directional_sims", 4))
+                    except (TypeError, ValueError):
+                        max_dir_sims = 4
+                    current_dir_count = _count_directional_exposure(direction, _trade_symbol)
+                    if current_dir_count >= max_dir_sims:
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "skipped",
+                            "reason": "directional_exposure_limit",
+                            "direction": direction,
+                            "symbol": _trade_symbol,
+                            "current_count": current_dir_count,
+                            "max_allowed": max_dir_sims,
+                            "entry_context": entry_context,
+                            "signal_mode": signal_mode,
+                        })
+                        continue
+
+                # ── Cross-sim family crowding guard ───────────────────────
+                if global_config.get("cross_sim_guard_enabled", False):
+                    max_family_concurrent = None
+                    try:
+                        v = global_config.get("max_family_concurrent")
+                        if v is not None:
+                            max_family_concurrent = int(v)
+                    except (TypeError, ValueError):
+                        pass
+                    if max_family_concurrent is not None:
+                        sig_family = get_signal_family(str(signal_mode).upper())
+                        if sig_family not in ("unknown", "adaptive"):
+                            family_count = _count_family_directional_exposure(sig_family, direction, _trade_symbol)
+                            if family_count >= max_family_concurrent:
+                                results.append({
+                                    "sim_id": sim_id,
+                                    "status": "skipped",
+                                    "reason": "family_crowding_limit",
+                                    "family": sig_family,
+                                    "direction": direction,
+                                    "family_count": family_count,
+                                    "max_allowed": max_family_concurrent,
+                                    "entry_context": entry_context,
+                                    "signal_mode": signal_mode,
+                                })
+                                continue
+
+                # ── 5. ML prediction with real direction/price ─────────
+                from datetime import datetime
+                import pytz
+                ml_context = {
+                    "direction": direction,
+                    "price": underlying_price,
+                    "regime": regime,
+                    "horizon": effective_profile.get("horizon"),
+                    "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+                }
+                ml_prediction = predict_sim_trade(df, ml_context)
+
+                # ── 6. Continue with regime_filter, execution_mode, etc. ─
+                regime_filter = sim.profile.get("regime_filter")
+                if regime_filter is not None:
+                    filtered_out = False
+                    if isinstance(regime_filter, list):
+                        filtered_out = regime not in regime_filter
+                    elif regime_filter == "TREND_ONLY":
+                        filtered_out = regime != "TREND"
+                    elif regime_filter == "RANGE_ONLY":
+                        filtered_out = regime != "RANGE"
+                    elif regime_filter == "VOLATILE_ONLY":
+                        filtered_out = regime != "VOLATILE"
+                    if filtered_out:
+                        results.append({
+                            "sim_id": sim_id,
+                            "status": "skipped",
+                            "reason": "regime_filter",
+                            "entry_context": entry_context,
+                            "signal_mode": signal_mode,
+                        })
+                        continue
+
+                execution_mode = sim.profile.get("execution_mode")
+                if execution_mode == "live":
+                    await _execute_live_entry(
+                        sim=sim, sim_id=sim_id, profile=profile,
+                        _PROFILES=_PROFILES, direction=direction,
+                        underlying_price=underlying_price,
+                        ml_prediction=ml_prediction, regime=regime,
+                        time_of_day_bucket=time_of_day_bucket,
+                        signal_mode=signal_mode, entry_context=entry_context,
+                        feature_snapshot=feature_snapshot,
+                        _trade_symbol=_trade_symbol,
+                        effective_profile=effective_profile, results=results,
+                    )
+                    continue
+
+                await _execute_paper_entry(
+                    sim=sim, sim_id=sim_id, profile=profile,
+                    direction=direction, underlying_price=underlying_price,
+                    ml_prediction=ml_prediction, regime=regime,
+                    time_of_day_bucket=time_of_day_bucket,
+                    signal_mode=signal_mode, entry_context=entry_context,
+                    feature_snapshot=feature_snapshot,
+                    _trade_symbol=_trade_symbol,
+                    effective_profile=effective_profile, df=df, results=results,
+                )
+        except Exception as e:
+            logging.exception("run_sim_entries_error: %s", e)
+            results.append({"sim_id": sim_id, "status": "error", "reason": str(e)})
+
+    # Batch-log candidates for skipped/blocked and live_submitted results.
+    # "opened" + "no-fire" are already logged inline above.
+    try:
+        from decision.candidate import Candidate
+        from analytics.candidate_logger import log_candidate
+        # Reasons that indicate signal fired but gate blocked it
+        _PRE_SIGNAL_REASONS = frozenset({"blocked_session"})
+        for _r in results:
+            _sid = _r.get("sim_id")
+            _status = _r.get("status")
+            if not _sid or _status in ("error", "opened"):
+                continue
+            if _status == "skipped":
+                _reason = _r.get("reason", "")
+                _fired = _reason not in _PRE_SIGNAL_REASONS
+                log_candidate(Candidate(
+                    sim_id=_sid,
+                    strategy=_r.get("signal_mode", ""),
+                    symbol="",
+                    direction=None,
+                    fired=_fired,
+                    blocked=True,
+                    block_reason=_reason,
+                    regime="",
+                    time_bucket=time_of_day_bucket or "",
+                ))
+            elif _status == "live_submitted":
+                log_candidate(Candidate(
+                    sim_id=_sid,
+                    strategy=_r.get("signal_mode", ""),
+                    symbol=_r.get("option_symbol", ""),
+                    direction=_r.get("direction"),
+                    fired=True,
+                    entry_ref=_r.get("entry_price"),
+                    regime=_r.get("regime", ""),
+                    time_bucket=_r.get("time_bucket", ""),
+                    traded=True,
+                    trade_id=_r.get("trade_id"),
+                ))
+    except Exception:
+        pass
+
+    return results

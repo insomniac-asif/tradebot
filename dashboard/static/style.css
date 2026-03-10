@@ -34,13 +34,13 @@
   --green:        #88ee88;
   --red:          #ee8888;
 
-  /* Accents — muted classroom tones */
-  --profit:       #2a6e2a;
+  /* Accents */
+  --profit:       #88ee88;
   --profit-bg:    #d4ead4;
-  --profit-text:  #1a4a1a;
-  --loss:         #8a1e1e;
+  --profit-text:  #88ee88;
+  --loss:         #ee8888;
   --loss-bg:      #ead4d4;
-  --loss-text:    #5a0a0a;
+  --loss-text:    #ee8888;
   --neutral-text: #5a4a30;
   --active-glow:  #7ab838;
 
@@ -61,7 +61,7 @@
 
   --font-main:    'DM Sans', system-ui, sans-serif;
   --font-chalk:   'Patrick Hand', cursive;
-  --font-label:   'VT323', monospace;
+  --font-label:   'DM Sans', sans-serif;
 }
 
 html, body {
@@ -800,22 +800,56 @@ html, body {
   80%      { transform: translateY(1px); }
 }
 
-/* Sleeping: greyed out, no animation */
+/* Sleeping: warm bed scene — subtly desaturated, not fully gray */
+.seat.sleeping {
+  opacity: 0.78;
+  filter: saturate(0.6);
+}
+.seat.sleeping:hover {
+  opacity: 0.94;
+  filter: saturate(0.85);
+}
 .seat.sleeping .student-area svg {
   animation: none;
-  filter: grayscale(0.6) brightness(0.8) drop-shadow(0 3px 4px rgba(0,0,0,0.2));
-  opacity: 0.7;
-}
-.seat.sleeping:hover .student-area svg {
-  filter: grayscale(0.3) brightness(0.9) drop-shadow(0 5px 8px rgba(0,0,0,0.3));
-  opacity: 0.85;
 }
 .seat.sleeping .speech-bubble {
   background: #e8e4dc;
-  border-color: #c0b8a0;
-  color: var(--text-muted);
+  border-color: #c0b888;
+  color: #888;
+  font-style: italic;
+  letter-spacing: 1px;
 }
-.seat.sleeping .speech-bubble::after { border-top-color: #c0b8a0; }
+.seat.sleeping .speech-bubble::after { border-top-color: #c0b888; }
+.seat.sleeping .desk-id,
+.seat.sleeping .desk-trades,
+.seat.sleeping .desk-wr,
+.seat.sleeping .desk-footer { opacity: 0.55; }
+
+/* ZZZ floating animation */
+@keyframes zzz-float {
+  0%, 100% { transform: translateY(0);    opacity: 0.9; }
+  50%       { transform: translateY(-2px); opacity: 1;   }
+}
+.zzz-float {
+  animation: zzz-float 3s ease-in-out infinite;
+}
+
+/* Bench row label */
+.strategy-label-bench {
+  color: rgba(58,32,16,0.25);
+  border-bottom-color: rgba(58,32,16,0.08);
+  border-top: 1px dashed rgba(58,32,16,0.12);
+  margin-top: 16px;
+  padding-top: 8px;
+  font-size: 12px;
+  letter-spacing: 3px;
+}
+/* Bench row gets a slightly dimmer floor background */
+.strategy-label-bench ~ .desk-row {
+  background: rgba(0,0,0,0.04);
+  border-radius: 6px;
+  padding: 4px 0;
+}
 
 /* ════════════════════════════════════════ DESK OBJECT (top-down environmental) */
 .desk-unit { width: 100%; } /* keep for compatibility */
@@ -867,8 +901,8 @@ html, body {
   font-weight: 700;
   line-height: 1;
 }
-.desk-pnl.profit { color: #1a5a1a; }
-.desk-pnl.loss   { color: #8a1e1e; }
+.desk-pnl.profit { color: #2a7a2a; }
+.desk-pnl.loss   { color: #aa2222; }
 .desk-pnl.neutral{ color: rgba(40,20,0,0.5); }
 .desk-trades {
   font-size: 10px;
@@ -2460,3 +2494,207 @@ html, body {
   border-color: var(--notice-text);
   color: var(--chalk-yellow);
 }
+
+/* ════════════════════════════════════════ SUBNAV */
+.subnav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--wood-dark);
+  border-bottom: 3px solid var(--wood-mid);
+  padding: 0 24px;
+}
+.subnav-tab {
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  color: rgba(240,216,144,0.5);
+  font-family: var(--font-main);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 8px 16px;
+  cursor: pointer;
+  margin-bottom: -3px;
+  transition: color 0.15s, border-color 0.15s;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.subnav-tab:hover { color: rgba(240,216,144,0.85); }
+.subnav-tab.active { color: var(--notice-text); border-bottom-color: var(--chalk-yellow); }
+
+@media (max-width: 640px) {
+  .subnav {
+    position: fixed;
+    bottom: 0; left: 0; right: 0; top: auto;
+    z-index: 200;
+    padding: 0;
+    gap: 0;
+    justify-content: space-around;
+    border-bottom: none;
+    border-top: 3px solid var(--wood-mid);
+  }
+  .subnav-tab {
+    flex: 1;
+    padding: 9px 4px 7px;
+    font-size: 10px;
+    border-bottom: none;
+    border-top: 3px solid transparent;
+    margin-bottom: 0;
+    margin-top: -3px;
+    text-align: center;
+  }
+  .subnav-tab.active { border-top-color: var(--chalk-yellow); border-bottom-color: transparent; }
+  body { padding-bottom: 56px; }
+}
+
+/* ════════════════════════════════════════ CHALKBOARD SPLIT LAYOUT (desktop) */
+@media (min-width: 769px) {
+  .chalkboard {
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+  }
+  #chalk-live-view {
+    flex: 0 0 60%;
+    min-width: 0;
+    border-right: 1px dashed rgba(160,210,140,0.2);
+  }
+  #chalk-trade-view {
+    flex: 0 0 40%;
+    min-width: 0;
+    display: flex !important;
+    flex-direction: column;
+  }
+  /* placeholder fills available space when no trade selected */
+  .chalk-trade-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    min-height: 200px;
+  }
+  #chalk-trade-content {
+    display: flex !important;
+    flex-direction: column;
+    flex: 1;
+    overflow-y: auto;
+  }
+  .chalk-back-btn { display: none; }
+  /* announcement strip should not affect split layout */
+  #chalk-announce {
+    position: absolute;
+    bottom: 10px;
+    left: 14px;
+    right: 14px;
+  }
+}
+
+/* ════════════════════════════════════════ CHALK TRADE PLACEHOLDER */
+.chalk-trade-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 200px;
+}
+.chalk-placeholder-text {
+  font-family: var(--font-chalk);
+  color: var(--chalk-dim);
+  font-size: 13px;
+  opacity: 0.45;
+  text-align: center;
+  letter-spacing: 0.5px;
+  line-height: 1.6;
+}
+
+/* ════════════════════════════════════════ SHIMMER SKELETON LOADERS */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position:  400px 0; }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(160,210,140,0.05) 25%,
+    rgba(160,210,140,0.13) 50%,
+    rgba(160,210,140,0.05) 75%
+  );
+  background-size: 800px 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+  border-radius: 3px;
+}
+.sym-chart-skeleton {
+  height: 130px;
+  margin: 4px 4px 2px;
+}
+
+/* ════════════════════════════════════════ LEADERBOARD STRIP */
+.leaderboard-strip {
+  max-width: 780px;
+  margin: 12px auto 4px;
+  padding: 0 32px;
+}
+.lb-title {
+  font-family: var(--font-chalk);
+  font-size: 13px;
+  color: rgba(58,32,16,0.5);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  padding-left: 8px;
+  border-left: 3px solid rgba(232,192,48,0.55);
+}
+.lb-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.lb-card {
+  background: rgba(255,255,255,0.4);
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 4px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.12s;
+}
+.lb-card:hover { background: rgba(255,255,255,0.62); transform: translateY(-1px); }
+.lb-card-top { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.lb-card-rank { font-size: 16px; line-height: 1; }
+.lb-card-id {
+  font-family: var(--font-label);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.lb-card-wr {
+  font-size: 11px;
+  font-weight: 700;
+  color: #2a7a2a;
+  margin-left: auto;
+}
+.lb-card-meta {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+@media (max-width: 640px) {
+  .lb-grid { grid-template-columns: 1fr 1fr; }
+  .leaderboard-strip { padding: 0 12px; }
+}
+
+/* ════════════════════════════════════════ DRAWER CREAM-CONTEXT OVERRIDES */
+/* Cream drawer background needs darker profit/loss text for readability */
+.dstat-value.pos, .dperf-stat-value.pos, .perf-stat-value.pos,
+.stat-value.pos, .d-open-trade-title, .td-stat-value.profit,
+.td-session-light.active { color: #2a7a2a !important; }
+.dstat-value.neg, .dperf-stat-value.neg, .perf-stat-value.neg,
+.stat-value.neg { color: #aa2222 !important; }
+.trade-table .win { color: #2a7a2a !important; }
+.trade-table .loss { color: #aa2222 !important; }
+.desk-wr.wr-good  { color: #2a7a2a; }
+.desk-wr.wr-great { color: #1a5a1a; }
+.desk-wr.wr-bad   { color: #aa2222; }
+.sim-pnl-tag.profit  { color: #2a7a2a; }
+.sim-pnl-tag.loss    { color: #aa2222; }

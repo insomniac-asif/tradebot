@@ -1,7 +1,6 @@
 # core/data_service.py
 
 import os
-import fcntl
 import logging
 import pandas as pd
 import pandas_ta as ta
@@ -39,123 +38,21 @@ def get_client():
 
 
 def get_market_dataframe():
-    """
-    Returns full SPY dataframe with indicators.
-    Never fails due to small dataset.
-    Only returns None if data truly unavailable.
-    """
-
-    df = None
-    open_now = market_is_open()
-
-    # -----------------------------
-    # Try Local File First
-    # -----------------------------
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", newline="") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-                try:
-                    df = pd.read_csv(f)
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            logging.warning("data_service_csv_read_failed: %s", DATA_FILE)
-            df = None
-    else:
-        logging.warning("data_service_csv_missing: %s", DATA_FILE)
-
-    # -----------------------------
-    # If file missing or unreadable, fetch
-    # -----------------------------
-    if df is None or df.empty:
-        df = _fetch_from_alpaca()
-        if df is not None:
-            df.attrs["source"] = "alpaca"
-        else:
-            logging.warning("data_service_alpaca_fallback_failed: no data")
-    else:
-        # Check staleness on CSV before using it
-        try:
-            temp = df.copy()
-            if "timestamp" in temp.columns:
-                temp["timestamp"] = pd.to_datetime(temp["timestamp"], errors="coerce")
-                temp = temp.dropna(subset=["timestamp"])
-                if not temp.empty:
-                    last_ts = temp["timestamp"].iloc[-1]
-                    if isinstance(last_ts, pd.Timestamp):
-                        if last_ts.tzinfo is None:
-                            last_ts = last_ts.tz_localize("US/Eastern")
-                        else:
-                            last_ts = last_ts.tz_convert("US/Eastern")
-                    now = datetime.now(pytz.timezone("US/Eastern"))
-                    age_seconds = (now - last_ts).total_seconds()
-                    if age_seconds > 110:
-                        if open_now:
-                            fresh = _fetch_from_alpaca()
-                            if fresh is not None and not fresh.empty:
-                                # If fresh has fewer rows than the CSV, supplement
-                                # with historical CSV data so regime/indicators have
-                                # enough context (e.g. early in the trading day).
-                                if len(fresh) < len(df):
-                                    try:
-                                        df_ts = pd.to_datetime(df["timestamp"], errors="coerce")
-                                        fresh_ts = pd.to_datetime(fresh["timestamp"], errors="coerce")
-                                        cutoff = fresh_ts.min()
-                                        historical = df[df_ts < cutoff]
-                                        if not historical.empty:
-                                            fresh = pd.concat([historical, fresh], ignore_index=True)
-                                    except Exception:
-                                        pass
-                                fresh.attrs["source"] = "alpaca"
-                                df = fresh
-                            else:
-                                df.attrs["source"] = "csv_stale"
-                        else:
-                            # Market closed: keep CSV if present; fetch only if CSV is unusable
-                            if df is None or df.empty:
-                                fresh = _fetch_from_alpaca()
-                                if fresh is not None and not fresh.empty:
-                                    fresh.attrs["source"] = "alpaca"
-                                    df = fresh
-                                else:
-                                    df = None
-                            if df is not None:
-                                df.attrs["source"] = "csv_closed"
-                    else:
-                        df.attrs["source"] = "csv"
-        except Exception:
-            if df is not None:
-                df.attrs["source"] = "csv"
-
-    # -----------------------------
-    # If still nothing → real failure
-    # -----------------------------
-    if df is None or len(df) == 0:
+    """Returns full SPY dataframe with indicators. Thin wrapper around get_symbol_dataframe."""
+    df = get_symbol_dataframe("SPY")
+    if df is None:
         return None
-
-    # -----------------------------
-    # Prepare dataframe safely
-    # -----------------------------
-    df = _prepare_dataframe(df)
-
-    # If preparation failed completely
-    if df is None or len(df) == 0:
-        return None
-
-    # Warn when dataset is sparse so callers know indicators may be unreliable
     if len(df) < 200:
         logging.warning(
             "data_service_sparse_csv: only %d rows — run: python scripts/backfill_candles.py",
             len(df),
         )
-
     try:
+        open_now = market_is_open()
         df.attrs["market_open"] = open_now
         df.attrs["market_status"] = "open" if open_now else "closed"
     except Exception:
         pass
-
     return df
 
 def get_recent_candles(n=60):

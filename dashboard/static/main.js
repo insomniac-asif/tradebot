@@ -65,7 +65,7 @@ let _symbolRegistryCache = null;
 
 // ─────────────────────────────────────────────── CLASSROOM SOUNDS
 
-let _soundEnabled  = false;
+let _soundEnabled  = true;
 let _audioCtx      = null;
 let _openBellDate  = null;   // date string when open bell last played
 let _closeBellDate = null;   // date string when close bell last played
@@ -235,6 +235,61 @@ function _playChalkMsg(text, onDone) {
   typeNext();
 }
 
+// ─────────────────────────────────────────────── SUBNAV
+function navTo(section, btn) {
+  const targets = {
+    charts: '#section-charts',
+    trades: '#section-trades',
+    roster: '#section-roster',
+  };
+  const el = document.querySelector(targets[section]);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.querySelectorAll('.subnav-tab').forEach(t => t.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+}
+
+// ─────────────────────────────────────────────── LEADERBOARD
+function renderLeaderboard(sims) {
+  const strip = document.getElementById('leaderboard-strip');
+  if (!strip) return;
+  const qualified = [...sims]
+    .filter(s => (s.total_trades || 0) >= 10)
+    .sort((a, b) => {
+      const wDiff = (b.win_rate || 0) - (a.win_rate || 0);
+      return wDiff !== 0 ? wDiff : (b.total_trades || 0) - (a.total_trades || 0);
+    })
+    .slice(0, 3);
+  if (!qualified.length) { strip.innerHTML = ''; return; }
+  const MEDALS = ['🥇', '🥈', '🥉'];
+  const cards = qualified.map((s, i) => {
+    const wr = s.win_rate != null ? s.win_rate.toFixed(0) + '%' : '—';
+    const pnl = s.pnl_dollars != null ? (s.pnl_dollars >= 0 ? '+$' : '-$') + Math.abs(s.pnl_dollars).toFixed(0) : '';
+    return `<div class="lb-card" onclick="openDrawer('${s.sim_id}')">
+      <div class="lb-card-top">
+        <span class="lb-card-rank">${MEDALS[i]}</span>
+        <span class="lb-card-id">${s.sim_id}</span>
+        <span class="lb-card-wr">${wr}</span>
+      </div>
+      <div class="lb-card-meta">${shortName(s.signal_mode || '')} · ${s.total_trades || 0}t${pnl ? ' · ' + pnl : ''}</div>
+    </div>`;
+  }).join('');
+  strip.innerHTML = `<div class="lb-title">Top Performers</div><div class="lb-grid">${cards}</div>`;
+}
+
+// ─────────────────────────────────────────────── WALL POSTER
+function updateWallPoster(sims) {
+  const el = document.getElementById('poster-text');
+  if (!el) return;
+  const totalPnl    = sims.reduce((s, x) => s + (x.pnl_dollars || 0), 0);
+  const activeCount = sims.filter(x => x.open_count > 0).length;
+  const sign = totalPnl >= 0 ? '+' : '';
+  if (activeCount > 0) {
+    el.innerHTML = `${activeCount} OPEN<br>${sign}$${Math.abs(totalPnl).toFixed(0)}`;
+  } else {
+    el.innerHTML = `P&amp;L<br>${sign}$${Math.abs(totalPnl).toFixed(0)}`;
+  }
+}
+
 // ─────────────────────────────────────────────── INIT
 document.addEventListener('DOMContentLoaded', async () => {
   startClock();
@@ -299,6 +354,8 @@ async function fetchSims() {
     renderDesks(simsCache);
     renderTeacherDesk(simsCache);
     renderTrophyShelf(simsCache);
+    renderLeaderboard(simsCache);
+    updateWallPoster(simsCache);
   } catch (e) {
     document.getElementById('desks-grid').innerHTML =
       '<div class="loading-msg text-red">Failed to load sims</div>';
@@ -322,16 +379,6 @@ function startClock() {
     else if (totalMin < 20 * 60)       session = 'After-Hours';
     else                               session = 'Closed';
     el.textContent = `${timeStr} ET · ${session}`;
-
-    // Drive wall clock hands with real ET time (smooth continuous rotation)
-    const hourHand = document.querySelector('.clock-hour');
-    const minHand  = document.querySelector('.clock-minute');
-    if (hourHand && minHand) {
-      const hourDeg = (h % 12) * 30 + m * 0.5 + s * (0.5 / 60);
-      const minDeg  = m * 6 + s * 0.1;
-      hourHand.style.transform = `translateX(-50%) rotate(${hourDeg}deg)`;
-      minHand.style.transform  = `translateX(-50%) rotate(${minDeg}deg)`;
-    }
 
     // Market bells — play once per calendar day
     const dateStr = et.toDateString();
@@ -598,6 +645,7 @@ function getPersonality(signalMode) {
 }
 
 function buildBubbleText(sim) {
+  if (sim.is_disabled) return 'z z z…';
   if (sim.open_count > 0) return '📈 In trade!';
   if (sim.pnl_dollars > 50)  return '🎉 +$' + fmt2(sim.pnl_dollars);
   if (sim.pnl_dollars < -50) return '😬 -$' + fmt2(Math.abs(sim.pnl_dollars));
@@ -622,19 +670,21 @@ function renderDesks(sims) {
     return;
   }
 
+  const enabledSims = sims.filter(s => !s.is_disabled);
   const activeCount = sims.filter(s => s.open_count > 0).length;
-  if (countEl) countEl.textContent = `${sims.length} students · ${activeCount} active`;
+  if (countEl) countEl.textContent = `${enabledSims.length} students · ${activeCount} active`;
 
   grid.innerHTML = '';
 
-  // Separate SIM00 (live) from the rest
-  const liveSim  = sims.find(s => s.sim_id === 'SIM00');
-  const paperSims = sims.filter(s => s.sim_id !== 'SIM00');
+  // Separate SIM00 (live), disabled sims, and active paper sims
+  const liveSim     = sims.find(s => s.sim_id === 'SIM00');
+  const activeSims  = sims.filter(s => s.sim_id !== 'SIM00' && !s.is_disabled);
+  const sleepSims   = sims.filter(s => s.sim_id !== 'SIM00' && s.is_disabled);
 
-  // Group paper sims by strategy personality
+  // Group active paper sims by strategy personality
   const groups = {};
   STRATEGY_ORDER.forEach(k => { groups[k] = []; });
-  paperSims.forEach(sim => {
+  activeSims.forEach(sim => {
     const p = getPersonality(sim.signal_mode);
     (groups[p] = groups[p] || []).push(sim);
   });
@@ -662,6 +712,11 @@ function renderDesks(sims) {
     if (!group || !group.length) return;
     appendRow(STRATEGY_LABEL[key] || key.toUpperCase(), group, '');
   });
+
+  // Disabled sims at the bottom — on the bench / asleep
+  if (sleepSims.length) {
+    appendRow('💤 ON THE BENCH', sleepSims, 'strategy-label-bench');
+  }
 }
 
 // ─────────────────────────────────────────────── PERSONALITY TOOLTIPS
@@ -846,9 +901,9 @@ function buildSeat(sim) {
     else               wrClass = 'wr-bad';
   }
 
-  // Sims disabled via blocked_sessions (all 4 sessions blocked) show as sleeping/grayed.
+  // Sims disabled via blocked_sessions (all sessions blocked) show as sleeping/grayed.
   // New sims with 0 trades but not disabled show as normal (idle, awake).
-  const sleeping = sim.sim_id === 'SIM04' || sim.sim_id === 'SIM05';
+  const sleeping = !!sim.is_disabled;
   const seat = document.createElement('div');
   const wasSelected = currentSimId === sim.sim_id;
   seat.className = 'seat' + (active ? ' active' : '') + (sleeping ? ' sleeping' : '') + (wasSelected ? ' selected' : '');
@@ -881,7 +936,7 @@ function buildSeat(sim) {
   seat.innerHTML = `
     <div class="student-area">
       <div class="speech-bubble">${bubbleText}</div>
-      ${studentSVG(sim.sim_id, mood, colorIdx, personality, active)}
+      ${sleeping ? sleepingSVG(colorIdx) : studentSVG(sim.sim_id, mood, colorIdx, personality, active)}
     </div>
     ${streakBadge}
     <div class="seat-info">
@@ -1313,6 +1368,134 @@ function studentSVG(simId, mood, idx, personality = 'casual', active = false) {
 </svg>`;
 }
 
+// ─────────────────────────────────────────────── SLEEPING (bed scene) SVG
+function sleepingSVG(idx) {
+  const shirt = SHIRT_COLORS[idx % SHIRT_COLORS.length];
+  const skin  = SKIN_TONES[(idx * 3) % SKIN_TONES.length];
+
+  const MALE_IDXS   = new Set([1, 5, 9, 13, 18, 23, 28, 33]);
+  const isFemale    = !MALE_IDXS.has(idx);
+  const FEMALE_HAIR = ['#181008','#3a1a08','#4a2810','#7a3818','#b08028',
+                       '#c89840','#a83818','#585858','#7b3f8c','#2255aa'];
+  const MALE_HAIR   = ['#181008','#4a2810','#b08028','#a83818','#585858','#0e0e0e'];
+  const hair = isFemale ? FEMALE_HAIR[(idx * 3 + 1) % FEMALE_HAIR.length]
+                        : MALE_HAIR[(idx * 2) % MALE_HAIR.length];
+
+  const shadeHex = (hex, d) => hex.replace(/[0-9a-f]{2}/gi, h =>
+    Math.min(255, Math.max(0, parseInt(h, 16) + d)).toString(16).padStart(2, '0'));
+  const hairDark    = shadeHex(hair, -28);
+  const hairLight   = shadeHex(hair, +22);
+  const blanketFold = shadeHex(shirt, +28);  // lighter fold at top
+  const blanketDark = shadeHex(shirt, -40);  // stripe lines
+
+  // Hair cap only — no long strands (head resting on pillow, strands tucked)
+  let hairCap = '';
+  if (!isFemale) {
+    const s = idx % 4;
+    if      (s === 0) hairCap = `<rect x="12" y="4" width="24" height="10" rx="4" fill="${hair}"/><rect x="14" y="3" width="20" height="4" rx="3" fill="${hair}"/>`;
+    else if (s === 1) hairCap = `<rect x="12" y="4" width="24" height="12" rx="5" fill="${hair}"/><rect x="11" y="6" width="12" height="6" rx="2" fill="${hair}"/><rect x="14" y="3" width="18" height="4" rx="3" fill="${hair}"/>`;
+    else if (s === 2) hairCap = `<rect x="12" y="5" width="24" height="10" rx="4" fill="${hair}"/><rect x="16" y="2" width="4" height="5" rx="1" fill="${hair}"/><rect x="22" y="1" width="4" height="6" rx="1" fill="${hair}"/><rect x="28" y="3" width="3" height="4" rx="1" fill="${hair}"/>`;
+    else              hairCap = `<rect x="11" y="4" width="26" height="14" rx="6" fill="${hair}"/><ellipse cx="24" cy="5" rx="12" ry="5" fill="${hair}"/>`;
+  } else {
+    const s = idx % 6;
+    if      (s === 0) hairCap = `<rect x="11" y="4" width="26" height="12" rx="5" fill="${hair}"/><rect x="13" y="3" width="22" height="5" rx="3" fill="${hair}"/>`;
+    else if (s === 1) hairCap = `<rect x="12" y="4" width="24" height="12" rx="5" fill="${hair}"/><rect x="34" y="7" width="4" height="4" fill="${hairDark}"/><rect x="36" y="8" width="8" height="3" fill="${hair}"/>`;
+    else if (s === 2) hairCap = `<rect x="11" y="4" width="26" height="12" rx="5" fill="${hair}"/><rect x="13" y="3" width="22" height="5" rx="3" fill="${hair}"/>`;
+    else if (s === 3) hairCap = `<rect x="12" y="6" width="24" height="12" rx="5" fill="${hair}"/><rect x="18" y="0" width="12" height="9" rx="4" fill="${hair}"/><rect x="20" y="0" width="8" height="5" rx="3" fill="${hairLight}" opacity="0.35"/>`;
+    else if (s === 4) hairCap = `<rect x="12" y="4" width="24" height="12" rx="5" fill="${hair}"/><rect x="14" y="3" width="20" height="5" rx="3" fill="${hair}"/>`;
+    else              hairCap = `<rect x="11" y="4" width="26" height="10" rx="4" fill="${hair}"/><rect x="13" y="3" width="22" height="5" rx="3" fill="${hair}"/>`;
+  }
+
+  return `<svg viewBox="0 0 48 64" width="72" height="96" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+
+  <!-- ── HEADBOARD (left, tall wood plank) ── -->
+  <rect x="0" y="22" width="8" height="34" fill="#5a2e0c"/>
+  <rect x="1" y="23" width="5" height="32" fill="#7a3e18"/>
+  <rect x="1" y="23" width="2" height="32" fill="rgba(255,255,255,0.07)"/>
+  <rect x="0" y="20" width="8" height="3" fill="#8a4820"/>
+  <rect x="1" y="20" width="6" height="1" fill="#9a5828"/>
+
+  <!-- ── FOOTBOARD (right) ── -->
+  <rect x="40" y="28" width="8" height="28" fill="#5a2e0c"/>
+  <rect x="41" y="29" width="5" height="26" fill="#7a3e18"/>
+  <rect x="41" y="29" width="2" height="26" fill="rgba(255,255,255,0.05)"/>
+
+  <!-- ── MATTRESS ── -->
+  <rect x="8" y="28" width="32" height="28" fill="#ede8d8"/>
+  <rect x="8" y="28" width="32" height="1" fill="#f8f4e8"/>
+  <rect x="8" y="28" width="1" height="28" fill="rgba(255,255,255,0.18)"/>
+
+  <!-- ── PILLOW (under head) ── -->
+  <rect x="8" y="26" width="20" height="12" rx="1" fill="#f4f0e6"/>
+  <rect x="9" y="27" width="18" height="10" fill="#fefefc"/>
+  <rect x="9" y="27" width="16" height="1" fill="rgba(255,255,255,0.7)"/>
+  <rect x="9" y="36" width="18" height="1" fill="rgba(0,0,0,0.06)"/>
+
+  <!-- ── BLANKET ── -->
+  <!-- Top fold (lighter, visible above blanket body) -->
+  <rect x="8" y="36" width="32" height="5" fill="${blanketFold}"/>
+  <rect x="8" y="36" width="32" height="1" fill="rgba(255,255,255,0.22)"/>
+  <!-- Main blanket body -->
+  <rect x="8" y="40" width="32" height="16" fill="${shirt}"/>
+  <!-- Horizontal stripe texture -->
+  <rect x="8" y="42" width="32" height="1" fill="${blanketDark}" opacity="0.2"/>
+  <rect x="8" y="45" width="32" height="1" fill="${blanketDark}" opacity="0.2"/>
+  <rect x="8" y="48" width="32" height="1" fill="${blanketDark}" opacity="0.2"/>
+  <rect x="8" y="51" width="32" height="1" fill="${blanketDark}" opacity="0.2"/>
+  <rect x="8" y="54" width="32" height="1" fill="${blanketDark}" opacity="0.2"/>
+  <!-- Blanket right-edge shadow -->
+  <rect x="39" y="36" width="1" height="20" fill="rgba(0,0,0,0.09)"/>
+
+  <!-- ── BED FRONT FACE ── -->
+  <rect x="0" y="56" width="48" height="4" fill="#6a3810"/>
+  <rect x="0" y="56" width="48" height="1" fill="#7a4818"/>
+  <rect x="0" y="59" width="48" height="1" fill="rgba(0,0,0,0.22)"/>
+
+  <!-- ── BED LEGS ── -->
+  <rect x="2" y="60" width="4" height="4" fill="#5a3010"/>
+  <rect x="42" y="60" width="4" height="4" fill="#5a3010"/>
+  <rect x="2" y="60" width="4" height="1" fill="#6a4018"/>
+  <rect x="42" y="60" width="4" height="1" fill="#6a4018"/>
+
+  <!-- ── CHARACTER HEAD (resting on pillow, facing forward) ── -->
+  ${hairCap}
+  <!-- Face -->
+  <rect x="13" y="10" width="22" height="18" rx="4" fill="${skin}"/>
+  <!-- Ears -->
+  <rect x="11" y="15" width="3" height="5" fill="${skin}"/>
+  <rect x="34" y="15" width="3" height="5" fill="${skin}"/>
+  <!-- CLOSED EYES — horizontal bars replacing open squares -->
+  <rect x="17" y="19" width="5" height="1" rx="0" fill="#2a2018" opacity="0.82"/>
+  <rect x="26" y="19" width="5" height="1" rx="0" fill="#2a2018" opacity="0.82"/>
+  <!-- Relaxed sleeping mouth -->
+  <rect x="21" y="24" width="6" height="1" fill="#2a2018" opacity="0.22"/>
+  <!-- Nose -->
+  <rect x="23" y="21" width="2" height="2" fill="rgba(0,0,0,0.07)"/>
+  <!-- Soft cheek blush -->
+  <rect x="15" y="22" width="3" height="2" fill="#e8a088" opacity="0.28"/>
+  <rect x="30" y="22" width="3" height="2" fill="#e8a088" opacity="0.28"/>
+
+  <!-- ── ZZZ (pixel art, ascending size upper-right, animated) ── -->
+  <g class="zzz-float">
+    <!-- small z at x=28,y=10 (3px wide) -->
+    <rect x="28" y="8"  width="3" height="1" fill="rgba(210,235,210,0.7)"/>
+    <rect x="29" y="9"  width="2" height="1" fill="rgba(210,235,210,0.7)"/>
+    <rect x="28" y="10" width="3" height="1" fill="rgba(210,235,210,0.7)"/>
+    <!-- medium z at x=33,y=5 (4px wide) -->
+    <rect x="33" y="4"  width="4" height="1" fill="rgba(210,235,210,0.78)"/>
+    <rect x="35" y="5"  width="2" height="1" fill="rgba(210,235,210,0.78)"/>
+    <rect x="33" y="6"  width="4" height="1" fill="rgba(210,235,210,0.78)"/>
+    <!-- large Z at x=38,y=1 (5px wide) -->
+    <rect x="38" y="1"  width="5" height="1" fill="rgba(210,235,210,0.86)"/>
+    <rect x="40" y="2"  width="3" height="1" fill="rgba(210,235,210,0.86)"/>
+    <rect x="38" y="3"  width="5" height="1" fill="rgba(210,235,210,0.86)"/>
+  </g>
+
+  <!-- ── SHADOW ── -->
+  <ellipse cx="24" cy="63" rx="18" ry="1.5" fill="rgba(0,0,0,0.09)"/>
+</svg>`;
+}
+
 function shortName(mode) {
   const map = {
     MEAN_REVERSION: 'Mean Rev',
@@ -1488,6 +1671,19 @@ async function initSymbolCharts() {
 
   const grid = document.getElementById('symbol-charts-grid');
   if (!grid) return;
+
+  // Show shimmer skeletons while loading
+  grid.innerHTML = '';
+  const skeletonCount = symbols.length || 4;
+  for (let i = 0; i < skeletonCount; i++) {
+    const sk = document.createElement('div');
+    sk.className = 'sym-chart-card';
+    sk.innerHTML = `<div class="sym-card-header"><div class="skeleton" style="width:44px;height:14px;border-radius:3px"></div></div>
+                    <div class="skeleton sym-chart-skeleton"></div>`;
+    grid.appendChild(sk);
+  }
+  // Small delay so shimmer is visible before ApexCharts renders
+  await new Promise(r => setTimeout(r, 60));
   grid.innerHTML = '';
 
   const chartH = window.innerWidth <= 480 ? 90 : window.innerWidth <= 900 ? 110 : 130;
@@ -1731,7 +1927,7 @@ function populateDrawer(d) {
       ${dStat('Daily P&L', '$' + fmt2(stats.daily_loss), '', stats.daily_loss < 0 ? 'neg' : '')}
     </div>
     ${symTable}
-    <div class="drawer-chart-wrap"><canvas id="perf-chart"></canvas></div>
+    <div class="drawer-chart-wrap"><div id="perf-chart"></div></div>
   `;
   setTimeout(() => renderPerfChart(d.balance_history || [], stats.balance_start), 60);
 
@@ -1905,67 +2101,67 @@ function tdDetail(label, val, cls = '') {
 
 function renderPerfChart(balanceHistory, startBalance) {
   if (perfChart) { perfChart.destroy(); perfChart = null; }
-  const canvas = document.getElementById('perf-chart');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
+  const el = document.getElementById('perf-chart');
+  if (!el) return;
 
-  const labels = balanceHistory.map(p => fmtTime(p.time));
-  const data   = balanceHistory.map(p => p.balance);
+  const data = (balanceHistory || []).map(p => p.balance);
 
-  if (data.length === 0) {
-    // Draw "No data" text on canvas
-    ctx.fillStyle = '#64748b';
-    ctx.font = '13px system-ui';
-    ctx.textAlign = 'center';
-    ctx.fillText('No completed trades yet', ctx.canvas.width / 2, ctx.canvas.height / 2);
+  if (!data.length) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:#888;font-size:12px">No completed trades yet</div>';
     return;
   }
 
-  const allValues = [startBalance, ...data];
+  const times = (balanceHistory || []).map(p => new Date(p.time).getTime());
+  const allValues = startBalance != null ? [startBalance, ...data] : data;
   const minVal = Math.min(...allValues);
   const maxVal = Math.max(...allValues);
 
-  perfChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Balance',
-        data,
-        borderColor: '#4f8ef7',
-        backgroundColor: 'rgba(79,142,247,0.08)',
-        borderWidth: 2,
-        pointRadius: data.length > 30 ? 0 : 3,
-        pointHoverRadius: 5,
-        fill: true,
-        tension: 0.3,
-      }],
+  perfChart = new ApexCharts(el, {
+    chart: {
+      type: 'area',
+      height: 160,
+      background: 'transparent',
+      toolbar: { show: false },
+      animations: { enabled: false },
+      foreColor: '#888',
+      sparkline: { enabled: false },
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => '$' + ctx.parsed.y.toFixed(2),
-          },
-        },
-      },
-      scales: {
-        x: {
-          ticks: { color: '#64748b', font: { size: 10 }, maxTicksLimit: 8, maxRotation: 0 },
-          grid: { color: '#1e2230' },
-        },
-        y: {
-          ticks: { color: '#64748b', font: { size: 10 }, callback: v => '$' + v.toFixed(0) },
-          grid: { color: '#1e2230' },
-          suggestedMin: minVal * 0.998,
-          suggestedMax: maxVal * 1.002,
-        },
-      },
+    series: [{ name: 'Balance', data: times.map((t, i) => ({ x: t, y: data[i] })) }],
+    stroke: { curve: 'smooth', width: 2 },
+    fill: {
+      type: 'gradient',
+      gradient: { shadeIntensity: 1, opacityFrom: 0.15, opacityTo: 0.01, stops: [0, 100] },
     },
+    colors: ['#4f8ef7'],
+    xaxis: {
+      type: 'datetime',
+      labels: {
+        style: { colors: '#64748b', fontSize: '9px' },
+        datetimeUTC: false,
+        datetimeFormatter: { hour: 'HH:mm', minute: 'HH:mm' },
+      },
+      axisBorder: { show: false },
+      axisTicks: { show: false },
+    },
+    yaxis: {
+      labels: {
+        style: { colors: '#64748b', fontSize: '9px' },
+        formatter: v => '$' + (v || 0).toFixed(0),
+      },
+      min: minVal * 0.998,
+      max: maxVal * 1.002,
+    },
+    grid: { borderColor: 'rgba(0,0,0,0.08)', strokeDashArray: 4 },
+    tooltip: {
+      theme: 'light',
+      x: { format: 'HH:mm' },
+      y: { formatter: v => '$' + (v || 0).toFixed(2) },
+    },
+    legend: { show: false },
+    dataLabels: { enabled: false },
+    markers: { size: data.length <= 30 ? 3 : 0, hover: { size: 5 } },
   });
+  perfChart.render();
 }
 
 // ─────────────────────────────────────────────── HELPERS
@@ -2188,7 +2384,7 @@ function renderTradeAccordionWithDetails(trades, container, simId) {
           <div class="tr-action-row">
             <button class="tr-details-btn${isSelected ? ' tr-details-btn-active' : ''}"
                     onclick="openTradeDetails('${simId}','${t.trade_id}',${idx},event)">
-              ${isSelected ? '✓ Viewing' : '[Details]'}
+              ${isSelected ? '✓ Viewing' : '✨ Analyze'}
             </button>
             <button class="tr-replay-btn" id="tr-replay-btn-${idx}"
                     onclick="toggleReplayChart('${simId}','${t.trade_id}',${idx},event)">
@@ -2228,9 +2424,19 @@ async function openTradeDetails(simId, tradeId, rowIdx, e) {
   if (window.innerWidth < 768) closeDrawer();
 }
 
+const _isDesktop = () => window.innerWidth >= 769;
+
 function showTradeChart(simId, tradeId) {
-  document.getElementById('chalk-live-view').classList.add('hidden');
+  // On desktop: both panels always visible (split mode) — don't hide live view
+  if (!_isDesktop()) {
+    document.getElementById('chalk-live-view').classList.add('hidden');
+  }
   document.getElementById('chalk-trade-view').classList.remove('hidden');
+  // Show content, hide placeholder
+  const placeholder = document.getElementById('chalk-trade-placeholder');
+  const content     = document.getElementById('chalk-trade-content');
+  if (placeholder) placeholder.classList.add('hidden');
+  if (content)     content.classList.remove('hidden');
 
   const img     = document.getElementById('trade-chart-img');
   const loading = document.getElementById('trade-chart-loading');
@@ -2261,8 +2467,17 @@ function showTradeChart(simId, tradeId) {
 
 function showLiveChart() {
   document.getElementById('chalk-live-view').classList.remove('hidden');
-  document.getElementById('chalk-trade-view').classList.add('hidden');
-  document.getElementById('narrative-panel').classList.add('hidden');
+  // On desktop: keep trade view visible but show placeholder
+  if (_isDesktop()) {
+    const placeholder = document.getElementById('chalk-trade-placeholder');
+    const content     = document.getElementById('chalk-trade-content');
+    if (placeholder) placeholder.classList.remove('hidden');
+    if (content)     content.classList.add('hidden');
+  } else {
+    document.getElementById('chalk-trade-view').classList.add('hidden');
+  }
+  const narPanel = document.getElementById('narrative-panel');
+  if (narPanel) narPanel.classList.add('hidden');
   _selectedTradeId = null;
 }
 

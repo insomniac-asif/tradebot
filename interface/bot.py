@@ -157,14 +157,6 @@ class QQQBot(commands.Bot):
         except Exception as exc:
             logging.warning("freshness_monitor_init_failed: %s", exc)
 
-    async def safe_task_with_timeout(self, task_coro, name, timeout=10):
-        try:
-            await asyncio.wait_for(task_coro, timeout=timeout)
-        except asyncio.TimeoutError:
-            logging.error(f"[TIMEOUT] Task {name} exceeded timeout.")
-        except Exception as e:
-            logging.exception(f"[CRASH] Background task {name} crashed: {e}")
-
 
 bot = QQQBot(command_prefix="!", intents=intents, help_command=None)
 

@@ -5,10 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Trader Sim Classroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=VT323&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -24,14 +23,21 @@
   <div class="notice-right">
     <span class="clock-badge" id="et-clock"></span>
     <span class="notice-text" id="market-status"></span>
-    <button id="sound-toggle" class="sound-toggle" onclick="toggleSound()" title="Sound OFF — click to enable">🔇</button>
     <button class="pin-btn" onclick="refreshAll()" title="Refresh">↺</button>
     <span class="notice-text small" id="last-refresh"></span>
+    <button id="sound-toggle" class="sound-toggle sound-on" onclick="toggleSound()" title="Sound ON — click to mute">🔊</button>
   </div>
 </div>
 
+<!-- ══════════════════════════════════════ SUBNAV -->
+<nav class="subnav" id="subnav">
+  <button class="subnav-tab active" onclick="navTo('charts',this)">📊 Charts</button>
+  <button class="subnav-tab" onclick="navTo('trades',this)">📋 Trades</button>
+  <button class="subnav-tab" onclick="navTo('roster',this)">🎓 Roster</button>
+</nav>
+
 <!-- ══════════════════════════════════════ FRONT WALL: CHALKBOARD -->
-<div class="board-area">
+<div class="board-area" id="section-charts">
   <!-- Classroom wall decorations -->
   <div class="wall-deco wall-deco-left">
     <div class="wall-clock">
@@ -41,8 +47,8 @@
         <div class="clock-dot"></div>
       </div>
     </div>
-    <div class="wall-poster">
-      <div class="poster-text">BUY LOW<br>SELL HIGH</div>
+    <div class="wall-poster" id="wall-poster">
+      <div class="poster-text" id="poster-text">P&amp;L<br>—</div>
     </div>
   </div>
   <div class="board-frame">
@@ -60,8 +66,13 @@
         </div>
       </div>
 
-      <!-- TRADE ANALYSIS VIEW (shown when Details clicked) -->
+      <!-- TRADE ANALYSIS VIEW (shown when Details clicked; always visible on desktop) -->
       <div id="chalk-trade-view" class="hidden">
+        <!-- Placeholder shown when no trade is selected (desktop only) -->
+        <div id="chalk-trade-placeholder" class="chalk-trade-placeholder">
+          <div class="chalk-placeholder-text">← Select a trade from the History tab to analyze</div>
+        </div>
+        <div id="chalk-trade-content" class="hidden">
         <div class="chalk-header">
           <button class="chalk-back-btn" onclick="showLiveChart()">← Live Chart</button>
           <span class="chalk-title" id="trade-chart-title">TRADE ANALYSIS</span>
@@ -104,7 +115,8 @@
             </div>
           </div>
         </div>
-      </div>
+        </div><!-- /chalk-trade-content -->
+      </div><!-- /chalk-trade-view -->
 
       <!-- Chalkboard announcement strip (typewriter) -->
       <div id="chalk-announce"></div>
@@ -151,7 +163,7 @@
 <div id="teacher-panel"></div>
 
 <!-- ══════════════════════════════════════ RECENT TRADES -->
-<div class="rt-panel-wrap recent-trades-panel">
+<div class="rt-panel-wrap recent-trades-panel" id="section-trades">
   <div class="rt-panel-toggle" onclick="toggleRtPanel()">
     <span class="rt-toggle-title">Recent Trades</span>
     <span class="rt-toggle-meta" id="rt-toggle-meta">loading…</span>
@@ -163,7 +175,8 @@
 </div>
 
 <!-- ══════════════════════════════════════ CLASSROOM FLOOR -->
-<div class="classroom-floor">
+<div class="classroom-floor" id="section-roster">
+  <div id="leaderboard-strip"></div>
   <div class="floor-header">
     <span class="roster-label">CLASS ROSTER</span>
     <span class="roster-count" id="sim-count"></span>

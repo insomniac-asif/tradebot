@@ -3,10 +3,6 @@ import time
 import asyncio
 from typing import Any
 
-from alpaca.data.historical import OptionHistoricalDataClient
-from alpaca.data.requests import OptionSnapshotRequest
-import alpaca.data.enums as alpaca_enums
-from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce, PositionIntent, OrderStatus
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
@@ -14,189 +10,19 @@ from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 from core.debug import debug_log
 from core.rate_limiter import rate_limit_sleep, get_cache, get_breaker, get_bucket
 from analytics.execution_logger import log_execution
+from execution.option_executor_helpers import (
+    _extract_snapshot,
+    _get_options_feed,
+    _build_snapshot_request,
+    _cache_quote,
+    _get_cached_quote,
+    _get_option_quote,
+    ALPACA_MIN_CALL_INTERVAL_SEC,
+    _LAST_OPTION_QUOTES,
+    _QUOTE_TTL_SECONDS,
+)
 
 _SNAPSHOT_CACHE_TTL = 10.0  # seconds — for ResponseCache (short-lived mid-fill quotes)
-
-ALPACA_MIN_CALL_INTERVAL_SEC = float(os.getenv("ALPACA_MIN_CALL_INTERVAL_SEC", "0.5"))
-_LAST_OPTION_QUOTES: dict[str, dict[str, float]] = {}
-_QUOTE_TTL_SECONDS = 120.0
-
-
-def _extract_snapshot(response, symbol: str):
-    if response is None or not symbol:
-        return None
-    if isinstance(response, dict):
-        if symbol in response:
-            return response.get(symbol)
-        try:
-            if len(response) == 1:
-                return next(iter(response.values()))
-        except Exception:
-            pass
-    for attr in ("snapshots", "data"):
-        data = getattr(response, attr, None)
-        if isinstance(data, dict):
-            if symbol in data:
-                return data.get(symbol)
-            try:
-                if len(data) == 1:
-                    return next(iter(data.values()))
-            except Exception:
-                pass
-        if isinstance(data, list):
-            for item in data:
-                sym = getattr(item, "symbol", None) if item is not None else None
-                if sym is None and isinstance(item, dict):
-                    sym = item.get("symbol")
-                if sym == symbol:
-                    return item
-            try:
-                if len(data) == 1:
-                    return data[0]
-            except Exception:
-                pass
-    try:
-        if getattr(response, "symbol", None) == symbol:
-            return response
-    except Exception:
-        pass
-    return None
-
-
-def _get_options_feed():
-    feed_enum = getattr(alpaca_enums, "OptionsFeed", None)
-    if feed_enum is None:
-        return None
-    desired = os.getenv("ALPACA_OPTIONS_FEED", "").strip().lower()
-    try:
-        if desired == "opra":
-            return feed_enum.OPRA
-        if desired == "indicative":
-            return feed_enum.INDICATIVE
-    except Exception:
-        return None
-    return None
-
-
-def _build_snapshot_request(symbol: str, feed_override=None):
-    feed_val = feed_override if feed_override is not None else _get_options_feed()
-    try:
-        if feed_val is not None:
-            return OptionSnapshotRequest(symbol_or_symbols=[symbol], feed=feed_val)
-    except Exception:
-        pass
-    try:
-        return OptionSnapshotRequest(symbol_or_symbols=[symbol])
-    except Exception:
-        return OptionSnapshotRequest(symbol_or_symbols=symbol)
-
-
-def _cache_quote(symbol: str, bid: float, ask: float) -> None:
-    try:
-        _LAST_OPTION_QUOTES[symbol] = {
-            "bid": float(bid),
-            "ask": float(ask),
-            "ts": time.time(),
-        }
-    except Exception:
-        pass
-
-
-def _get_cached_quote(symbol: str):
-    try:
-        item = _LAST_OPTION_QUOTES.get(symbol)
-        if not item:
-            return None
-        if (time.time() - float(item.get("ts", 0))) > _QUOTE_TTL_SECONDS:
-            return None
-        bid = float(item.get("bid", 0))
-        ask = float(item.get("ask", 0))
-        if bid > 0 and ask > 0:
-            return bid, ask
-    except Exception:
-        return None
-    return None
-
-
-def _get_option_quote(api_key: str, secret_key: str, symbol: str):
-    if not symbol or not isinstance(symbol, str) or len(symbol) < 15:
-        debug_log("option_snapshot_invalid_symbol", symbol=symbol)
-        return None
-    # Short-circuit if circuit breaker is open
-    if not get_breaker().allow_request():
-        cached = _get_cached_quote(symbol)
-        return cached
-    client = OptionHistoricalDataClient(api_key, secret_key)
-    last_err = None
-    feed_val = _get_options_feed()
-    for attempt in range(2):
-        try:
-            get_bucket().acquire_wait()
-            rate_limit_sleep("alpaca_option_snapshot", ALPACA_MIN_CALL_INTERVAL_SEC)
-            debug_log("option_snapshot_request", symbol=symbol)
-            req = _build_snapshot_request(symbol, feed_override=feed_val)
-            start_ts = time.time()
-            snapshots = client.get_option_snapshot(req)
-            get_breaker().record_success()
-            elapsed_ms = int((time.time() - start_ts) * 1000)
-            snap = _extract_snapshot(snapshots, symbol)
-            if snap is None:
-                debug_log(
-                    "option_snapshot_missing",
-                    symbol=symbol,
-                    attempt=attempt + 1,
-                    response_type=type(snapshots).__name__,
-                    response_time_ms=elapsed_ms,
-                )
-                last_err = "no_snapshot"
-                # If no explicit feed set, retry indicative once before backoff
-                if feed_val is None:
-                    try:
-                        feed_enum = getattr(alpaca_enums, "OptionsFeed", None)
-                        if feed_enum is not None and hasattr(feed_enum, "INDICATIVE"):
-                            debug_log("option_snapshot_retry_feed", symbol=symbol, feed="indicative")
-                            req = _build_snapshot_request(symbol, feed_override=feed_enum.INDICATIVE)
-                            snapshots = client.get_option_snapshot(req)
-                            snap = _extract_snapshot(snapshots, symbol)
-                            if snap is not None:
-                                quote = getattr(snap, "latest_quote", None)
-                                if quote and quote.ask_price is not None and quote.bid_price is not None:
-                                    bid = quote.bid_price
-                                    ask = quote.ask_price
-                                    if bid is not None and ask is not None and bid > 0 and ask > 0:
-                                        _cache_quote(symbol, float(bid), float(ask))
-                                        return float(bid), float(ask)
-                    except Exception:
-                        pass
-                time.sleep(0.2 * (attempt + 1))
-                continue
-            quote = getattr(snap, "latest_quote", None)
-            if quote and quote.ask_price is not None and quote.bid_price is not None:
-                bid = quote.bid_price
-                ask = quote.ask_price
-                if bid is not None and ask is not None and bid > 0 and ask > 0:
-                    _cache_quote(symbol, float(bid), float(ask))
-                    try:
-                        from core.singletons import RISK_SUPERVISOR
-                        _now = time.time()
-                        RISK_SUPERVISOR.update_quote_freshness(_now)
-                        RISK_SUPERVISOR.update_broker_health(_now)
-                    except ImportError:
-                        pass
-                    return float(bid), float(ask)
-            last_err = "no_quote"
-        except Exception as e:
-            last_err = str(e)
-            get_breaker().record_failure()
-            debug_log("option_snapshot_error", symbol=symbol, error=str(e))
-            time.sleep(0.2 * (attempt + 1))
-    cached = _get_cached_quote(symbol)
-    if cached:
-        debug_log("option_snapshot_fallback_cached", symbol=symbol)
-        return cached
-    if last_err:
-        debug_log("option_snapshot_failed", symbol=symbol, reason=last_err)
-    return None
 
 
 async def _sleep(seconds: float) -> None:
@@ -219,6 +45,140 @@ def _increment_no_record_exit(acc, reason: str) -> None:
     no_record[reason] = no_record.get(reason, 0) + 1
     stats["no_record_exits"] = no_record
     acc["execution_stats"] = stats
+
+
+async def _poll_fill_loop(
+    client: Any,
+    order: Any,
+    quantity: int,
+    option_symbol: str,
+    expected_mid: float,
+    bid: float,
+    ask: float,
+    order_type: str,
+    ctx,
+    acc,
+    timeout: float = 5.0,
+):
+    """Poll an open order for fills. Returns (result_dict, error_str) or (None, error_str)."""
+    start = time.time()
+    while (time.time() - start) < timeout:
+        current: Any = await asyncio.to_thread(client.get_order_by_id, order.id)
+        if current.status == OrderStatus.FILLED and current.filled_avg_price is not None:
+            try:
+                fill_price = float(current.filled_avg_price)
+                fill_ratio = 1.0
+                debug_log(
+                    "partial_fill_ratio",
+                    requested=quantity,
+                    filled=quantity,
+                    ratio=round(fill_ratio, 3),
+                    accepted=True,
+                )
+                log_execution(
+                    option_symbol=option_symbol, side="entry",
+                    order_type=order_type,
+                    qty_requested=quantity, qty_filled=quantity,
+                    fill_ratio=fill_ratio, expected_mid=expected_mid,
+                    fill_price=fill_price, bid_at_order=bid, ask_at_order=ask,
+                )
+                if fill_price > expected_mid * 1.10:
+                    try:
+                        asyncio.create_task(asyncio.to_thread(client.submit_order,
+                            LimitOrderRequest(
+                                symbol=option_symbol,
+                                qty=quantity,
+                                side=OrderSide.SELL,
+                                time_in_force=TimeInForce.DAY,
+                                limit_price=float(fill_price),
+                                position_intent=PositionIntent.SELL_TO_CLOSE,
+                            )
+                        ))
+                    except Exception:
+                        pass
+                    _increment_no_record_exit(acc, "slippage_guard_triggered")
+                    return None, "slippage_guard_triggered"
+                return {
+                    "fill_price": fill_price,
+                    "filled_qty": quantity,
+                    "partial": False,
+                    "expected_mid": float(expected_mid),
+                    "requested_qty": quantity,
+                    "fill_ratio": fill_ratio,
+                }, None
+            except (TypeError, ValueError):
+                return None, "limit_not_filled"
+
+        filled_qty = getattr(current, "filled_qty", None)
+        if filled_qty is not None and current.status != OrderStatus.FILLED:
+            try:
+                qty_val = int(float(filled_qty))
+            except (TypeError, ValueError):
+                qty_val = 0
+            if qty_val > 0 and current.filled_avg_price is not None:
+                try:
+                    await asyncio.to_thread(client.cancel_order_by_id, order.id)
+                except Exception:
+                    pass
+                try:
+                    filled_price = float(current.filled_avg_price)
+                except (TypeError, ValueError):
+                    return None, "limit_not_filled"
+                fill_ratio = min(qty_val, quantity) / float(quantity)
+                debug_log(
+                    "partial_fill_ratio",
+                    requested=quantity,
+                    filled=min(qty_val, quantity),
+                    ratio=round(fill_ratio, 3),
+                    accepted=fill_ratio >= 0.5,
+                )
+                if fill_ratio < 0.5:
+                    try:
+                        asyncio.create_task(asyncio.to_thread(close_option_position, option_symbol, min(qty_val, quantity)))
+                    except Exception:
+                        pass
+                    if ctx is not None:
+                        ctx.set_block("partial_fill_below_threshold")
+                    _increment_no_record_exit(acc, "partial_fill_below_threshold")
+                    return None, "partial_fill_below_threshold"
+                if filled_price > expected_mid * 1.10:
+                    try:
+                        asyncio.create_task(asyncio.to_thread(client.submit_order,
+                            LimitOrderRequest(
+                                symbol=option_symbol,
+                                qty=min(qty_val, quantity),
+                                side=OrderSide.SELL,
+                                time_in_force=TimeInForce.DAY,
+                                limit_price=float(filled_price),
+                                position_intent=PositionIntent.SELL_TO_CLOSE,
+                            )
+                        ))
+                    except Exception:
+                        pass
+                    _increment_no_record_exit(acc, "slippage_guard_triggered")
+                    return None, "slippage_guard_triggered"
+                log_execution(
+                    option_symbol=option_symbol, side="entry",
+                    order_type="limit_partial",
+                    qty_requested=quantity, qty_filled=min(qty_val, quantity),
+                    fill_ratio=fill_ratio, expected_mid=expected_mid,
+                    fill_price=filled_price, bid_at_order=bid, ask_at_order=ask,
+                )
+                return {
+                    "fill_price": filled_price,
+                    "filled_qty": min(qty_val, quantity),
+                    "partial": True,
+                    "expected_mid": float(expected_mid),
+                    "requested_qty": quantity,
+                    "fill_ratio": fill_ratio,
+                }, None
+
+        if current.status in {OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED}:
+            break
+        await _sleep(1)
+
+    # Timed out or terminal status — return sentinel so caller can cancel and continue
+    return None, None  # None error = "not filled yet, try next attempt"
 
 
 async def execute_option_entry(option_symbol: str, quantity: int, bid: float, ask: float, ctx=None, acc=None):
@@ -253,6 +213,8 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
         return None, "spread_too_wide"
 
     client = TradingClient(api_key, secret_key, paper=True)
+
+    # --- first attempt: limit at mid + 25% of spread ---
     first_limit = round(mid + (spread * 0.25), 2)
     order: Any = await asyncio.to_thread(client.submit_order,
         LimitOrderRequest(
@@ -264,127 +226,19 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
             position_intent=PositionIntent.BUY_TO_OPEN,
         )
     )
-
-    # --- first attempt: limit at mid + 25% of spread ---
-    start = time.time()
-    while (time.time() - start) < 5:
-        current: Any = await asyncio.to_thread(client.get_order_by_id, order.id)
-        if current.status == OrderStatus.FILLED and current.filled_avg_price is not None:
-            try:
-                fill_price = float(current.filled_avg_price)
-                fill_ratio = 1.0
-                debug_log(
-                    "partial_fill_ratio",
-                    requested=quantity,
-                    filled=quantity,
-                    ratio=round(fill_ratio, 3),
-                    accepted=True
-                )
-                log_execution(
-                    option_symbol=option_symbol, side="entry",
-                    order_type="limit_mid_plus",
-                    qty_requested=quantity, qty_filled=quantity,
-                    fill_ratio=fill_ratio, expected_mid=expected_mid,
-                    fill_price=fill_price, bid_at_order=bid, ask_at_order=ask,
-                )
-                if fill_price > expected_mid * 1.10:
-                    try:
-                        asyncio.create_task(asyncio.to_thread(client.submit_order,
-                            LimitOrderRequest(
-                                symbol=option_symbol,
-                                qty=quantity,
-                                side=OrderSide.SELL,
-                                time_in_force=TimeInForce.DAY,
-                                limit_price=float(fill_price),
-                                position_intent=PositionIntent.SELL_TO_CLOSE,
-                            )
-                        ))
-                    except Exception:
-                        pass
-                    _increment_no_record_exit(acc, "slippage_guard_triggered")
-                    return None, "slippage_guard_triggered"
-                return {
-                    "fill_price": fill_price,
-                    "filled_qty": quantity,
-                    "partial": False,
-                    "expected_mid": float(expected_mid),
-                    "requested_qty": quantity,
-                    "fill_ratio": fill_ratio,
-                }, None
-            except (TypeError, ValueError):
-                return None, "limit_not_filled"
-        filled_qty = getattr(current, "filled_qty", None)
-        if filled_qty is not None and current.status != OrderStatus.FILLED:
-            try:
-                qty_val = int(float(filled_qty))
-            except (TypeError, ValueError):
-                qty_val = 0
-            if qty_val > 0 and current.filled_avg_price is not None:
-                try:
-                    await asyncio.to_thread(client.cancel_order_by_id, order.id)
-                except Exception:
-                    pass
-                try:
-                    filled_price = float(current.filled_avg_price)
-                except (TypeError, ValueError):
-                    return None, "limit_not_filled"
-                fill_ratio = min(qty_val, quantity) / float(quantity)
-                debug_log(
-                    "partial_fill_ratio",
-                    requested=quantity,
-                    filled=min(qty_val, quantity),
-                    ratio=round(fill_ratio, 3),
-                    accepted=fill_ratio >= 0.5
-                )
-                if fill_ratio < 0.5:
-                    try:
-                        asyncio.create_task(asyncio.to_thread(close_option_position, option_symbol, min(qty_val, quantity)))
-                    except Exception:
-                        pass
-                    if ctx is not None:
-                        ctx.set_block("partial_fill_below_threshold")
-                    _increment_no_record_exit(acc, "partial_fill_below_threshold")
-                    return None, "partial_fill_below_threshold"
-                if filled_price > expected_mid * 1.10:
-                    try:
-                        asyncio.create_task(asyncio.to_thread(client.submit_order,
-                            LimitOrderRequest(
-                                symbol=option_symbol,
-                                qty=min(qty_val, quantity),
-                                side=OrderSide.SELL,
-                                time_in_force=TimeInForce.DAY,
-                                limit_price=float(filled_price),
-                                position_intent=PositionIntent.SELL_TO_CLOSE,
-                            )
-                        ))
-                    except Exception:
-                        pass
-                    _increment_no_record_exit(acc, "slippage_guard_triggered")
-                    return None, "slippage_guard_triggered"
-                log_execution(
-                    option_symbol=option_symbol, side="entry",
-                    order_type="limit_partial",
-                    qty_requested=quantity, qty_filled=min(qty_val, quantity),
-                    fill_ratio=fill_ratio, expected_mid=expected_mid,
-                    fill_price=filled_price, bid_at_order=bid, ask_at_order=ask,
-                )
-                return {
-                    "fill_price": filled_price,
-                    "filled_qty": min(qty_val, quantity),
-                    "partial": True,
-                    "expected_mid": float(expected_mid),
-                    "requested_qty": quantity,
-                    "fill_ratio": fill_ratio,
-                }, None
-        if current.status in {OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED}:
-            break
-        await _sleep(1)
+    result, error = await _poll_fill_loop(
+        client, order, quantity, option_symbol, expected_mid, bid, ask,
+        order_type="limit_mid_plus", ctx=ctx, acc=acc,
+    )
+    if result is not None or error is not None:
+        return result, error
 
     try:
         await asyncio.to_thread(client.cancel_order_by_id, order.id)
     except Exception:
         pass
 
+    # --- second attempt: limit at ask ---
     order: Any = await asyncio.to_thread(client.submit_order,
         LimitOrderRequest(
             symbol=option_symbol,
@@ -395,121 +249,12 @@ async def execute_option_entry(option_symbol: str, quantity: int, bid: float, as
             position_intent=PositionIntent.BUY_TO_OPEN,
         )
     )
-
-    # --- second attempt: limit at ask ---
-    start = time.time()
-    while (time.time() - start) < 5:
-        current: Any = await asyncio.to_thread(client.get_order_by_id, order.id)
-        if current.status == OrderStatus.FILLED and current.filled_avg_price is not None:
-            try:
-                fill_price = float(current.filled_avg_price)
-                fill_ratio = 1.0
-                debug_log(
-                    "partial_fill_ratio",
-                    requested=quantity,
-                    filled=quantity,
-                    ratio=round(fill_ratio, 3),
-                    accepted=True
-                )
-                log_execution(
-                    option_symbol=option_symbol, side="entry",
-                    order_type="limit_ask",
-                    qty_requested=quantity, qty_filled=quantity,
-                    fill_ratio=fill_ratio, expected_mid=expected_mid,
-                    fill_price=fill_price, bid_at_order=bid, ask_at_order=ask,
-                )
-                if fill_price > expected_mid * 1.10:
-                    try:
-                        asyncio.create_task(asyncio.to_thread(client.submit_order,
-                            LimitOrderRequest(
-                                symbol=option_symbol,
-                                qty=quantity,
-                                side=OrderSide.SELL,
-                                time_in_force=TimeInForce.DAY,
-                                limit_price=float(fill_price),
-                                position_intent=PositionIntent.SELL_TO_CLOSE,
-                            )
-                        ))
-                    except Exception:
-                        pass
-                    _increment_no_record_exit(acc, "slippage_guard_triggered")
-                    return None, "slippage_guard_triggered"
-                return {
-                    "fill_price": fill_price,
-                    "filled_qty": quantity,
-                    "partial": False,
-                    "expected_mid": float(expected_mid),
-                    "requested_qty": quantity,
-                    "fill_ratio": fill_ratio,
-                }, None
-            except (TypeError, ValueError):
-                return None, "limit_not_filled"
-        filled_qty = getattr(current, "filled_qty", None)
-        if filled_qty is not None and current.status != OrderStatus.FILLED:
-            try:
-                qty_val = int(float(filled_qty))
-            except (TypeError, ValueError):
-                qty_val = 0
-            if qty_val > 0 and current.filled_avg_price is not None:
-                try:
-                    await asyncio.to_thread(client.cancel_order_by_id, order.id)
-                except Exception:
-                    pass
-                try:
-                    filled_price = float(current.filled_avg_price)
-                except (TypeError, ValueError):
-                    return None, "limit_not_filled"
-                fill_ratio = min(qty_val, quantity) / float(quantity)
-                debug_log(
-                    "partial_fill_ratio",
-                    requested=quantity,
-                    filled=min(qty_val, quantity),
-                    ratio=round(fill_ratio, 3),
-                    accepted=fill_ratio >= 0.5
-                )
-                if fill_ratio < 0.5:
-                    try:
-                        asyncio.create_task(asyncio.to_thread(close_option_position, option_symbol, min(qty_val, quantity)))
-                    except Exception:
-                        pass
-                    if ctx is not None:
-                        ctx.set_block("partial_fill_below_threshold")
-                    _increment_no_record_exit(acc, "partial_fill_below_threshold")
-                    return None, "partial_fill_below_threshold"
-                if filled_price > expected_mid * 1.10:
-                    try:
-                        asyncio.create_task(asyncio.to_thread(client.submit_order,
-                            LimitOrderRequest(
-                                symbol=option_symbol,
-                                qty=min(qty_val, quantity),
-                                side=OrderSide.SELL,
-                                time_in_force=TimeInForce.DAY,
-                                limit_price=float(filled_price),
-                                position_intent=PositionIntent.SELL_TO_CLOSE,
-                            )
-                        ))
-                    except Exception:
-                        pass
-                    _increment_no_record_exit(acc, "slippage_guard_triggered")
-                    return None, "slippage_guard_triggered"
-                log_execution(
-                    option_symbol=option_symbol, side="entry",
-                    order_type="limit_partial",
-                    qty_requested=quantity, qty_filled=min(qty_val, quantity),
-                    fill_ratio=fill_ratio, expected_mid=expected_mid,
-                    fill_price=filled_price, bid_at_order=bid, ask_at_order=ask,
-                )
-                return {
-                    "fill_price": filled_price,
-                    "filled_qty": min(qty_val, quantity),
-                    "partial": True,
-                    "expected_mid": float(expected_mid),
-                    "requested_qty": quantity,
-                    "fill_ratio": fill_ratio,
-                }, None
-        if current.status in {OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED}:
-            break
-        await _sleep(1)
+    result, error = await _poll_fill_loop(
+        client, order, quantity, option_symbol, expected_mid, bid, ask,
+        order_type="limit_ask", ctx=ctx, acc=acc,
+    )
+    if result is not None or error is not None:
+        return result, error
 
     try:
         await asyncio.to_thread(client.cancel_order_by_id, order.id)
@@ -581,6 +326,7 @@ def get_option_price(option_symbol: str):
                 bid, ask = cached
                 return (bid + ask) / 2
             return None
+        from alpaca.data.historical import OptionHistoricalDataClient
         client = OptionHistoricalDataClient(api_key, secret_key)
         last_err = None
         for attempt in range(2):
