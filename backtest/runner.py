@@ -76,20 +76,25 @@ def main():
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD")
     parser.add_argument("--sims", nargs="*", help="Sim IDs to run (default: all)")
     parser.add_argument("--symbol", help="Override symbol (default: profile's first symbol)")
-    parser.add_argument("--max-runs", type=int, default=50, help="Max runs per sim (default: 50)")
+    parser.add_argument("--max-runs", type=int, default=0, help="Max runs per sim (0 = unlimited)")
     parser.add_argument("--prefetch", action="store_true", help="Pre-download stock data first")
     parser.add_argument("--no-verbose", action="store_true", help="Suppress verbose output")
     parser.add_argument("--skip-live", action="store_true", default=True,
                         help="Skip SIM00 (live execution sim). Default: True.")
+    parser.add_argument("--adaptive", action="store_true",
+                        help="Enable adaptive optimization (learn from each run)")
     args = parser.parse_args()
 
     verbose = not args.no_verbose
     start_date = args.start
     end_date = args.end
 
-    print(f"QQQBot Backtest Runner")
+    mode_str = "ADAPTIVE" if args.adaptive else "STATIC"
+    print(f"QQQBot Backtest Runner ({mode_str})")
     print(f"  Period: {start_date} -> {end_date}")
-    print(f"  Max runs per sim: {args.max_runs}")
+    print(f"  Max runs per sim: {'unlimited' if args.max_runs == 0 else args.max_runs}")
+    if args.adaptive:
+        print(f"  Adaptive mode: ON — filters evolve between runs")
 
     # Load profiles
     try:
@@ -158,6 +163,7 @@ def main():
                 end_date=end_date,
                 max_runs=args.max_runs,
                 verbose=verbose,
+                adaptive=args.adaptive,
             )
             summary = engine.run()
             all_summaries.append(summary)
@@ -175,6 +181,18 @@ def main():
             print(f"    Saved to:       {sim_path}")
             print(f"    Time:           {elapsed:.1f}s")
 
+            if args.adaptive and engine.adapt_filters:
+                af = engine.adapt_filters
+                dn = {0:"Mon",1:"Tue",2:"Wed",3:"Thu",4:"Fri"}
+                print(f"    Adaptive gen:   {af.generation} | Best peak: ${af.best_run_peak:.0f}")
+                if af.blocked_hours: print(f"    Blocked hours:  {sorted(af.blocked_hours)}")
+                if af.allowed_hours is not None: print(f"    Allowed hours:  {sorted(af.allowed_hours)}")
+                if af.blocked_days: print(f"    Blocked days:   {[dn.get(d,d) for d in sorted(af.blocked_days)]}")
+                if af.allowed_days is not None: print(f"    Allowed days:   {[dn.get(d,d) for d in sorted(af.allowed_days)]}")
+                if af.blocked_direction: print(f"    Blocked dir:    {af.blocked_direction}")
+                if af.required_direction: print(f"    Required dir:   {af.required_direction}")
+                if af.max_hold_seconds: print(f"    Max hold:       {af.max_hold_seconds}s ({af.max_hold_seconds//60}min)")
+
         except KeyboardInterrupt:
             print("\nInterrupted by user.")
             break
@@ -190,7 +208,7 @@ def main():
             dashboard_path = save_dashboard_data(all_summaries)
             print(f"\n{'=' * 60}")
             print(f"Dashboard data saved to: {dashboard_path}")
-            print(f"View at: http://localhost:8080 (Backtest tab)")
+            print(f"View on dashboard (Backtest tab)")
         except Exception as e:
             print(f"ERROR saving dashboard data: {e}")
             import traceback

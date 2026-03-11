@@ -30,8 +30,8 @@ from backtest.signal_adapter import get_signal, compute_features_for_backtest, _
 from backtest.exit_adapter import check_exit_conditions
 from backtest.results import BacktestTrade, BacktestRun, BacktestSummary
 
-ENTRY_SLIPPAGE = 0.02   # 2% worse than mid on entry
-EXIT_SLIPPAGE = 0.02    # 2% worse than mid on exit
+ENTRY_SLIPPAGE = 0.01   # 1% worse than mid on entry
+EXIT_SLIPPAGE = 0.01    # 1% worse than mid on exit
 
 MARKET_OPEN = dt_time(9, 31)
 ENTRY_CUTOFF = dt_time(15, 45)  # No new entries after this time
@@ -42,6 +42,230 @@ DEFAULT_DEATH_THRESHOLD = 25.0
 TARGET_BALANCE = 10_000.0
 
 BARS_WARMUP = 30  # Minimum bars needed before signal evaluation
+
+# Adaptive optimization thresholds
+ADAPT_MIN_TRADES = 15          # Need this many trades before first adaptation
+ADAPT_PHASE2_TRADES = 300      # Enough data to switch to allowlist mode
+ADAPT_PHASE3_TRADES = 700      # Enough data for aggressive A-only filtering
+ADAPT_MIN_ALLOWED_HOURS = 3    # Never restrict to fewer than this many hours
+
+
+# ── Adaptive Filter Engine ────────────────────────────────────────────────
+
+class AdaptiveFilters:
+    """
+    EV-based adaptive optimization for backtesting replay.
+
+    Instead of blocking/allowlisting dimensions (which removes valuable fat-tail
+    winners), this system:
+    1. Only blocks conditions with NEGATIVE expected value (EV < 0)
+    2. Computes sizing multipliers for each condition (1.5x for best, 0.5x for worst)
+    3. Progressively tightens as more data accumulates
+
+    Each replay run uses the same data but with improved filters/sizing.
+    """
+
+    DAY_NAMES = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+
+    def __init__(self, verbose: bool = True):
+        self.verbose = verbose
+        self.all_trades: list[dict] = []
+        self.run_outcomes: list[dict] = []
+        self.generation: int = 0
+        self.filter_log: list[dict] = []
+
+        # Only block conditions with clearly NEGATIVE EV
+        self.blocked_hours: set[int] = set()
+        self.blocked_days: set[int] = set()
+        self.blocked_direction: str | None = None
+        self.blocked_regimes: set[str] = set()
+
+        # Sizing multipliers: {hour: 1.5, day: 0.7, etc}
+        self.hour_multiplier: dict[int, float] = {}
+        self.day_multiplier: dict[int, float] = {}
+
+        # Allowlist — only set for very high-confidence situations
+        self.allowed_hours: set[int] | None = None
+        self.allowed_days: set[int] | None = None
+        self.required_direction: str | None = None
+        self.max_hold_seconds: int = 0
+
+        self.best_run_wr: float = 0.0
+        self.best_run_peak: float = 0.0
+
+    def _get_pnl(self, t: dict) -> float:
+        return t.get("realized_pnl_dollars") or t.get("pnl") or 0
+
+    def _is_winner(self, t: dict) -> bool:
+        return self._get_pnl(t) > 0
+
+    def update(self, new_trades: list[dict], run_outcome: str = "BLOWN",
+               run_wr: float = 0, run_peak: float = 0, run_number: int = 0,
+               replay_mode: bool = False) -> dict:
+        """Learn from a completed run. Focus: EV-based filtering + sizing."""
+        if replay_mode:
+            self.all_trades = list(new_trades)
+        else:
+            self.all_trades.extend(new_trades)
+        self.run_outcomes.append({
+            "run": run_number, "outcome": run_outcome,
+            "wr": run_wr, "peak": run_peak, "trades": len(new_trades),
+        })
+        total = len(self.all_trades)
+
+        if total < ADAPT_MIN_TRADES:
+            return {"gen": self.generation, "action": "gathering_data", "total": total}
+
+        self.generation += 1
+        changes = []
+
+        if run_peak > self.best_run_peak:
+            self.best_run_peak = run_peak
+        if run_wr > self.best_run_wr:
+            self.best_run_wr = run_wr
+
+        # ── Compute EV per dimension ──────────────────────────────────────
+        hour_ev = self._dim_ev(lambda t: t.get("entry_hour", 0))
+        day_ev = self._dim_ev(lambda t: t.get("day_of_week", 0))
+        dir_ev = self._dim_ev(lambda t: (t.get("direction") or "").upper())
+
+        overall_ev = sum(self._get_pnl(t) for t in self.all_trades) / total if total else 0
+
+        # ── Block only NEGATIVE EV conditions ─────────────────────────────
+        # Only block if: (1) significantly negative EV, (2) enough data, (3) is hurting us
+        for h, stats in hour_ev.items():
+            if h not in self.blocked_hours and stats["n"] >= 10 and stats["ev"] < -1.0:
+                # Negative EV: this hour is actively losing money
+                self.blocked_hours.add(h)
+                changes.append(f"BLOCK hour {h} (EV=${stats['ev']:.2f}/trade, n={stats['n']})")
+
+        for d, stats in day_ev.items():
+            if d not in self.blocked_days and stats["n"] >= 15 and stats["ev"] < -2.0:
+                self.blocked_days.add(d)
+                changes.append(f"BLOCK {self.DAY_NAMES.get(d, d)} (EV=${stats['ev']:.2f}/trade)")
+
+        for d, stats in dir_ev.items():
+            if stats["n"] >= 20 and stats["ev"] < -2.0:
+                other_evs = {k: v["ev"] for k, v in dir_ev.items() if k != d and v["n"] >= 10}
+                if other_evs and max(other_evs.values()) > stats["ev"] + 3.0:
+                    if self.blocked_direction != d:
+                        self.blocked_direction = d
+                        changes.append(f"BLOCK direction {d} (EV=${stats['ev']:.2f})")
+
+        # ── Compute sizing multipliers ────────────────────────────────────
+        # Scale position sizing based on relative EV per hour
+        if hour_ev:
+            max_hour_ev = max(s["ev"] for s in hour_ev.values())
+            min_hour_ev = min(s["ev"] for s in hour_ev.values())
+            ev_range = max_hour_ev - min_hour_ev
+            new_mult = {}
+            for h, stats in hour_ev.items():
+                if h in self.blocked_hours:
+                    continue
+                if ev_range > 0.5:
+                    # Scale from 0.5x to 2.0x based on relative EV
+                    norm = (stats["ev"] - min_hour_ev) / ev_range  # 0 to 1
+                    mult = 0.5 + norm * 1.5  # 0.5 to 2.0
+                else:
+                    mult = 1.0
+                new_mult[h] = round(mult, 2)
+            if new_mult != self.hour_multiplier:
+                top_hours = sorted(new_mult.items(), key=lambda x: x[1], reverse=True)[:3]
+                changes.append(f"SIZE hours: {', '.join(f'h{h}={m:.1f}x' for h, m in top_hours)}")
+                self.hour_multiplier = new_mult
+
+        if day_ev:
+            max_day_ev = max(s["ev"] for s in day_ev.values())
+            min_day_ev = min(s["ev"] for s in day_ev.values())
+            ev_range = max_day_ev - min_day_ev
+            new_mult = {}
+            for d, stats in day_ev.items():
+                if d in self.blocked_days:
+                    continue
+                if ev_range > 0.5:
+                    norm = (stats["ev"] - min_day_ev) / ev_range
+                    mult = 0.7 + norm * 0.6  # 0.7 to 1.3
+                else:
+                    mult = 1.0
+                new_mult[d] = round(mult, 2)
+            if new_mult != self.day_multiplier:
+                self.day_multiplier = new_mult
+
+        self.filter_log.append({
+            "gen": self.generation, "total": total,
+            "changes": changes, "overall_ev": round(overall_ev, 2),
+        })
+
+        if self.verbose and changes:
+            print(f"  [ADAPT gen#{self.generation}] {'; '.join(changes)}")
+
+        return {"gen": self.generation, "changes": changes}
+
+    def should_skip(self, entry_hour: int, day_of_week: int, direction: str,
+                    regime: str, confidence: float = 0) -> str | None:
+        """Check if this entry should be blocked (only negative-EV conditions)."""
+        if entry_hour in self.blocked_hours:
+            return f"adapt_block_hour_{entry_hour}"
+        if day_of_week in self.blocked_days:
+            return f"adapt_block_day_{self.DAY_NAMES.get(day_of_week, day_of_week)}"
+        if self.blocked_direction and direction.upper() == self.blocked_direction:
+            return f"adapt_block_dir_{self.blocked_direction}"
+        if regime and regime in self.blocked_regimes:
+            return f"adapt_block_regime_{regime}"
+        if self.allowed_hours is not None and entry_hour not in self.allowed_hours:
+            return f"adapt_hour_{entry_hour}_not_in_allowlist"
+        if self.allowed_days is not None and day_of_week not in self.allowed_days:
+            return f"adapt_day_not_in_allowlist"
+        if self.required_direction and direction.upper() != self.required_direction:
+            return f"adapt_require_{self.required_direction}_only"
+        return None
+
+    def get_sizing_multiplier(self, entry_hour: int, day_of_week: int) -> float:
+        """Get the combined sizing multiplier for the current conditions."""
+        h_mult = self.hour_multiplier.get(entry_hour, 1.0)
+        d_mult = self.day_multiplier.get(day_of_week, 1.0)
+        return h_mult * d_mult
+
+    def to_dict(self) -> dict:
+        return {
+            "generation": self.generation,
+            "total_trades_analyzed": len(self.all_trades),
+            "blocked_hours": sorted(self.blocked_hours),
+            "blocked_days": [self.DAY_NAMES.get(d, str(d)) for d in sorted(self.blocked_days)],
+            "blocked_direction": self.blocked_direction,
+            "blocked_regimes": sorted(self.blocked_regimes),
+            "allowed_hours": sorted(self.allowed_hours) if self.allowed_hours else None,
+            "allowed_days": [self.DAY_NAMES.get(d, str(d)) for d in sorted(self.allowed_days)] if self.allowed_days else None,
+            "required_direction": self.required_direction,
+            "max_hold_seconds": self.max_hold_seconds,
+            "hour_multiplier": self.hour_multiplier,
+            "day_multiplier": self.day_multiplier,
+            "best_run_peak": self.best_run_peak,
+            "best_run_wr": self.best_run_wr,
+            "run_outcomes": self.run_outcomes,
+            "filter_log": self.filter_log,
+        }
+
+    def _dim_ev(self, key_fn) -> dict:
+        """Compute expected value per dimension group."""
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for t in self.all_trades:
+            k = key_fn(t)
+            if k is not None:
+                groups[k].append(t)
+        result = {}
+        for k, trades in groups.items():
+            n = len(trades)
+            if n < 3:
+                continue
+            total_pnl = sum(self._get_pnl(t) for t in trades)
+            wins = sum(1 for t in trades if self._is_winner(t))
+            result[k] = {
+                "n": n, "ev": total_pnl / n,
+                "total_pnl": total_pnl, "wr": wins / n,
+            }
+        return result
 
 
 def _get_et_time(ts) -> dt_time:
@@ -176,6 +400,9 @@ class _OpenTrade:
     trailing_stop_high: float = 0.0
     tp2_activated: bool = False
     tp2_target_pct: float = 0.0
+    # Context for optimizer
+    regime: str = ""
+    confidence: float = 0.0
 
 
 class BacktestEngine:
@@ -193,8 +420,9 @@ class BacktestEngine:
         profile: dict,
         start_date: str,
         end_date: str,
-        max_runs: int = 50,
+        max_runs: int = 0,
         verbose: bool = True,
+        adaptive: bool = False,
     ):
         self.profile_id = profile_id
         self.profile = profile
@@ -202,6 +430,8 @@ class BacktestEngine:
         self.end_date = end_date
         self.max_runs = max_runs
         self.verbose = verbose
+        self.adaptive = adaptive
+        self.adapt_filters = AdaptiveFilters(verbose=verbose) if adaptive else None
 
         self.signal_mode = profile.get("signal_mode", "TREND_PULLBACK")
         self.balance_start = float(profile.get("balance_start", DEFAULT_BALANCE_START))
@@ -237,8 +467,6 @@ class BacktestEngine:
 
     def run(self) -> BacktestSummary:
         """Execute the full backtest. Returns BacktestSummary."""
-        # Use only the first symbol in the list for simplicity
-        # (multi-symbol would be done in runner.py by iterating per-symbol)
         primary_symbol = self._tradeable[0]
 
         if self.verbose:
@@ -249,7 +477,6 @@ class BacktestEngine:
             logging.warning("backtest_no_data: %s %s", self.profile_id, primary_symbol)
             return self._build_summary(primary_symbol)
 
-        # Add technical indicators
         stock_df = _prepare_df_with_indicators(stock_df)
         if stock_df is None or stock_df.empty:
             return self._build_summary(primary_symbol)
@@ -257,12 +484,80 @@ class BacktestEngine:
         if self.verbose:
             print(f"  Got {len(stock_df)} bars. Starting backtest...")
 
-        # All bars as list for fast iteration
         all_bars = list(stock_df.iterrows())
         total_bars = len(all_bars)
 
-        # State
-        run_number = 0
+        # In adaptive replay mode: each run replays ALL data from the start
+        # with progressively better filters. Runs continue until:
+        # - max_runs is hit, or
+        # - the filters converge (no changes for 2 consecutive runs)
+        if self.adaptive:
+            max_adaptive_runs = self.max_runs if self.max_runs > 0 else 10
+            no_change_count = 0
+            for run_number in range(1, max_adaptive_runs + 1):
+                run_result = self._execute_single_run(
+                    run_number, primary_symbol, stock_df, all_bars, total_bars
+                )
+                # Learn from completed run
+                if self.adapt_filters is not None and run_result["trades"]:
+                    trade_dicts = [
+                        {
+                            "entry_hour": t.entry_hour,
+                            "entry_minute": t.entry_minute,
+                            "day_of_week": t.day_of_week,
+                            "direction": t.direction,
+                            "regime": t.regime,
+                            "confidence": t.confidence,
+                            "holding_seconds": t.holding_seconds,
+                            "pnl": t.pnl,
+                            "realized_pnl_dollars": t.pnl,
+                            "pnl_pct": t.pnl_pct,
+                            "exit_reason": t.exit_reason,
+                        }
+                        for t in run_result["trades"]
+                    ]
+                    run_wr = sum(1 for t in run_result["trades"] if t.pnl > 0) / len(run_result["trades"])
+                    adapt_result = self.adapt_filters.update(
+                        trade_dicts,
+                        run_outcome=run_result["outcome"],
+                        run_wr=run_wr,
+                        run_peak=run_result["peak_balance"],
+                        run_number=run_number,
+                        replay_mode=True,
+                    )
+                    if not adapt_result.get("changes"):
+                        no_change_count += 1
+                    else:
+                        no_change_count = 0
+                    # Stop if filters converged (no changes for 2 runs)
+                    if no_change_count >= 2 and run_number >= 3:
+                        if self.verbose:
+                            print(f"  [ADAPT] Filters converged after {run_number} runs.")
+                        break
+
+            if self.verbose:
+                total_trades_all = sum(len(r.trades) for r in self.runs)
+                total_wins = sum(r.wins for r in self.runs)
+                print(f"  [{self.profile_id}] Backtest complete: {len(self.runs)} runs, {total_trades_all} total trades")
+                if total_trades_all > 0:
+                    print(f"    Overall win rate: {total_wins/total_trades_all*100:.1f}%")
+            return self._build_summary(primary_symbol)
+
+        # Non-adaptive: single continuous run (original behavior)
+        run_number = 1
+        run_result = self._execute_single_run(1, primary_symbol, stock_df, all_bars, total_bars)
+
+        if self.verbose:
+            total_trades_all = sum(len(r.trades) for r in self.runs)
+            total_wins = sum(r.wins for r in self.runs)
+            print(f"  [{self.profile_id}] Backtest complete: {len(self.runs)} runs, {total_trades_all} total trades")
+            if total_trades_all > 0:
+                print(f"    Overall win rate: {total_wins/total_trades_all*100:.1f}%")
+        return self._build_summary(primary_symbol)
+
+    def _execute_single_run(self, run_number: int, primary_symbol: str,
+                            stock_df: pd.DataFrame, all_bars: list, total_bars: int) -> dict:
+        """Execute a single run through the data. Returns dict with run metrics."""
         balance = self.balance_start
         peak_balance = self.balance_start
         open_trade: Optional[_OpenTrade] = None
@@ -272,9 +567,6 @@ class BacktestEngine:
         target_hit_date: Optional[str] = None
         daily_trades = 0
         last_trade_date: Optional[date] = None
-        run_start_bar_idx = 0
-
-        run_number += 1
         run_start_ts = all_bars[0][0] if all_bars else None
 
         for bar_idx in range(total_bars):
@@ -340,6 +632,13 @@ class BacktestEngine:
                 else:
                     elapsed_seconds = elapsed.total_seconds()
 
+                # Apply adaptive max_hold override
+                if self.adapt_filters and self.adapt_filters.max_hold_seconds > 0:
+                    trade_dict["hold_max_seconds"] = min(
+                        trade_dict.get("hold_max_seconds", 86400),
+                        self.adapt_filters.max_hold_seconds,
+                    )
+
                 should_exit, exit_reason, exit_price = check_exit_conditions(
                     trade_dict,
                     self.profile,
@@ -356,9 +655,16 @@ class BacktestEngine:
                 if should_exit and exit_reason != "still_open":
                     # Apply exit slippage (worse price on exit)
                     actual_exit_price = exit_price * (1 - EXIT_SLIPPAGE)
-                    pnl = (actual_exit_price - open_trade.entry_price) * open_trade.qty * 100
-                    balance_after = balance + pnl
+                    # Return full exit proceeds to balance (notional was deducted on entry)
+                    exit_proceeds = actual_exit_price * open_trade.qty * 100
+                    entry_notional = open_trade.entry_price * open_trade.qty * 100
+                    pnl = exit_proceeds - entry_notional
+                    balance_after = balance + exit_proceeds
                     pnl_pct = (actual_exit_price - open_trade.entry_price) / open_trade.entry_price
+
+                    # Parse entry time for context
+                    _entry_dt = datetime.fromisoformat(open_trade.entry_time)
+                    _holding_secs = int(elapsed_seconds)
 
                     bt_trade = BacktestTrade(
                         run_number=run_number,
@@ -378,6 +684,13 @@ class BacktestEngine:
                         balance_after=round(balance_after, 2),
                         exit_reason=exit_reason,
                         signal_mode=self.signal_mode,
+                        regime=open_trade.regime,
+                        entry_hour=_entry_dt.hour,
+                        entry_minute=_entry_dt.minute,
+                        day_of_week=_entry_dt.weekday(),
+                        day_of_week_name=_entry_dt.strftime("%A"),
+                        confidence=open_trade.confidence,
+                        holding_seconds=_holding_secs,
                     )
                     run_trades.append(bt_trade)
                     equity_curve.append({
@@ -398,14 +711,13 @@ class BacktestEngine:
                         hit_target = True
                         target_hit_date = str(current_date)
                         if self.verbose:
-                            print(f"  [{self.profile_id}] Run #{run_number}: TARGET HIT ${balance:.0f} on {current_date}")
+                            print(f"  [{self.profile_id}] Run #{run_number}: TARGET HIT ${balance:.0f} on {current_date} after {len(run_trades)} trades")
 
                     # Check death
                     if balance <= self.death_threshold:
                         if self.verbose:
-                            print(f"  [{self.profile_id}] Run #{run_number}: BLOWN ${balance:.2f} after {len(run_trades)} trades")
+                            print(f"  [{self.profile_id}] Run #{run_number}: BLOWN ${balance:.2f} after {len(run_trades)} trades (peak ${peak_balance:.0f})")
 
-                        # Finalize this run
                         self._finalize_run(
                             run_number=run_number,
                             symbol=primary_symbol,
@@ -419,22 +731,11 @@ class BacktestEngine:
                             start_ts=run_start_ts,
                             end_ts=ts,
                         )
-
-                        # Reset for next run if max_runs not exceeded
-                        run_number += 1
-                        if run_number > self.max_runs:
-                            break
-
-                        balance = self.balance_start
-                        peak_balance = self.balance_start
-                        run_trades = []
-                        equity_curve = []
-                        hit_target = False
-                        target_hit_date = None
-                        run_start_ts = ts
-                        daily_trades = 0
-                        open_trade = None
-                        continue
+                        return {
+                            "outcome": "BLOWN", "trades": run_trades,
+                            "peak_balance": peak_balance, "final_balance": balance,
+                            "hit_target": hit_target,
+                        }
 
                     continue  # Done with this bar (trade was closed)
 
@@ -477,6 +778,19 @@ class BacktestEngine:
             if underlying_price <= 0:
                 underlying_price = close_price
 
+            # ── Adaptive filter gate ──────────────────────────────────────
+            if self.adapt_filters is not None:
+                signal_confidence = float(meta.get("confidence", 0)) if isinstance(meta, dict) else 0.0
+                _adapt_skip = self.adapt_filters.should_skip(
+                    entry_hour=bar_time.hour,
+                    day_of_week=current_date.weekday() if current_date else 0,
+                    direction=direction,
+                    regime=regime,
+                    confidence=signal_confidence,
+                )
+                if _adapt_skip:
+                    continue
+
             # Select expiry
             trade_date = current_date
             dte_min = int(self.profile.get("dte_min", 0))
@@ -507,10 +821,20 @@ class BacktestEngine:
             # Apply entry slippage (pay more on entry)
             fill_price = entry_opt_price * (1 + ENTRY_SLIPPAGE)
 
-            # Position sizing
+            # Position sizing (with adaptive multiplier)
             qty, risk_dollars, block_reason = _position_size(balance, fill_price, self.profile)
             if block_reason or qty <= 0:
                 continue
+
+            # Apply adaptive sizing multiplier
+            if self.adapt_filters is not None:
+                size_mult = self.adapt_filters.get_sizing_multiplier(
+                    entry_hour=bar_time.hour,
+                    day_of_week=current_date.weekday() if current_date else 0,
+                )
+                # Scale qty by multiplier (min 1, max 3x original)
+                adjusted_qty = max(1, min(qty * 3, round(qty * size_mult)))
+                qty = adjusted_qty
 
             # Reserve notional (deduct from balance)
             notional = fill_price * qty * 100
@@ -521,6 +845,8 @@ class BacktestEngine:
 
             # Record trade open
             trade_id = str(uuid.uuid4())[:8]
+            signal_confidence = float(meta.get("confidence", 0)) if isinstance(meta, dict) else 0.0
+
             open_trade = _OpenTrade(
                 trade_id=trade_id,
                 entry_time=str(ts),
@@ -535,6 +861,8 @@ class BacktestEngine:
                 hold_max_seconds=float(self.profile.get("hold_max_seconds", 3600)),
                 balance_before=balance + notional,  # balance BEFORE deducting notional
                 peak_price=fill_price,
+                regime=regime,
+                confidence=signal_confidence,
             )
             daily_trades += 1
 
@@ -549,8 +877,10 @@ class BacktestEngine:
             if last_opt_price is None or last_opt_price <= 0:
                 last_opt_price = open_trade.entry_price * 0.80
             actual_exit = last_opt_price * (1 - EXIT_SLIPPAGE)
-            pnl = (actual_exit - open_trade.entry_price) * open_trade.qty * 100
-            balance_after = balance + pnl
+            exit_proceeds = actual_exit * open_trade.qty * 100
+            entry_notional = open_trade.entry_price * open_trade.qty * 100
+            pnl = exit_proceeds - entry_notional
+            balance_after = balance + exit_proceeds
 
             bt_trade = BacktestTrade(
                 run_number=run_number,
@@ -576,31 +906,31 @@ class BacktestEngine:
             if balance > peak_balance:
                 peak_balance = balance
 
-        # Finalize last run
-        if run_trades or run_number == 1:
-            last_ts_val = all_bars[-1][0] if all_bars else None
-            self._finalize_run(
-                run_number=run_number,
-                symbol=primary_symbol,
-                balance=balance,
-                peak_balance=peak_balance,
-                outcome="DATA_EXHAUSTED",
-                hit_target=hit_target,
-                target_hit_date=target_hit_date,
-                trades=run_trades,
-                equity_curve=equity_curve,
-                start_ts=run_start_ts,
-                end_ts=last_ts_val,
-            )
+        # Finalize run (data exhausted)
+        last_ts_val = all_bars[-1][0] if all_bars else None
+        outcome = "TARGET_HIT" if hit_target else "DATA_EXHAUSTED"
+        self._finalize_run(
+            run_number=run_number,
+            symbol=primary_symbol,
+            balance=balance,
+            peak_balance=peak_balance,
+            outcome=outcome,
+            hit_target=hit_target,
+            target_hit_date=target_hit_date,
+            trades=run_trades,
+            equity_curve=equity_curve,
+            start_ts=run_start_ts,
+            end_ts=last_ts_val,
+        )
 
         if self.verbose:
-            total_trades_all = sum(len(r.trades) for r in self.runs)
-            total_wins = sum(r.wins for r in self.runs)
-            print(f"  [{self.profile_id}] Backtest complete: {len(self.runs)} runs, {total_trades_all} total trades")
-            if total_trades_all > 0:
-                print(f"    Overall win rate: {total_wins/total_trades_all*100:.1f}%")
+            print(f"  [{self.profile_id}] Run #{run_number}: {outcome} ${balance:.0f} (peak ${peak_balance:.0f}) after {len(run_trades)} trades")
 
-        return self._build_summary(primary_symbol)
+        return {
+            "outcome": outcome, "trades": run_trades,
+            "peak_balance": peak_balance, "final_balance": balance,
+            "hit_target": hit_target,
+        }
 
     def _get_or_fetch_option_bars(self, contract: str, date_str: str) -> Optional[pd.DataFrame]:
         """Get option bars from cache or fetch from Alpaca."""
@@ -716,12 +1046,20 @@ class BacktestEngine:
                 "entry_price": t.entry_price,
                 "exit_price": t.exit_price,
                 "qty": t.qty,
+                "pnl": t.pnl,
                 "realized_pnl_dollars": t.pnl,
                 "pnl_pct": t.pnl_pct,
                 "balance_before": t.balance_before,
                 "balance_after_trade": t.balance_after,
                 "exit_reason": t.exit_reason,
                 "signal_mode": t.signal_mode,
+                "regime": t.regime,
+                "entry_hour": t.entry_hour,
+                "entry_minute": t.entry_minute,
+                "day_of_week": t.day_of_week,
+                "day_of_week_name": t.day_of_week_name,
+                "confidence": t.confidence,
+                "holding_seconds": t.holding_seconds,
             }
             for t in trades
         ]

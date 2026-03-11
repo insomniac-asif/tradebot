@@ -22,6 +22,14 @@ class BacktestTrade:
     balance_after: float
     exit_reason: str
     signal_mode: str
+    # Context fields for optimizer
+    regime: str = ""
+    entry_hour: int = 0
+    entry_minute: int = 0
+    day_of_week: int = 0       # 0=Mon, 4=Fri
+    day_of_week_name: str = ""
+    confidence: float = 0.0
+    holding_seconds: int = 0
 
 
 @dataclass

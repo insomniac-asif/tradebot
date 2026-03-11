@@ -3237,6 +3237,15 @@ function renderNarrative(narr) {
 let _backtestCache = null;  // cached dashboard_data.json response
 let _btEquityChart = null;  // ApexCharts equity curve instance
 let _btWinRateChart = null; // ApexCharts backtest win rate instance
+let _btSelectedRun = null;  // currently selected run number
+let _btCurrentEntry = null; // current sim backtest entry
+
+const BT_RUN_COLORS = [
+  '#4f8ef7','#f7794f','#4fe88a','#e84fe8','#f7d94f',
+  '#4fd8f7','#f74f6e','#8ef74f','#c74ff7','#f7a44f',
+  '#4ff7c7','#f74faf','#7a9ef7','#f7e04f','#4fb8f7',
+  '#d94f4f','#4ff79e','#b44ff7','#f7804f','#4ff7f7',
+];
 
 async function fetchBacktestData() {
   try {
@@ -3335,6 +3344,9 @@ async function renderDrawerBacktestTab(simId) {
     return;
   }
 
+  _btCurrentEntry = entry;
+  _btSelectedRun = null;
+
   const s = entry.summary || {};
   const runs = s.runs || [];
   const blown = s.blown_count || 0;
@@ -3345,6 +3357,14 @@ async function renderDrawerBacktestTab(simId) {
   const pf = runs.length ? (runs.reduce((a, r) => a + (r.profit_factor || 0), 0) / runs.length).toFixed(2) : '—';
 
   const wrClass = parseFloat(wr) >= 50 ? 'var(--win-text)' : 'var(--loss-text)';
+
+  // Build run pills
+  const runPills = runs.map((r, i) => {
+    const c = BT_RUN_COLORS[i % BT_RUN_COLORS.length];
+    const outcome = r.outcome === 'BLOWN' ? '💀' : r.hit_target ? '⭐' : '✓';
+    const rWr = ((r.win_rate || 0) * 100).toFixed(0);
+    return `<button class="bt-run-pill" data-run="${r.run_number}" style="border-color:${c};color:${c}" onclick="selectBtRun(${r.run_number})">#${r.run_number} ${outcome} ${rWr}%</button>`;
+  }).join('');
 
   panel.innerHTML = `
     <div style="padding:12px 16px">
@@ -3358,10 +3378,24 @@ async function renderDrawerBacktestTab(simId) {
         <div class="stat-item"><div class="stat-label">Avg Trades/Run</div><div class="stat-value">${avgTrades}</div></div>
         <div class="stat-item"><div class="stat-label">Avg Prof Factor</div><div class="stat-value">${pf}</div></div>
       </div>
-      <div class="session-label" style="padding:0 0 6px 2px;margin-top:12px">WIN RATE PROGRESSION (BACKTEST RUNS)</div>
+
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:12px">RUNS <span style="font-weight:400;color:#888">(click to view trades)</span></div>
+      <div id="bt-run-pills" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px">${runPills}</div>
+
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:4px">WIN RATE PROGRESSION</div>
       <div class="drawer-chart-wrap"><div id="bt-winrate-chart"></div></div>
       <div class="session-label" style="padding:0 0 6px 2px;margin-top:16px">EQUITY CURVES</div>
       <div class="drawer-chart-wrap" style="height:200px"><div id="bt-equity-chart"></div></div>
+
+      <div id="bt-run-detail" style="display:none;margin-top:16px">
+        <div id="bt-run-stats"></div>
+        <div id="bt-run-trades" style="margin-top:8px;max-height:400px;overflow-y:auto"></div>
+      </div>
+
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:20px;color:#f7d94f">STRATEGY OPTIMIZER</div>
+      <div id="bt-optimizer" style="font-size:11px;color:#aaa;padding:4px 0">
+        <button class="bt-run-pill" style="border-color:#f7d94f;color:#f7d94f" onclick="loadOptimizer('${simId}')">Analyze Trades</button>
+      </div>
     </div>
   `;
 
@@ -3385,21 +3419,21 @@ function renderBtWinRateChart(winRateChart) {
     return;
   }
 
-  const hasMultipleRuns = validRuns.length > 1;
   const maxTrades = Math.max(...validRuns.map(r => r.points.length));
 
   const series = validRuns.map(run => ({
-    name: run.is_current ? 'Last Run' : `Run #${run.run_number}`,
+    name: `Run #${run.run_number}`,
     data: run.points.map(p => ({ x: p.trade_num, y: p.win_rate })),
   }));
 
-  const colors = validRuns.map(run => run.is_current ? '#4f8ef7' : 'rgba(79,142,247,0.25)');
-  const strokeWidths = validRuns.map(run => run.is_current ? 2.5 : 1.0);
+  const colors = validRuns.map((_, i) => BT_RUN_COLORS[i % BT_RUN_COLORS.length]);
+  const strokeWidths = validRuns.map(() => 2);
 
   _btWinRateChart = new ApexCharts(el, {
     chart: {
-      type: 'line', height: 160, background: 'transparent',
+      type: 'line', height: 180, background: 'transparent',
       toolbar: { show: false }, animations: { enabled: false }, foreColor: '#888',
+      events: { legendClick: (ctx, idx) => { if (validRuns[idx]) selectBtRun(validRuns[idx].run_number); } },
     },
     series,
     stroke: { curve: 'smooth', width: strokeWidths },
@@ -3418,9 +3452,9 @@ function renderBtWinRateChart(winRateChart) {
     tooltip: {
       theme: 'light',
       x: { formatter: v => 'Trade #' + Math.round(v) },
-      y: { formatter: (v, { seriesIndex }) => `Run #${validRuns[seriesIndex].run_number} WR: ${(v||0).toFixed(1)}%` },
+      y: { formatter: (v, { seriesIndex }) => `Run #${validRuns[seriesIndex].run_number}: ${(v||0).toFixed(1)}%` },
     },
-    legend: { show: hasMultipleRuns && validRuns.length <= 10, position: 'top', horizontalAlign: 'right', fontSize: '9px', labels: { colors: '#888' } },
+    legend: { show: validRuns.length <= 16, position: 'top', horizontalAlign: 'right', fontSize: '9px', labels: { colors: '#888' } },
     dataLabels: { enabled: false },
     markers: { size: maxTrades <= 30 ? 3 : 0, hover: { size: 5 } },
   });
@@ -3437,7 +3471,6 @@ function renderEquityCurveChart(equityCurves, containerId) {
     return;
   }
 
-  // Group by run_number
   const byRun = {};
   equityCurves.forEach(pt => {
     const rn = pt.run_number || 1;
@@ -3446,24 +3479,24 @@ function renderEquityCurveChart(equityCurves, containerId) {
   });
 
   const runNums = Object.keys(byRun).map(Number).sort((a, b) => a - b);
-  const lastRun = runNums[runNums.length - 1];
 
   const series = runNums.map(rn => ({
-    name: rn === lastRun ? 'Last Run' : `Run #${rn}`,
+    name: `Run #${rn}`,
     data: byRun[rn].map((pt, i) => ({ x: i + 1, y: pt.balance })),
   }));
 
-  const colors = runNums.map(rn => rn === lastRun ? '#4f8ef7' : 'rgba(79,142,247,0.20)');
-  const strokeWidths = runNums.map(rn => rn === lastRun ? 2 : 1);
+  const colors = runNums.map((_, i) => BT_RUN_COLORS[i % BT_RUN_COLORS.length]);
+  const strokeWidths = runNums.map(() => 2);
 
   _btEquityChart = new ApexCharts(el, {
     chart: {
-      type: 'area', height: 190, background: 'transparent',
+      type: 'area', height: 200, background: 'transparent',
       toolbar: { show: false }, animations: { enabled: false }, foreColor: '#888',
+      events: { legendClick: (ctx, idx) => { if (runNums[idx]) selectBtRun(runNums[idx]); } },
     },
     series,
     stroke: { curve: 'smooth', width: strokeWidths },
-    fill: { type: 'solid', opacity: runNums.map(rn => rn === lastRun ? 0.08 : 0) },
+    fill: { type: 'solid', opacity: runNums.map(() => 0.04) },
     colors,
     xaxis: {
       type: 'numeric',
@@ -3476,14 +3509,271 @@ function renderEquityCurveChart(equityCurves, containerId) {
         formatter: v => '$' + (v >= 1000 ? (v/1000).toFixed(1) + 'k' : Math.round(v)),
       },
     },
+    annotations: {
+      yaxis: [
+        { y: 500, borderColor: '#4f8ef7', strokeDashArray: 3, label: { text: '$500', style: { fontSize: '8px', color: '#4f8ef7', background: 'transparent' } } },
+        { y: 50, borderColor: '#e84f4f', strokeDashArray: 3, label: { text: '$50 death', style: { fontSize: '8px', color: '#e84f4f', background: 'transparent' } } },
+      ],
+    },
     grid: { borderColor: 'rgba(0,0,0,0.08)', strokeDashArray: 4 },
     tooltip: {
       theme: 'light',
       y: { formatter: v => '$' + (v || 0).toFixed(2) },
     },
-    legend: { show: runNums.length > 1 && runNums.length <= 8, position: 'top', fontSize: '9px', labels: { colors: '#888' } },
+    legend: { show: runNums.length <= 16, position: 'top', fontSize: '9px', labels: { colors: '#888' } },
     dataLabels: { enabled: false },
     markers: { size: 0 },
   });
   _btEquityChart.render();
+}
+
+/* ── Run selection + trade table ── */
+
+function selectBtRun(runNum) {
+  _btSelectedRun = runNum;
+  const entry = _btCurrentEntry;
+  if (!entry) return;
+
+  // Highlight selected pill
+  document.querySelectorAll('.bt-run-pill').forEach(pill => {
+    pill.classList.toggle('bt-run-pill-active', +pill.dataset.run === runNum);
+  });
+
+  const s = entry.summary || {};
+  const run = (s.runs || []).find(r => r.run_number === runNum);
+  if (!run) return;
+
+  const detail = document.getElementById('bt-run-detail');
+  if (detail) detail.style.display = 'block';
+
+  const runColor = BT_RUN_COLORS[(runNum - 1) % BT_RUN_COLORS.length];
+  const runWr = ((run.win_rate || 0) * 100).toFixed(1);
+  const wrColor = parseFloat(runWr) >= 50 ? 'var(--win-text)' : 'var(--loss-text)';
+  const outcome = run.outcome === 'BLOWN' ? '<span style="color:var(--loss-text)">BLOWN</span>' : run.hit_target ? '<span style="color:var(--win-text)">HIT $10K</span>' : '<span style="color:#888">DATA EXHAUSTED</span>';
+
+  const statsEl = document.getElementById('bt-run-stats');
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <div class="session-label" style="color:${runColor}">RUN #${runNum} · ${run.start_date} → ${run.end_date} · ${outcome}</div>
+      <div class="stat-grid" style="margin:6px 0 8px">
+        <div class="stat-item"><div class="stat-label">Trades</div><div class="stat-value">${run.total_trades}</div></div>
+        <div class="stat-item"><div class="stat-label">Win Rate</div><div class="stat-value" style="color:${wrColor}">${runWr}%</div></div>
+        <div class="stat-item"><div class="stat-label">Final</div><div class="stat-value">$${(run.final_balance||0).toFixed(0)}</div></div>
+        <div class="stat-item"><div class="stat-label">Peak</div><div class="stat-value">$${(run.peak_balance||0).toFixed(0)}</div></div>
+        <div class="stat-item"><div class="stat-label">PnL</div><div class="stat-value" style="color:${(run.total_pnl||0)>=0?'var(--win-text)':'var(--loss-text)'}">$${(run.total_pnl||0).toFixed(2)}</div></div>
+        <div class="stat-item"><div class="stat-label">Prof Factor</div><div class="stat-value">${(run.profit_factor||0).toFixed(2)}</div></div>
+      </div>
+    `;
+  }
+
+  // Build trade table
+  const trades = run.trades || [];
+  const tradesEl = document.getElementById('bt-run-trades');
+  if (!tradesEl) return;
+
+  if (!trades.length) {
+    tradesEl.innerHTML = '<div style="color:#888;font-size:11px;padding:8px 0">No trades in this run</div>';
+    return;
+  }
+
+  let rows = trades.map(t => {
+    const pnl = t.realized_pnl_dollars || t.pnl || 0;
+    const pnlPct = ((t.pnl_pct || 0) * 100).toFixed(1);
+    const isWin = pnl > 0;
+    const pnlColor = isWin ? '#4caf50' : '#f44336';
+    const pnlBg = isWin ? 'rgba(76,175,80,0.08)' : 'rgba(244,67,54,0.08)';
+    const dir = (t.direction || '').toUpperCase();
+    const callPut = dir.includes('BULL') ? 'CALL' : 'PUT';
+    const cpColor = callPut === 'CALL' ? '#4caf50' : '#f44336';
+    const grade = _gradeTrade(t);
+
+    // Parse contract for strike & expiry: e.g. SPY240712P00549000
+    const contract = t.option_symbol || t.contract || '';
+    let strike = '—', expiry = '—', symbol = t.symbol || 'SPY';
+    if (contract.length >= 15) {
+      const base = contract.replace(/^[A-Z]+/, '');
+      if (base.length >= 15) {
+        const yy = base.slice(0,2), mm = base.slice(2,4), dd = base.slice(4,6);
+        expiry = `20${yy}-${mm}-${dd}`;
+        const strikeRaw = parseInt(base.slice(7,15), 10);
+        strike = '$' + (strikeRaw / 1000).toFixed(0);
+      }
+    }
+
+    // Date/time with year
+    const entryDt = t.entry_time || t.date || '';
+    const exitDt = t.exit_time || '';
+    const entryStr = entryDt ? entryDt.slice(0, 16).replace('T', ' ') : '—';
+    const exitStr = exitDt ? exitDt.slice(11, 16) : '—';
+
+    // Time held
+    let held = '—';
+    if (t.holding_seconds > 0) {
+      const m = Math.floor(t.holding_seconds / 60);
+      const s = t.holding_seconds % 60;
+      held = m > 0 ? `${m}m ${s}s` : `${s}s`;
+    } else if (entryDt && exitDt) {
+      const secs = Math.max(0, Math.round((new Date(exitDt) - new Date(entryDt)) / 1000));
+      const m = Math.floor(secs / 60);
+      held = m > 0 ? `${m}m` : `${secs}s`;
+    }
+
+    return `<tr style="background:${pnlBg}">
+      <td style="color:#888">${t.trade_num}</td>
+      <td style="font-size:10px;white-space:nowrap">${entryStr}</td>
+      <td>${symbol}</td>
+      <td style="color:${cpColor};font-weight:bold">${callPut}</td>
+      <td>${strike}</td>
+      <td style="font-size:10px">${expiry}</td>
+      <td>$${(t.entry_price||0).toFixed(2)}</td>
+      <td>$${(t.exit_price||0).toFixed(2)}</td>
+      <td style="color:${pnlColor};font-weight:bold">$${pnl.toFixed(2)}</td>
+      <td style="color:${pnlColor}">${pnlPct}%</td>
+      <td style="font-size:10px">${held}</td>
+      <td style="color:${grade.color};font-weight:bold">${grade.letter}</td>
+    </tr>`;
+  }).join('');
+
+  tradesEl.innerHTML = `
+    <table class="bt-trades-table">
+      <thead><tr>
+        <th>#</th><th>Date/Time</th><th>Sym</th><th>Type</th><th>Strike</th><th>Expiry</th>
+        <th>Entry</th><th>Exit</th><th>PnL</th><th>PnL%</th><th>Held</th><th>Grade</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function _gradeTrade(t) {
+  const pnlPct = (t.pnl_pct || 0) * 100;
+  const reason = (t.exit_reason || '').toLowerCase();
+
+  // Grade based on PnL% and exit quality
+  if (pnlPct >= 80) return { letter: 'A+', color: '#00e676' };
+  if (pnlPct >= 40) return { letter: 'A', color: '#4caf50' };
+  if (pnlPct >= 15 && (reason.includes('profit') || reason.includes('tp')))
+    return { letter: 'B+', color: '#66bb6a' };
+  if (pnlPct >= 5)  return { letter: 'B', color: '#8bc34a' };
+  if (pnlPct >= 0)  return { letter: 'C', color: '#ffc107' };
+  if (pnlPct >= -10) return { letter: 'C-', color: '#ff9800' };
+  if (pnlPct >= -25) return { letter: 'D', color: '#ff5722' };
+  if (pnlPct >= -50) return { letter: 'D-', color: '#f44336' };
+  return { letter: 'F', color: '#d32f2f' };
+}
+
+/* ── Strategy Optimizer ── */
+
+async function loadOptimizer(simId) {
+  const el = document.getElementById('bt-optimizer');
+  if (!el) return;
+  el.innerHTML = '<div style="color:#888;padding:8px 0">Analyzing trades...</div>';
+
+  try {
+    const res = await fetch(`/api/backtest/optimize/${simId}`);
+    const data = await res.json();
+    if (data.error) {
+      el.innerHTML = `<div style="color:var(--loss-text)">${data.error}</div>`;
+      return;
+    }
+    renderOptimizer(el, data);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--loss-text)">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderOptimizer(el, data) {
+  const wr = (data.overall_win_rate * 100).toFixed(1);
+  const ar = (data.overall_a_rate * 100).toFixed(1);
+  const fr = (data.overall_f_rate * 100).toFixed(1);
+
+  // Build dimension bar charts
+  function dimBars(dims, title) {
+    if (!dims || !dims.length) return '';
+    let rows = dims.filter(d => d.total >= 3).map(d => {
+      const wrPct = (d.win_rate * 100).toFixed(0);
+      const arPct = (d.a_rate * 100).toFixed(0);
+      const frPct = (d.f_rate * 100).toFixed(0);
+      const barW = Math.round(d.win_rate * 100);
+      const wrColor = d.win_rate >= 0.5 ? 'var(--win-text)' : d.win_rate < 0.25 ? 'var(--loss-text)' : '#ffc107';
+      const pnlColor = d.total_pnl >= 0 ? 'var(--win-text)' : 'var(--loss-text)';
+      return `<tr>
+        <td style="white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis">${d.label}</td>
+        <td style="text-align:right">${d.total}</td>
+        <td style="width:100px">
+          <div style="background:rgba(255,255,255,0.05);border-radius:2px;height:12px;position:relative">
+            <div style="background:${wrColor};height:100%;width:${barW}%;border-radius:2px;opacity:0.7"></div>
+          </div>
+        </td>
+        <td style="color:${wrColor};text-align:right;font-weight:600">${wrPct}%</td>
+        <td style="color:#4caf50;text-align:right">${arPct}%</td>
+        <td style="color:#d32f2f;text-align:right">${frPct}%</td>
+        <td style="color:${pnlColor};text-align:right">$${d.total_pnl.toFixed(0)}</td>
+      </tr>`;
+    }).join('');
+
+    return `
+      <div style="margin-top:10px">
+        <div style="font-weight:600;color:#f7d94f;font-size:10px;text-transform:uppercase;margin-bottom:4px">${title}</div>
+        <table class="bt-trades-table">
+          <thead><tr><th>Label</th><th>Trades</th><th>Win Rate</th><th>WR%</th><th>A%</th><th>F%</th><th>PnL</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // Recommendations
+  const recs = (data.recommendations || []).filter(r => r).map(r => {
+    if (r.startsWith('═══')) return `<div style="color:#f7d94f;font-weight:700;margin-top:8px">${r}</div>`;
+    if (r.startsWith('  →')) return `<div style="color:#4f8ef7;padding-left:12px">${r}</div>`;
+    if (r.startsWith('  ')) return `<div style="padding-left:12px">${r}</div>`;
+    if (r.includes('BEST') || r.includes('strong')) return `<div style="color:var(--win-text)">${r}</div>`;
+    if (r.includes('WORST') || r.includes('Block') || r.includes('AVOID')) return `<div style="color:var(--loss-text)">${r}</div>`;
+    return `<div>${r}</div>`;
+  }).join('');
+
+  // A-trade profile
+  const ap = data.a_trade_profile || {};
+  let aProfileHtml = '';
+  if (ap.count) {
+    aProfileHtml = `
+      <div style="margin-top:12px;padding:10px;background:rgba(76,175,80,0.08);border:1px solid rgba(76,175,80,0.2);border-radius:6px">
+        <div style="color:#4caf50;font-weight:700;font-size:11px;margin-bottom:6px">A-TRADE DNA (${ap.count} trades, ${ap.pct_of_total}% of total)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:10px">
+          <div>Avg PnL: <b style="color:var(--win-text)">+${ap.avg_pnl_pct}%</b></div>
+          <div>Avg hold: <b>${ap.avg_holding_mins} min</b></div>
+          <div>Top hours: ${(ap.top_hours||[]).map(([h,c])=>`${h}:00 (${c}x)`).join(', ')}</div>
+          <div>Top days: ${(ap.top_days||[]).map(([d,c])=>`${d} (${c}x)`).join(', ')}</div>
+          <div>Direction: ${Object.entries(ap.direction_split||{}).map(([d,c])=>`${d}: ${c}`).join(', ')}</div>
+          <div>Top slots: ${(ap.top_time_slots||[]).map(([s,c])=>`${s} (${c}x)`).join(', ')}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  el.innerHTML = `
+    <div style="padding:4px 0">
+      <div class="stat-grid" style="margin:4px 0 8px">
+        <div class="stat-item"><div class="stat-label">Total Trades</div><div class="stat-value">${data.total_trades}</div></div>
+        <div class="stat-item"><div class="stat-label">Win Rate</div><div class="stat-value" style="color:${parseFloat(wr)>=50?'var(--win-text)':'var(--loss-text)'}">${wr}%</div></div>
+        <div class="stat-item"><div class="stat-label">A-Rate</div><div class="stat-value" style="color:#4caf50">${ar}%</div></div>
+        <div class="stat-item"><div class="stat-label">F-Rate</div><div class="stat-value" style="color:#d32f2f">${fr}%</div></div>
+      </div>
+
+      ${dimBars(data.by_time_slot, 'By Time Slot')}
+      ${dimBars(data.by_hour, 'By Hour')}
+      ${dimBars(data.by_day, 'By Day of Week')}
+      ${dimBars(data.by_direction, 'By Direction')}
+      ${dimBars(data.by_regime, 'By Regime')}
+      ${dimBars(data.by_exit_reason, 'By Exit Reason')}
+
+      ${aProfileHtml}
+
+      <div style="margin-top:14px;padding:10px;background:rgba(247,217,79,0.06);border:1px solid rgba(247,217,79,0.15);border-radius:6px">
+        <div style="color:#f7d94f;font-weight:700;font-size:11px;margin-bottom:6px">RECOMMENDATIONS</div>
+        <div style="font-size:10px;line-height:1.6">${recs || '<span style="color:#888">Not enough data for recommendations</span>'}</div>
+      </div>
+    </div>
+  `;
 }

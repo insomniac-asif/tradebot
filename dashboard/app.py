@@ -460,6 +460,19 @@ async def get_backtest_results_sim(sim_id: str):
     return {"error": f"No backtest data for {sim_id}"}
 
 
+@app.get("/api/backtest/optimize/{sim_id}")
+async def get_backtest_optimization(sim_id: str):
+    """Return optimizer analysis for a sim. Runs analysis on-the-fly from backtest data."""
+    try:
+        from backtest.optimizer import analyze_sim, result_to_dict
+        result = analyze_sim(sim_id.upper())
+        if not result:
+            return {"error": f"No backtest data to optimize for {sim_id}"}
+        return result_to_dict(result)
+    except Exception as e:
+        return {"error": f"Optimization failed: {e}"}
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

@@ -13,6 +13,14 @@ RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
+def _trade_to_dict(t) -> dict:
+    """Convert a BacktestTrade (dataclass or dict) to a plain dict with all fields."""
+    if isinstance(t, dict):
+        return t
+    from dataclasses import asdict
+    return asdict(t)
+
+
 def _summary_to_dict(summary: BacktestSummary) -> dict:
     """Convert BacktestSummary dataclass to a plain dict."""
     runs_out = []
@@ -45,7 +53,7 @@ def _summary_to_dict(summary: BacktestSummary) -> dict:
                 "max_drawdown_pct": r.max_drawdown_pct,
                 "max_drawdown_dollars": r.max_drawdown_dollars,
                 "days_active": r.days_active,
-                "trades": r.trades if hasattr(r, "trades") else [],
+                "trades": [_trade_to_dict(t) for t in (r.trades if hasattr(r, "trades") else [])],
                 "equity_curve": r.equity_curve if hasattr(r, "equity_curve") else [],
             })
 
