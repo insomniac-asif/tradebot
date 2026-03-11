@@ -312,8 +312,44 @@ html, body {
 /* Focused mode: hide all cards except the focused one */
 .symbol-charts-grid.sym-focused-mode .sym-chart-card { display: none; }
 .symbol-charts-grid.sym-focused-mode .sym-chart-card.sym-focused {
-  display: block;
+  display: flex;
+  flex-direction: column;
   grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  height: 100%;
+}
+.symbol-charts-grid.sym-focused-mode .sym-chart-card.sym-focused > [id^="sym-apex-"] {
+  flex: 1;
+  min-height: 0;
+}
+.symbol-charts-grid.sym-focused-mode {
+  height: 100%;
+}
+/* When focused, the live view fills the chalkboard */
+.chalkboard.chart-focused-mode {
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden;
+}
+.chalkboard.chart-focused-mode #chalk-live-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.chalkboard.chart-focused-mode .chalk-header {
+  flex-shrink: 0;
+}
+.chalkboard.chart-focused-mode .symbol-charts-grid {
+  flex: 1;
+  min-height: 0;
+}
+/* Hide trade view and announcements when chart is focused */
+.chalkboard.chart-focused-mode #chalk-trade-view {
+  display: none !important;
+}
+.chalkboard.chart-focused-mode #chalk-announce {
+  display: none;
 }
 .sym-focused .sym-card-name { font-size: 11px; }
 .sym-focused .sym-card-price { font-size: 12px; }
@@ -336,6 +372,44 @@ html, body {
   margin-left: 6px;
 }
 .sym-all-btn:hover { background: rgba(160,210,140,0.22); color: #ccffcc; }
+
+.sym-reset-zoom-btn {
+  background: rgba(100,180,255,0.12);
+  border: 1px solid rgba(100,180,255,0.3);
+  color: #99ccff;
+  font-family: var(--font-chalk);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  margin-left: 4px;
+}
+.sym-reset-zoom-btn:hover { background: rgba(100,180,255,0.22); color: #bbddff; }
+
+/* ApexCharts toolbar styling for chalkboard theme */
+.sym-chart-card .apexcharts-toolbar {
+  top: 2px !important;
+  right: 4px !important;
+  z-index: 5;
+}
+.sym-chart-card .apexcharts-toolbar > div {
+  background: rgba(0,0,0,0.4) !important;
+  border: 1px solid rgba(160,210,140,0.25) !important;
+  border-radius: 3px !important;
+  margin-left: 2px !important;
+}
+.sym-chart-card .apexcharts-toolbar > div:hover {
+  background: rgba(160,210,140,0.18) !important;
+}
+.sym-chart-card .apexcharts-toolbar svg {
+  fill: #88cc88 !important;
+}
+.sym-chart-card .apexcharts-toolbar > div.apexcharts-selected {
+  background: rgba(160,210,140,0.22) !important;
+}
 
 .sym-chart-loading {
   padding: 20px;
@@ -2664,15 +2738,24 @@ html, body {
     align-items: stretch;
   }
   #chalk-live-view {
-    flex: 0 0 60%;
+    flex: 1;
     min-width: 0;
-    border-right: 1px dashed rgba(160,210,140,0.2);
   }
+  /* Trade view only shown when a trade is selected (class added by JS) */
   #chalk-trade-view {
     flex: 0 0 40%;
     min-width: 0;
-    display: flex !important;
+    display: none;
     flex-direction: column;
+  }
+  #chalk-trade-view.trade-selected {
+    display: flex !important;
+    border-left: 1px dashed rgba(160,210,140,0.2);
+  }
+  /* When trade panel is showing, constrain live view to 60% */
+  .chalkboard:has(#chalk-trade-view.trade-selected) > #chalk-live-view {
+    flex: 0 0 60%;
+    border-right: 1px dashed rgba(160,210,140,0.2);
   }
   /* placeholder fills available space when no trade selected */
   .chalk-trade-placeholder {
@@ -2682,13 +2765,13 @@ html, body {
     flex: 1;
     min-height: 200px;
   }
-  #chalk-trade-content {
-    display: flex !important;
+  #chalk-trade-content:not(.hidden) {
+    display: flex;
     flex-direction: column;
     flex: 1;
     overflow-y: auto;
   }
-  .chalk-back-btn { display: none; }
+  .chalk-back-btn { display: inline-block; }
   /* announcement strip should not affect split layout */
   #chalk-announce {
     position: absolute;

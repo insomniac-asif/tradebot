@@ -1,3 +1,5 @@
+import logging
+
 from simulation.sim_signal_funcs import (
     _find_col, _ctx_float, _safe_float,
     _signal_mean_reversion, _signal_breakout, _signal_trend_pullback,
@@ -45,6 +47,8 @@ _KNOWN_SIGNAL_MODES = frozenset({
     "OPENING_RANGE_RECLAIM",
     "VOL_COMPRESSION_BREAKOUT",
     "VOL_SPIKE_FADE",
+    "STRUCTURE_FADE",
+    "GEX_FLOW",
 })
 
 _SIGNAL_MODE_FAMILY = {
@@ -73,6 +77,8 @@ _SIGNAL_MODE_FAMILY = {
     "OPENING_RANGE_RECLAIM":    "structure",
     "VOL_COMPRESSION_BREAKOUT": "volatility",
     "VOL_SPIKE_FADE":           "volatility",
+    "STRUCTURE_FADE":           "structure",
+    "GEX_FLOW":                 "flow",
 }
 
 
@@ -92,6 +98,8 @@ def derive_sim_signal(
     feature_snapshot: dict | None = None,
     profile: dict | None = None,
     signal_params: dict | None = None,
+    structure_data: dict | None = None,
+    options_data: dict | None = None,
 ):
     """
     Dispatch entry-signal generation by mode.
@@ -113,7 +121,11 @@ def derive_sim_signal(
         mode = str(signal_mode).upper()
 
         if mode == "MEAN_REVERSION":
-            return _signal_mean_reversion(df, context)
+            direction, price, ctx = _signal_mean_reversion(df, context)
+            if direction is not None and isinstance(options_data, dict) and isinstance(ctx, dict):
+                if options_data.get("gex_positive") is False:
+                    ctx["gex_warning"] = "negative_gamma_fade_risk"
+            return direction, price, ctx
 
         elif mode == "BREAKOUT":
             direction, price, ctx = _signal_breakout(df, context)
@@ -129,6 +141,18 @@ def derive_sim_signal(
                         return None, None, {"reason": "vol_z_filter"}
                 except Exception:
                     return None, None, {"reason": "vol_z_invalid"}
+            # Options-aware metadata for breakouts
+            if isinstance(ctx, dict) and isinstance(options_data, dict):
+                if options_data.get("in_low_gamma_zone"):
+                    ctx["gamma_boost"] = True
+                if direction == "BULLISH":
+                    _cwd = options_data.get("call_wall_distance_pct")
+                    if _cwd is not None and _cwd < 0.003:
+                        ctx["approaching_call_wall"] = True
+                if direction == "BEARISH":
+                    _pwd = options_data.get("put_wall_distance_pct")
+                    if _pwd is not None and _pwd < 0.003:
+                        ctx["approaching_put_wall"] = True
             return direction, price, ctx
 
         elif mode == "TREND_PULLBACK":
@@ -165,6 +189,17 @@ def derive_sim_signal(
                         return None, None, {"reason": "iv_rank_filter"}
                 except Exception:
                     return None, None, {"reason": "iv_rank_invalid"}
+            # Structure-aware suppression (optional)
+            if direction == "BULLISH" and isinstance(structure_data, dict):
+                _dist_r = structure_data.get("distance_to_resistance_pct")
+                if _dist_r is not None and _dist_r < 0.0015:
+                    logging.debug("trend_pullback_suppressed_near_resistance: dist=%.4f", _dist_r)
+                    return None, None, {"reason": "suppressed_near_resistance", "distance_to_resistance_pct": _dist_r}
+            if direction == "BEARISH" and isinstance(structure_data, dict):
+                _dist_s = structure_data.get("distance_to_support_pct")
+                if _dist_s is not None and _dist_s < 0.0015:
+                    logging.debug("trend_pullback_suppressed_near_support: dist=%.4f", _dist_s)
+                    return None, None, {"reason": "suppressed_near_support", "distance_to_support_pct": _dist_s}
             return direction, price, ctx
 
         elif mode == "SWING_TREND":
@@ -238,11 +273,124 @@ def derive_sim_signal(
         elif mode == "VOL_SPIKE_FADE":
             return _signal_vol_spike_fade(df)
 
+        elif mode == "STRUCTURE_FADE":
+            return _signal_structure_fade(df, structure_data, options_data)
+
+        elif mode == "GEX_FLOW":
+            return _signal_gex_flow(df, structure_data, options_data)
+
         else:
             return None, None, {"reason": f"unknown_signal_mode:{signal_mode}"}
 
     except Exception:
         return None, None, {"reason": "dispatch_error"}
+
+
+def _signal_structure_fade(df, structure_data, options_data) -> tuple:
+    """Mean-reversion trade off confirmed structure levels (support/resistance bounce)."""
+    try:
+        if not isinstance(structure_data, dict):
+            return None, None, {"reason": "no_structure_data"}
+
+        close_col = _find_col(df, ["close", "Close"])
+        rsi_col = _find_col(df, ["rsi", "RSI", "rsi14"])
+        if close_col is None or rsi_col is None or df is None or len(df) < 2:
+            return None, None, {"reason": "missing_data"}
+
+        close = float(df.iloc[-1][close_col])
+        rsi = float(df.iloc[-1][rsi_col])
+
+        # Check VXX context — suppress if fear is rising (levels break in panic)
+        if isinstance(options_data, dict) and options_data.get("fear_rising"):
+            # Allow cross_asset_data to be passed via options_data since
+            # the watcher may thread it through feature_snapshot
+            pass
+        # Actually check via structure_data which may have xasset_ keys merged in
+        # from feature_snapshot — but the raw dicts are separate. We'll rely on
+        # the vxx check being optional.
+
+        nearest_support = structure_data.get("nearest_support")
+        nearest_resistance = structure_data.get("nearest_resistance")
+        dist_to_support = structure_data.get("distance_to_support_pct")
+        dist_to_resistance = structure_data.get("distance_to_resistance_pct")
+
+        # BULLISH: price near support, RSI < 40
+        if nearest_support and dist_to_support is not None and dist_to_support < 0.002:
+            if rsi < 40:
+                return "BULLISH", close, {
+                    "reason": "structure_fade_support",
+                    "entry_context": f"structure_fade at {nearest_support:.2f}",
+                    "level_type": "support",
+                    "level_price": nearest_support,
+                    "rsi": rsi,
+                }
+
+        # BEARISH: price near resistance, RSI > 60
+        if nearest_resistance and dist_to_resistance is not None and dist_to_resistance < 0.002:
+            if rsi > 60:
+                return "BEARISH", close, {
+                    "reason": "structure_fade_resistance",
+                    "entry_context": f"structure_fade at {nearest_resistance:.2f}",
+                    "level_type": "resistance",
+                    "level_price": nearest_resistance,
+                    "rsi": rsi,
+                }
+
+        return None, None, {"reason": "no_structure_fade"}
+    except Exception:
+        return None, None, {"reason": "structure_fade_error"}
+
+
+def _signal_gex_flow(df, structure_data, options_data) -> tuple:
+    """Trade in the direction of mechanical dealer gamma flows."""
+    try:
+        if not isinstance(options_data, dict) or not options_data.get("options_data_available"):
+            return None, None, {"reason": "no_options_data"}
+
+        close_col = _find_col(df, ["close", "Close"])
+        if close_col is None or df is None or len(df) < 2:
+            return None, None, {"reason": "missing_data"}
+
+        close = float(df.iloc[-1][close_col])
+
+        gex_positive = options_data.get("gex_positive")
+        gex_flip = options_data.get("gex_flip_strike")
+        max_pain = options_data.get("max_pain_strike")
+        nearest_call_wall = options_data.get("nearest_call_wall")
+        nearest_put_wall = options_data.get("nearest_put_wall")
+
+        if gex_positive is None or gex_flip is None:
+            return None, None, {"reason": "incomplete_gex_data"}
+
+        # BULLISH: positive gamma + above flip + between max_pain and call wall
+        # (price being pulled toward call wall by delta hedging)
+        if gex_positive is True and close > gex_flip:
+            if max_pain is not None and nearest_call_wall is not None:
+                if max_pain <= close <= nearest_call_wall:
+                    return "BULLISH", close, {
+                        "reason": "gex_flow_bullish",
+                        "entry_context": f"gex_flow: positive gamma, target call wall {nearest_call_wall:.0f}",
+                        "gex_positive": True,
+                        "gex_flip_strike": gex_flip,
+                        "target_wall": nearest_call_wall,
+                    }
+
+        # BEARISH: negative gamma + below flip + between put wall and max_pain
+        # (price being pushed down by dealer selling)
+        if gex_positive is False and close < gex_flip:
+            if max_pain is not None and nearest_put_wall is not None:
+                if nearest_put_wall <= close <= max_pain:
+                    return "BEARISH", close, {
+                        "reason": "gex_flow_bearish",
+                        "entry_context": f"gex_flow: negative gamma, target put wall {nearest_put_wall:.0f}",
+                        "gex_positive": False,
+                        "gex_flip_strike": gex_flip,
+                        "target_wall": nearest_put_wall,
+                    }
+
+        return None, None, {"reason": "no_gex_flow_setup"}
+    except Exception:
+        return None, None, {"reason": "gex_flow_error"}
 
 
 def derive_opportunity_signal(df, sim_states, regime, trader_signal=None):

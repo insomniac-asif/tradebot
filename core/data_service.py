@@ -138,19 +138,25 @@ def _prepare_dataframe(df):
     except:
         df["atr"] = None
 
-    # VWAP SAFE (critical fix)
+    # VWAP SAFE (critical fix — ta.vwap can hang on bad data)
     try:
-        if len(df) > 10:
+        vwap_cols = [c for c in ["high", "low", "close", "volume"] if c in df.columns]
+        _df_clean = df.dropna(subset=vwap_cols) if len(vwap_cols) == 4 else df
+        if len(_df_clean) > 10 and len(vwap_cols) == 4:
             df["vwap"] = ta.vwap(
-                df["high"],
-                df["low"],
-                df["close"],
-                df["volume"]
+                _df_clean["high"],
+                _df_clean["low"],
+                _df_clean["close"],
+                _df_clean["volume"],
             )
         else:
             df["vwap"] = None
-    except:
-        df["vwap"] = None
+    except Exception:
+        try:
+            tp = (df["high"] + df["low"] + df["close"]) / 3
+            df["vwap"] = (tp * df["volume"]).cumsum() / df["volume"].cumsum()
+        except Exception:
+            df["vwap"] = None
 
     # Do NOT dropna() globally anymore
     # That was silently killing small datasets
@@ -432,6 +438,25 @@ def get_candle_data(symbol: str, start: "datetime", end: "datetime") -> list[dic
     except Exception as e:
         logging.warning("get_candle_data_alpaca_failed symbol=%s: %s", symbol, e)
         return []
+
+
+_CROSS_ASSET_SYMBOLS = ("SPY", "QQQ", "IWM", "VXX", "AAPL", "NVDA", "MSFT", "TSLA")
+
+
+def get_all_symbol_dataframes() -> dict:
+    """
+    Returns a dict of DataFrames for all tracked symbols.
+    Keys: "SPY", "QQQ", "IWM", "VXX", "AAPL", "NVDA", "MSFT", "TSLA"
+    Values: DataFrame with OHLCV + indicators, or None if unavailable.
+    """
+    result = {}
+    for sym in _CROSS_ASSET_SYMBOLS:
+        try:
+            df = get_symbol_dataframe(sym)
+            result[sym] = df if df is not None and len(df) > 0 else None
+        except Exception:
+            result[sym] = None
+    return result
 
 
 def startup_backfill_all():

@@ -363,6 +363,7 @@ async def _execute_paper_entry(
     ml_prediction, regime, time_of_day_bucket, signal_mode,
     entry_context, feature_snapshot, _trade_symbol,
     effective_profile, df, results,
+    structure_data=None, cross_asset_data=None, options_data=None,
 ):
     """Handle the paper execution path for a single sim/symbol combo.
 
@@ -472,6 +473,9 @@ async def _execute_paper_entry(
         feature_snapshot=feature_snapshot, underlying_price=underlying_price, df=df,
     )
     trade["entry_context"] = entry_context
+    trade["structure_at_entry"] = structure_data if isinstance(structure_data, dict) else {}
+    trade["cross_asset_at_entry"] = cross_asset_data if isinstance(cross_asset_data, dict) else {}
+    trade["options_at_entry"] = options_data if isinstance(options_data, dict) else {}
 
     sim.record_open(trade)
     sim.save()

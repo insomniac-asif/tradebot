@@ -125,6 +125,7 @@ def test_known_signal_modes_complete():
         "FVG_4H", "FVG_5M", "LIQUIDITY_SWEEP", "FVG_SWEEP_COMBO",
         "FLOW_DIVERGENCE", "MULTI_TF_CONFIRM", "GAP_FADE", "VPOC_REVERSION",
         "OPENING_RANGE_RECLAIM", "VOL_COMPRESSION_BREAKOUT", "VOL_SPIKE_FADE",
+        "STRUCTURE_FADE", "GEX_FLOW",
     }
     assert expected == _KNOWN_SIGNAL_MODES, \
         f"Missing: {expected - _KNOWN_SIGNAL_MODES}, extra: {_KNOWN_SIGNAL_MODES - expected}"
@@ -439,16 +440,16 @@ def test_multi_tf_confirm_bearish():
 # GAP_FADE tests
 # ---------------------------------------------------------------------------
 
-def _make_gap_df(gap_pct=0.005, n_total=70, gap_bars_ago=31):
+def _make_gap_df(gap_pct=0.005, n_total=40, gap_bars_ago=16):
     """
     Build a df with a gap at `gap_bars_ago` bars from the end.
 
     signal uses:
-      pre_gap_bar  = df.iloc[-(WINDOW+2)]  →  index = n_total - (gap_bars_ago+1)
-      session_open = df.iloc[-(WINDOW+1)]  →  index = n_total - gap_bars_ago
+      pre_gap_bar  = df.iloc[-(WINDOW+2)]  →  index = n_total - (WINDOW+2)
+      session_open = df.iloc[-(WINDOW+1)]  →  index = n_total - (WINDOW+1)
     So we keep close flat before session_open and open the gapped price there.
     """
-    WINDOW = 30   # must match _signal_gap_fade WINDOW
+    WINDOW = 15   # must match _signal_gap_fade WINDOW
     pre_idx  = n_total - (WINDOW + 2)   # pre_gap_bar index
     open_idx = n_total - (WINDOW + 1)   # session_open_bar index
 
@@ -476,7 +477,7 @@ def _make_gap_df(gap_pct=0.005, n_total=70, gap_bars_ago=31):
 
 
 def test_gap_fade_insufficient_bars():
-    df = _make_df(20)
+    df = _make_df(16)  # < WINDOW(15) + 2 = 17
     result = _signal_gap_fade(df)
     _assert_3tuple(result, "gap_insufficient")
     assert result[0] is None
@@ -493,7 +494,7 @@ def test_gap_fade_no_gap():
 
 def test_gap_fade_down_signal():
     # Gap up → should return BEARISH fade signal
-    df = _make_gap_df(gap_pct=0.005, n_total=70, gap_bars_ago=31)
+    df = _make_gap_df(gap_pct=0.005)
     result = _signal_gap_fade(df)
     _assert_3tuple(result, "gap_fade_down")
     assert result[0] == "BEARISH", f"Expected BEARISH gap fade, got {result}"
@@ -502,7 +503,7 @@ def test_gap_fade_down_signal():
 
 def test_gap_fade_up_signal():
     # Gap down → should return BULLISH fade signal
-    df = _make_gap_df(gap_pct=-0.005, n_total=70, gap_bars_ago=31)
+    df = _make_gap_df(gap_pct=-0.005)
     result = _signal_gap_fade(df)
     _assert_3tuple(result, "gap_fade_up")
     assert result[0] == "BULLISH", f"Expected BULLISH gap fade, got {result}"

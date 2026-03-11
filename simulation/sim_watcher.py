@@ -118,6 +118,8 @@ SIM_CHANNEL_MAP = {
     "SIM33": 1480733191596802108,
     "SIM34": 1480737061458939985,
     "SIM35": 1480737079616077844,
+    "SIM36": 1481379703549071484,
+    "SIM37": 1481379730510053417,
 }
 
 _SIM_BOT = None
@@ -327,9 +329,9 @@ async def sim_entry_loop() -> None:
                 try:
                     from signals.predictor import make_prediction
                     from signals.regime import get_regime as _get_regime_fn
-                    _pred_15 = make_prediction(15, df)
-                    _pred_60 = make_prediction(60, df)
-                    _regime_now = _get_regime_fn(df) if df is not None else None
+                    _pred_15 = await asyncio.to_thread(make_prediction, 15, df)
+                    _pred_60 = await asyncio.to_thread(make_prediction, 60, df)
+                    _regime_now = await asyncio.to_thread(_get_regime_fn, df) if df is not None else None
                     _dir_15 = _pred_15.get("direction") if isinstance(_pred_15, dict) else None
                     _conf_15 = _pred_15.get("confidence") if isinstance(_pred_15, dict) else None
                     _dir_60 = _pred_60.get("direction") if isinstance(_pred_60, dict) else None
@@ -348,7 +350,7 @@ async def sim_entry_loop() -> None:
                     _environment_passed = None
                     try:
                         from signals.opportunity import evaluate_opportunity
-                        _opp_result = evaluate_opportunity(df)
+                        _opp_result = await asyncio.to_thread(evaluate_opportunity, df)
                         if _opp_result is not None:
                             # Normalize int conviction score (3-7) to 0.0-1.0 range
                             _real_conviction = min(1.0, float(_opp_result[4]) / 7.0)
@@ -372,7 +374,46 @@ async def sim_entry_loop() -> None:
                 except Exception:
                     _trader_signal = None
 
-                results = await run_sim_entries(df, regime=_derive_regime(df), trader_signal=_trader_signal)
+                # Compute market structure per-symbol + cross-asset context
+                _all_structure_data = {}
+                _cross_asset_data = None
+                _all_dfs = {}
+                try:
+                    from analytics.market_structure import compute_all_structure
+                    from core.data_service import get_all_symbol_dataframes
+                    _all_dfs = await asyncio.to_thread(get_all_symbol_dataframes)
+                    for _sym, _sym_df in _all_dfs.items():
+                        if _sym_df is not None and len(_sym_df) > 0:
+                            try:
+                                _all_structure_data[_sym] = await asyncio.to_thread(compute_all_structure, _sym_df)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    from analytics.cross_asset_context import compute_all_cross_asset
+                    if _all_dfs:
+                        _cross_asset_data = await asyncio.to_thread(compute_all_cross_asset, _all_dfs)
+                except Exception:
+                    pass
+                _options_data = None
+                try:
+                    from analytics.options_positioning import compute_all_options_positioning
+                    _spot = float(df.iloc[-1]["close"]) if df is not None and len(df) > 0 else None
+                    if _spot:
+                        _options_data = await asyncio.to_thread(compute_all_options_positioning, _spot, "SPY")
+                except Exception:
+                    pass
+
+                # Primary structure data = SPY (most sims trade SPY options)
+                _structure_data = _all_structure_data.get("SPY")
+
+                results = await run_sim_entries(
+                    df, regime=_derive_regime(df), trader_signal=_trader_signal,
+                    structure_data=_structure_data, cross_asset_data=_cross_asset_data,
+                    options_data=_options_data,
+                    all_structure_data=_all_structure_data,
+                )
                 # Sims that opened a trade this cycle — suppress skip
                 # notifications for those sims (e.g. empty_chain from VXX
                 # after SPY successfully opened).

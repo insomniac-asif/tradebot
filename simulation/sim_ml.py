@@ -76,10 +76,58 @@ def _style_from_horizon(horizon: str | None) -> str:
     return "mini_swing"
 
 
-def predict_sim_trade(df, context: dict) -> dict:
+def _build_enhanced_features(feature_snapshot: dict | None) -> dict:
+    """Extract enhanced ML features from the merged feature_snapshot.
+
+    These are stored on the trade for future model training but only passed
+    to the model when enhanced_ml_features is enabled in _global config.
+    """
+    if not isinstance(feature_snapshot, dict):
+        return {}
+
+    def _encode_breakout(val):
+        if val == "above" or val is True:
+            return 1
+        if val == "below":
+            return -1
+        return 0
+
+    return {
+        # Structure features
+        "struct_distance_to_resistance_pct": float(feature_snapshot.get("struct_distance_to_resistance_pct", 0) or 0),
+        "struct_distance_to_support_pct": float(feature_snapshot.get("struct_distance_to_support_pct", 0) or 0),
+        "struct_distance_to_pivot_pct": float(feature_snapshot.get("struct_distance_to_pivot_pct", 0) or 0),
+        "struct_distance_to_vwap_pct": float(feature_snapshot.get("struct_distance_to_vwap_pct", 0) or 0),
+        "struct_poc_distance_pct": float(feature_snapshot.get("struct_poc_distance_pct", 0) or 0),
+        "struct_near_round5": 1 if feature_snapshot.get("struct_near_round5") else 0,
+        "struct_or15_breakout": _encode_breakout(feature_snapshot.get("struct_or15_breakout")),
+        # Cross-asset features
+        "xasset_spy_qqq_divergence": float(feature_snapshot.get("xasset_spy_qqq_divergence", 0) or 0),
+        "xasset_spy_iwm_divergence": float(feature_snapshot.get("xasset_spy_iwm_divergence", 0) or 0),
+        "xasset_risk_on": 1 if feature_snapshot.get("xasset_risk_on") else 0,
+        "xasset_vxx_slope": float(feature_snapshot.get("xasset_vxx_slope", 0) or 0),
+        "xasset_fear_rising": 1 if feature_snapshot.get("xasset_fear_rising") else 0,
+        "xasset_momentum_alignment": float(feature_snapshot.get("xasset_momentum_alignment", 0) or 0),
+        "xasset_sector_concentration": float(feature_snapshot.get("xasset_sector_concentration", 0) or 0),
+        # Options features
+        "opts_gex_positive": 1 if feature_snapshot.get("opts_gex_positive") else 0,
+        "opts_distance_to_gex_flip_pct": float(feature_snapshot.get("opts_distance_to_gex_flip_pct", 0) or 0),
+        "opts_distance_to_max_pain_pct": float(feature_snapshot.get("opts_distance_to_max_pain_pct", 0) or 0),
+        "opts_put_call_oi_ratio": float(feature_snapshot.get("opts_put_call_oi_ratio", 0) or 0),
+        "opts_call_wall_distance_pct": float(feature_snapshot.get("opts_call_wall_distance_pct", 0) or 0),
+        "opts_put_wall_distance_pct": float(feature_snapshot.get("opts_put_wall_distance_pct", 0) or 0),
+        "opts_in_low_gamma_zone": 1 if feature_snapshot.get("opts_in_low_gamma_zone") else 0,
+    }
+
+
+def predict_sim_trade(df, context: dict, feature_snapshot: dict | None = None) -> dict:
     """
     Generates ML predictions for sim trades without altering trade logic.
     Returns prediction fields + feature context for logging/grading.
+
+    feature_snapshot: optional enriched feature dict (struct_*, xasset_*, opts_*).
+    Enhanced features are always stored in the result for analytics/training.
+    They are only fed to the model when enhanced_ml_features is true in _global config.
     """
     direction_model, edge_model = _load_models()
 
@@ -177,7 +225,10 @@ def predict_sim_trade(df, context: dict) -> dict:
     if prediction_confidence is not None and edge_prob is not None:
         prediction_confidence = (prediction_confidence * 0.6) + (edge_prob * 0.4)
 
-    return {
+    # Build enhanced features (always stored, optionally fed to model)
+    enhanced = _build_enhanced_features(feature_snapshot)
+
+    result = {
         "predicted_direction": predicted_direction,
         "prediction_confidence": prediction_confidence,
         "direction_prob": direction_prob,
@@ -192,6 +243,9 @@ def predict_sim_trade(df, context: dict) -> dict:
         "style": style,
         "confidence": prediction_confidence,
     }
+    if enhanced:
+        result["enhanced_features"] = enhanced
+    return result
 
 
 def _init_trade_count() -> int:

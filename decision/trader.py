@@ -9,6 +9,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 from core.md_state import is_md_enabled
 
+import asyncio
 from datetime import datetime
 import pytz
 import os
@@ -137,7 +138,7 @@ async def open_trade_if_valid(ctx=None):
     # ----------------------------
     # 2️⃣ Signal Generation Layer
     # ----------------------------
-    signal = generate_signal(acc, ctx)
+    signal = await asyncio.to_thread(generate_signal, acc, ctx)
     if signal is None:
         if ctx.block_reason is None:
             ctx.set_block("signal_none")

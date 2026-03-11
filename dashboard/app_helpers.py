@@ -325,6 +325,22 @@ def _compute_stats(sim_id: str, data: dict, profile: dict) -> dict:
         "growth_from_start_pct": round(pnl_pct * 100, 2),
         "small_account_mode": bool(profile.get("small_account_mode", False)),
         "death_threshold": float(profile.get("death_threshold", 25.0)),
+        # Strategy overview / profile fields
+        "stop_loss_pct": profile.get("stop_loss_pct"),
+        "profit_target_pct": profile.get("profit_target_pct"),
+        "trailing_stop_activate_pct": profile.get("trailing_stop_activate_pct"),
+        "trailing_stop_trail_pct": profile.get("trailing_stop_trail_pct"),
+        "risk_per_trade_pct": profile.get("risk_per_trade_pct"),
+        "daily_loss_limit_pct": profile.get("daily_loss_limit_pct"),
+        "regime_filter": profile.get("regime_filter"),
+        "hold_min_seconds": profile.get("hold_min_seconds"),
+        "hold_max_seconds": profile.get("hold_max_seconds"),
+        "cutoff_time_et": profile.get("cutoff_time_et"),
+        "otm_pct": profile.get("otm_pct"),
+        "session_filter": profile.get("session_filter"),
+        "blocked_sessions": profile.get("blocked_sessions"),
+        "execution_mode": profile.get("execution_mode"),
+        "enabled": profile.get("enabled", True),
     }
 
 

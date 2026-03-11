@@ -37,6 +37,10 @@ async def run_sim_entries(
     df,
     regime: "str | None" = None,
     trader_signal: "dict | None" = None,
+    structure_data: "dict | None" = None,
+    cross_asset_data: "dict | None" = None,
+    options_data: "dict | None" = None,
+    all_structure_data: "dict | None" = None,
 ) -> list[dict]:
     _PROFILES, _GLOBAL_CONFIG = _get_profiles_and_global()
     results = []
@@ -285,7 +289,9 @@ async def run_sim_entries(
                         "horizon": effective_profile.get("horizon"),
                         "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
                     }
-                    ml_prediction = await asyncio.to_thread(predict_sim_trade, sim_df, ml_context)
+                    ml_prediction = await asyncio.to_thread(
+                        predict_sim_trade, sim_df, ml_context, feature_snapshot=feature_snapshot,
+                    )
 
                     # Inject opportunity_meta into signal_meta for embed later
                     if isinstance(signal_meta, dict):
@@ -371,6 +377,32 @@ async def run_sim_entries(
                     except Exception:
                         feature_snapshot = None
 
+                # Merge structure + cross-asset data into feature_snapshot
+                if isinstance(structure_data, dict) or isinstance(cross_asset_data, dict):
+                    if feature_snapshot is None:
+                        feature_snapshot = {}
+                    if isinstance(structure_data, dict):
+                        for _sk, _sv in structure_data.items():
+                            if isinstance(_sv, (int, float, bool)):
+                                feature_snapshot[f"struct_{_sk}"] = _sv
+                    if isinstance(cross_asset_data, dict):
+                        for _xk, _xv in cross_asset_data.items():
+                            if isinstance(_xv, (int, float, bool)):
+                                feature_snapshot[f"xasset_{_xk}"] = _xv
+                    if isinstance(options_data, dict):
+                        for _ok, _ov in options_data.items():
+                            if isinstance(_ov, (int, float, bool)):
+                                feature_snapshot[f"opts_{_ok}"] = _ov
+                    # Add key levels from correlated symbols (QQQ, IWM)
+                    if isinstance(all_structure_data, dict):
+                        for _csym in ("QQQ", "IWM"):
+                            _csym_struct = all_structure_data.get(_csym)
+                            if isinstance(_csym_struct, dict):
+                                for _ckey in ("distance_to_resistance_pct", "distance_to_support_pct", "pivot_zone", "vwap_position"):
+                                    _cval = _csym_struct.get(_ckey)
+                                    if isinstance(_cval, (int, float, bool)):
+                                        feature_snapshot[f"struct_{_csym.lower()}_{_ckey}"] = _cval
+
                 sig = await asyncio.to_thread(
                     derive_sim_signal,
                     sim_df,
@@ -387,6 +419,8 @@ async def run_sim_entries(
                     feature_snapshot=feature_snapshot,
                     profile=profile,
                     signal_params=profile.get("signal_params") or {},
+                    structure_data=structure_data,
+                    options_data=options_data,
                 )
                 if isinstance(sig, tuple):
                     if len(sig) >= 2:
@@ -494,7 +528,9 @@ async def run_sim_entries(
                     "horizon": effective_profile.get("horizon"),
                     "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
                 }
-                ml_prediction = await asyncio.to_thread(predict_sim_trade, df, ml_context)
+                ml_prediction = await asyncio.to_thread(
+                    predict_sim_trade, df, ml_context, feature_snapshot=feature_snapshot,
+                )
 
                 # ── 6. Continue with regime_filter, execution_mode, etc. ─
                 regime_filter = sim.profile.get("regime_filter")
@@ -590,6 +626,8 @@ async def run_sim_entries(
                     feature_snapshot=feature_snapshot,
                     _trade_symbol=_trade_symbol,
                     effective_profile=effective_profile, df=df, results=results,
+                    structure_data=structure_data, cross_asset_data=cross_asset_data,
+                    options_data=options_data,
                 )
         except Exception as e:
             logging.exception("run_sim_entries_error: %s", e)

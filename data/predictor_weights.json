@@ -1,12 +1,12 @@
 {
   "meta": {
-    "samples": 162597,
-    "overall_wr": 0.3002
+    "samples": 162630,
+    "overall_wr": 0.3001
   },
   "regime": {
     "COMPRESSION": {
       "bearish": -0.0912,
-      "bullish": 0.0237,
+      "bullish": 0.0253,
       "range": -1.1297
     },
     "NO_DATA": {
@@ -14,17 +14,17 @@
       "bullish": -0.4364
     },
     "RANGE": {
-      "bearish": -0.039,
-      "bullish": -0.0511,
+      "bearish": -0.0395,
+      "bullish": -0.0503,
       "range": -1.1812
     },
     "TREND": {
-      "bearish": 0.0098,
+      "bearish": 0.0094,
       "bullish": 0.0105,
       "range": -1.1595
     },
     "VOLATILE": {
-      "bearish": 0.0266,
+      "bearish": 0.026,
       "bullish": 0.0333,
       "range": -1.1663
     }
@@ -46,8 +46,8 @@
       "range": -0.7713
     },
     "POWER": {
-      "bearish": -0.0809,
-      "bullish": -0.0824,
+      "bearish": -0.0826,
+      "bullish": -0.0812,
       "range": -0.7812
     }
   },
@@ -58,18 +58,18 @@
       "range": -0.5811
     },
     "HIGH": {
-      "bearish": 0.038,
+      "bearish": 0.0378,
       "bullish": 0.0316,
       "range": -0.0667
     },
     "LOW": {
       "bearish": -0.0279,
-      "bullish": -0.039,
+      "bullish": -0.0386,
       "range": -0.5901
     },
     "NORMAL": {
-      "bearish": -0.0136,
-      "bullish": 0.0108,
+      "bearish": -0.0139,
+      "bullish": 0.0109,
       "range": -0.5747
     }
   },
@@ -91,7 +91,7 @@
     },
     "COMPRESSION_POWER": {
       "bearish": -0.2004,
-      "bullish": -0.0771,
+      "bullish": -0.0675,
       "range": -1.2916
     },
     "RANGE_AFTERNOON": {
@@ -110,8 +110,8 @@
       "range": -1.2026
     },
     "RANGE_POWER": {
-      "bearish": -0.179,
-      "bullish": -0.2357,
+      "bearish": -0.1812,
+      "bullish": -0.2315,
       "range": -1.3871
     },
     "TREND_AFTERNOON": {
@@ -130,7 +130,7 @@
       "range": -1.2133
     },
     "TREND_POWER": {
-      "bearish": -0.0538,
+      "bearish": -0.056,
       "bullish": -0.2269,
       "range": -1.3623
     },
@@ -150,7 +150,7 @@
       "range": -1.3385
     },
     "VOLATILE_POWER": {
-      "bearish": -0.1449,
+      "bearish": -0.1501,
       "bullish": -0.0606,
       "range": -1.3595
     }

@@ -138,8 +138,35 @@ class QQQBot(commands.Bot):
             except Exception:
                 pass
 
+    def _start_dashboard(self):
+        """Start dashboard as a subprocess, restart if it dies."""
+        import subprocess, sys
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        python_exe = sys.executable
+
+        async def _dashboard_watchdog():
+            port = os.environ.get("DASHBOARD_PORT", "8090")
+            proc = None
+            while True:
+                try:
+                    if proc is None or proc.poll() is not None:
+                        proc = subprocess.Popen(
+                            [python_exe, "-m", "uvicorn", "dashboard.app:app",
+                             "--host", "0.0.0.0", "--port", port],
+                            cwd=project_root,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        logging.error(f"Dashboard started (PID: {proc.pid}, port: {port})")
+                except Exception as e:
+                    logging.error(f"Dashboard start failed: {e}")
+                await asyncio.sleep(30)
+
+        self.loop.create_task(self.safe_task(_dashboard_watchdog))
+
     def _register_background_tasks(self):
         T, S = self.loop.create_task, self.safe_task
+        self._start_dashboard()
         T(S(auto_trader, self, PAPER_CHANNEL_ID))
         T(S(conviction_watcher, self, ALERT_CHANNEL_ID))
         T(S(forecast_watcher, self, FORECAST_CHANNEL_ID))

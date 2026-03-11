@@ -52,10 +52,15 @@ const STRATEGY_DESCRIPTIONS = {
   VOL_COMPRESSION_BREAKOUT: `A volatility regime transition signal that enters when the market shifts from compression to expansion. Measures ATR (Average True Range) over a rolling window; compression is defined as the previous bar's ATR being below 60% of the 20-bar ATR mean. Expansion fires when the current bar's ATR exceeds 90% of the 20-bar mean — the market has snapped out of its tight range. Direction is set by whether the current close is above or below EMA9. The edge: after a compression period, the first expansion bar often marks the start of a sustained directional move because trapped positions from the range are unwound simultaneously. The dual ATR threshold (prev < 60%, curr > 90%) ensures the transition is sharp rather than gradual — slow drifts out of range are ignored. Works well on consolidation breakouts after news catalysts or morning ranges.`,
 
   VOL_SPIKE_FADE: `Fades volatility spikes by entering against the direction of an extreme ATR expansion. Entry requires: current ATR is >1.5× the 20-bar ATR mean (genuine spike, not just normal movement) AND the absolute distance between close and VWAP exceeds 1.5× the ATR mean (price has moved far from intraday fair value). Direction is determined by RSI: bearish fade when RSI > 70 (overbought spike), bullish fade when RSI < 30 (oversold spike). The edge: extreme ATR spikes in index ETFs commonly represent capitulation or short-squeeze events that exhaust momentum quickly. The VWAP displacement filter ensures you're fading a real extension, not just normal high-volatility range. Works best on news-driven spikes that occur without a fundamental change in market structure. Avoid on trend initiation days where the spike is the start of a new regime rather than an exhaustion point.`,
+
+  STRUCTURE_FADE: `Mean-reversion trade off confirmed market structure levels — support and resistance zones derived from the market structure analytics module. Bullish entry fires when price is within 0.2% of the nearest support level AND RSI is below 40, indicating oversold conditions at a structural floor. Bearish entry fires when price is within 0.2% of the nearest resistance level AND RSI is above 60, indicating overbought conditions at a structural ceiling. Requires live structure_data from the market structure computation (pivot points, volume-weighted levels). An optional VXX fear filter can suppress entries when volatility is spiking — structure levels tend to break during panic selling rather than hold. The edge: institutional algorithms cluster orders around key structure levels, creating predictable bounce zones. Entry right at the level provides a tight stop (a clean break through invalidates the thesis) and high reward-to-risk. Works best in range-bound sessions where structure is respected; avoid in breakout/trend days when levels get swept.`,
+
+  GEX_FLOW: `Trades in the direction of mechanical dealer gamma exposure (GEX) hedging flows. Uses real-time options positioning data to determine whether overall market gamma is positive or negative, and where key gamma levels sit (GEX flip strike, max pain, call/put walls). Bullish entry fires when: gamma is positive (dealers are long gamma), price is above the GEX flip strike, and price sits between max pain and the nearest call wall — this configuration means dealer delta hedging mechanically pushes price toward the call wall. Bearish entry fires in the mirror setup: negative gamma, price below the flip strike, between the put wall and max pain — dealers are short gamma and their hedging amplifies downward moves. The edge: dealer hedging flows are non-discretionary and predictable — when gamma is positive, dealers buy dips and sell rips (stabilizing); when negative, they sell into dips and buy into rips (amplifying). Trading with these mechanical flows rather than against them provides a structural directional edge that is independent of traditional technical signals.`,
 };
 
 const POLL_INTERVAL = 30000; // 30s
 let symbolCharts = {};   // { SPY: ApexChartsInstance, ... }
+let _symPredMeta = {};   // { SPY: [{t0,t1,y,dir,color,arrow,conf,tf},...], ... }
 let _focusedSym = null;
 const FOCUSED_CHART_H = 450;
 let perfChart = null;
@@ -2214,7 +2219,24 @@ function _makeApexOptions(sym, height) {
       type: 'candlestick',
       height,
       background: 'transparent',
-      toolbar: { show: false },
+      toolbar: {
+        show: false,
+        tools: {
+          download: false,
+          selection: false,
+          zoom: true,
+          zoomin: true,
+          zoomout: true,
+          pan: true,
+          reset: true,
+        },
+        autoSelected: 'pan',
+      },
+      zoom: {
+        enabled: false,
+        type: 'x',
+        autoScaleYaxis: true,
+      },
       animations: { enabled: false },
       foreColor: '#99bb99',
       sparkline: { enabled: false },
@@ -2290,34 +2312,36 @@ function _makeApexOptions(sym, height) {
       shared: true,
       intersect: false,
       custom: ({ dataPointIndex, w }) => {
-        // OHLCV from candle series (series 0)
         const cpt = w.config.series[0]?.data?.[dataPointIndex];
-        let html = '';
-        if (cpt && Array.isArray(cpt.y) && cpt.y.length >= 4) {
-          const [o, h, l, c] = cpt.y;
-          const up = c >= o;
-          const cc = up ? '#88ee88' : '#ee8888';
-          const _td = new Date(cpt.x);
-          const time = String(_td.getUTCHours()).padStart(2,'0') + ':' + String(_td.getUTCMinutes()).padStart(2,'0');
-          html += `<div style="padding:6px 10px 4px;font-size:10px;font-family:monospace;line-height:1.7">
-            <div style="color:#88aa88;font-size:9px;margin-bottom:3px">${time}</div>
-            <div><span style="color:#667766;display:inline-block;width:10px">O</span> <b style="color:${cc}">${o.toFixed(2)}</b></div>
-            <div><span style="color:#667766;display:inline-block;width:10px">H</span> <b style="color:#88ee88">${h.toFixed(2)}</b></div>
-            <div><span style="color:#667766;display:inline-block;width:10px">L</span> <b style="color:#ee8888">${l.toFixed(2)}</b></div>
-            <div><span style="color:#667766;display:inline-block;width:10px">C</span> <b style="color:${cc}">${c.toFixed(2)}</b></div>
-          </div>`;
+        if (!cpt || !Array.isArray(cpt.y) || cpt.y.length < 4)
+          return '<div style="padding:4px 8px;font-size:10px;color:#88aa88">—</div>';
+
+        const [o, h, l, c] = cpt.y;
+        const up = c >= o;
+        const cc = up ? '#88ee88' : '#ee8888';
+        const _td = new Date(cpt.x);
+        const time = String(_td.getUTCHours()).padStart(2,'0') + ':' + String(_td.getUTCMinutes()).padStart(2,'0');
+
+        // Find active prediction for this candle's timestamp
+        const cx = cpt.x;
+        let predLine = '';
+        const _pm = _symPredMeta[sym] || [];
+        for (const pm of _pm) {
+          if (cx >= pm.t0 && cx <= pm.t1) {
+            const confStr = pm.conf != null ? `(${(pm.conf * 100).toFixed(0)}%)` : '';
+            predLine = `<div><span style="color:#667766;display:inline-block;width:10px">${pm.arrow}</span> <b style="color:${pm.color}">${pm.y.toFixed(2)}</b> <span style="color:${pm.color};font-size:8px">${confStr}</span></div>`;
+            break; // show most recent matching prediction
+          }
         }
-        // Check if hovered x falls within a prediction segment
-        if (cpt) {
-          const cx = cpt.x;
-          [[1, 'Pred (cur)', '#4499ff'], [2, 'Pred (prev)', '#aa66ff']].forEach(([si, label, color]) => {
-            const pd = w.config.series[si]?.data || [];
-            if (pd.length === 2 && cx >= pd[0].x && cx <= pd[1].x) {
-              html += `<div style="padding:3px 10px 5px;font-size:10px;border-top:1px solid rgba(255,255,255,0.08)">${label}: <b style="color:${color}">$${parseFloat(pd[0].y).toFixed(2)}</b></div>`;
-            }
-          });
-        }
-        return html || '<div style="padding:4px 8px;font-size:10px;color:#88aa88">—</div>';
+
+        return `<div style="padding:6px 10px 4px;font-size:10px;font-family:monospace;line-height:1.7">
+          <div style="color:#88aa88;font-size:9px;margin-bottom:3px">${time}</div>
+          <div><span style="color:#667766;display:inline-block;width:10px">O</span> <b style="color:${cc}">${o.toFixed(2)}</b></div>
+          <div><span style="color:#667766;display:inline-block;width:10px">H</span> <b style="color:#88ee88">${h.toFixed(2)}</b></div>
+          <div><span style="color:#667766;display:inline-block;width:10px">L</span> <b style="color:#ee8888">${l.toFixed(2)}</b></div>
+          <div><span style="color:#667766;display:inline-block;width:10px">C</span> <b style="color:${cc}">${c.toFixed(2)}</b></div>
+          ${predLine}
+        </div>`;
       },
     },
   };
@@ -2326,30 +2350,77 @@ function _makeApexOptions(sym, height) {
 function focusSymbol(sym) {
   if (_focusedSym === sym) { unfocusSymbol(); return; }
   _focusedSym = sym;
+
+  const chalkboard = document.querySelector('.chalkboard');
   const grid = document.getElementById('symbol-charts-grid');
+
+  // Lock chalkboard height to current size so focused chart fills the same space
+  if (chalkboard) {
+    const h = chalkboard.offsetHeight;
+    chalkboard.style.height = h + 'px';
+    chalkboard.classList.add('chart-focused-mode');
+  }
+
   if (grid) grid.classList.add('sym-focused-mode');
   document.querySelectorAll('.sym-chart-card').forEach(card => {
     card.classList.toggle('sym-focused', card.id === `sym-card-${sym}`);
   });
   const allBtn = document.getElementById('sym-all-btn');
   if (allBtn) allBtn.classList.remove('hidden');
+  const resetBtn = document.getElementById('sym-reset-zoom-btn');
+  if (resetBtn) resetBtn.classList.remove('hidden');
   const titleEl = document.getElementById('chalk-overview-title');
   if (titleEl) titleEl.textContent = `${sym} · 1-MIN · TODAY`;
-  if (symbolCharts[sym]) symbolCharts[sym].updateOptions({ chart: { height: FOCUSED_CHART_H } }, false, false);
+
+  // Calculate available height: chalkboard height minus header and padding
+  const header = chalkboard ? chalkboard.querySelector('.chalk-header') : null;
+  const headerH = header ? header.offsetHeight + 6 : 40; // 6px for header padding-bottom
+  const gridPad = 14; // grid padding top+bottom
+  const cardHeaderH = 28; // sym-card-header height
+  const toolbarH = 30; // toolbar height when visible
+  const chartH = (chalkboard ? chalkboard.offsetHeight : FOCUSED_CHART_H + 100) - headerH - gridPad - cardHeaderH - toolbarH - 10;
+  if (symbolCharts[sym]) symbolCharts[sym].updateOptions({
+    chart: {
+      height: Math.max(chartH, 200),
+      toolbar: { show: true },
+      zoom: { enabled: true },
+    },
+  }, false, false);
 }
 
 function unfocusSymbol() {
   const prev = _focusedSym;
   _focusedSym = null;
+
+  const chalkboard = document.querySelector('.chalkboard');
+  if (chalkboard) {
+    chalkboard.classList.remove('chart-focused-mode');
+    chalkboard.style.height = '';
+  }
+
   const grid = document.getElementById('symbol-charts-grid');
   if (grid) grid.classList.remove('sym-focused-mode');
   document.querySelectorAll('.sym-chart-card').forEach(card => card.classList.remove('sym-focused'));
   const allBtn = document.getElementById('sym-all-btn');
   if (allBtn) allBtn.classList.add('hidden');
+  const resetBtn = document.getElementById('sym-reset-zoom-btn');
+  if (resetBtn) resetBtn.classList.add('hidden');
   const titleEl = document.getElementById('chalk-overview-title');
   if (titleEl) titleEl.textContent = 'MARKET OVERVIEW · 1-MIN · TODAY';
   const chartH = window.innerWidth <= 480 ? 140 : window.innerWidth <= 900 ? 170 : 200;
-  if (prev && symbolCharts[prev]) symbolCharts[prev].updateOptions({ chart: { height: chartH } }, false, false);
+  if (prev && symbolCharts[prev]) symbolCharts[prev].updateOptions({
+    chart: {
+      height: chartH,
+      toolbar: { show: false },
+      zoom: { enabled: false },
+    },
+  }, false, false);
+}
+
+function resetFocusedZoom() {
+  if (_focusedSym && symbolCharts[_focusedSym]) {
+    symbolCharts[_focusedSym].resetSeries();
+  }
 }
 
 async function initSymbolCharts() {
@@ -2443,14 +2514,38 @@ function _updateSymbolCard(sym, candles, preds) {
 
   const PRED_DUR_MS = 10 * 60 * 1000; // 10 min prediction window
 
-  const candleSeries = candles.map(c => ({ x: toETMs(c.t), y: [c.o, c.h, c.l, c.c] }));
+  // Build candle series with gap-filling: if there's a gap > 90s between bars,
+  // forward-fill with flat candles so the chart doesn't show blank space
+  const rawCandles = candles
+    .filter(c => c.o > 0 && c.h > 0 && c.l > 0 && c.c > 0)
+    .map(c => ({ x: toETMs(c.t), y: [c.o, c.h, c.l, c.c] }));
+  const candleSeries = [];
+  const ONE_MIN = 60000;
+  for (let i = 0; i < rawCandles.length; i++) {
+    if (i > 0) {
+      const gap = rawCandles[i].x - rawCandles[i - 1].x;
+      if (gap > ONE_MIN * 1.5) {
+        // Fill gap with flat candles at previous close
+        const prevClose = rawCandles[i - 1].y[3];
+        const fillCount = Math.min(Math.floor(gap / ONE_MIN) - 1, 60); // cap at 60 fills
+        for (let f = 1; f <= fillCount; f++) {
+          candleSeries.push({
+            x: rawCandles[i - 1].x + f * ONE_MIN,
+            y: [prevClose, prevClose, prevClose, prevClose],
+          });
+        }
+      }
+    }
+    candleSeries.push(rawCandles[i]);
+  }
 
   // Only show predictions that overlap with candle data we actually have
   const lastCandleX = candleSeries.length > 0 ? candleSeries[candleSeries.length - 1].x : 0;
 
-  // Build prediction annotations — horizontal line at predicted price spanning 10-min window
-  // with ▲/▼ + price label in the middle
+  // Build prediction annotations — dot + arrow only (no price labels)
+  // Hover tooltip shows timeframe, predicted price, and confidence
   const predPoints = [];
+  const predMeta = []; // stored on chart for tooltip lookup
   (preds || []).forEach(p => {
     const dir = (p.direction || '').toUpperCase();
     const priceVal = dir === 'BULLISH' ? p.high : dir === 'BEARISH' ? p.low : null;
@@ -2463,6 +2558,10 @@ function _updateSymbolCard(sym, candles, preds) {
     const color = isBull ? '#44ddaa' : '#ee6666';
     const mid = t0 + PRED_DUR_MS / 2;
     const arrow = isBull ? '▲' : '▼';
+    const conf = p.confidence != null ? p.confidence : null;
+    const tf = p.timeframe || 10;
+
+    predMeta.push({ t0, t1, mid, y, dir, color, arrow, conf, tf });
 
     // Start point of line
     predPoints.push({
@@ -2470,18 +2569,18 @@ function _updateSymbolCard(sym, candles, preds) {
       marker: { size: 0 },
       label: { text: '' },
     });
-    // Middle — label with arrow + price
+    // Middle — dot + arrow only, no price text
     predPoints.push({
       x: mid, y,
-      marker: { size: 3, fillColor: color, strokeColor: '#000', strokeWidth: 1 },
+      marker: { size: 4, fillColor: color, strokeColor: '#000', strokeWidth: 1 },
       label: {
-        text: `${arrow} ${y.toFixed(1)}`,
-        offsetY: isBull ? -6 : 10,
+        text: arrow,
+        offsetY: isBull ? -8 : 18,
         borderWidth: 0,
         style: {
           background: 'transparent',
           color: color,
-          fontSize: '8px',
+          fontSize: '9px',
           fontWeight: 'bold',
           padding: { left: 0, right: 0, top: 0, bottom: 0 },
         },
@@ -2494,6 +2593,9 @@ function _updateSymbolCard(sym, candles, preds) {
       label: { text: '' },
     });
   });
+
+  // Store prediction metadata for tooltip hover lookup
+  _symPredMeta[sym] = predMeta;
 
   // Store prediction data for SVG line drawing after render
   chart._predLines = (preds || []).map(p => {
@@ -2515,7 +2617,7 @@ function _updateSymbolCard(sym, candles, preds) {
     },
   };
   if (candleSeries.length > 0) {
-    // x-max = 4:00 PM ET so chart shows full session with empty space ahead
+    // x-max = 4:00 PM ET so chart always shows full session
     const firstX = candleSeries[0].x;
     const closeMs = firstX - (firstX % 86400000) + (16 * 3600000);
     opts.xaxis = {
@@ -2545,6 +2647,7 @@ function _updateSymbolCard(sym, candles, preds) {
 
   // Update prediction badge (uses latest prediction)
   const predEl = document.getElementById(`sym-pred-${sym}`);
+  const latestPred = preds && preds.length > 0 ? preds[preds.length - 1] : null;
   if (latestPred) {
     const dir    = (latestPred.direction || '').toUpperCase();
     const conf   = latestPred.confidence != null ? `${(latestPred.confidence * 100).toFixed(0)}%` : '';
@@ -3194,11 +3297,17 @@ async function openTradeDetails(simId, tradeId, rowIdx, e) {
 const _isDesktop = () => window.innerWidth >= 769;
 
 function showTradeChart(simId, tradeId) {
-  // On desktop: both panels always visible (split mode) — don't hide live view
+  // Must defocus chart before showing trade analysis
+  if (_focusedSym) unfocusSymbol();
+
+  // On mobile: hide live view, show trade view
+  // On desktop: show trade view alongside live view (split mode)
   if (!_isDesktop()) {
     document.getElementById('chalk-live-view').classList.add('hidden');
   }
-  document.getElementById('chalk-trade-view').classList.remove('hidden');
+  const tradeView = document.getElementById('chalk-trade-view');
+  tradeView.classList.remove('hidden');
+  tradeView.classList.add('trade-selected');
   // Show content, hide placeholder
   const placeholder = document.getElementById('chalk-trade-placeholder');
   const content     = document.getElementById('chalk-trade-content');
@@ -3234,15 +3343,14 @@ function showTradeChart(simId, tradeId) {
 
 function showLiveChart() {
   document.getElementById('chalk-live-view').classList.remove('hidden');
-  // On desktop: keep trade view visible but show placeholder
-  if (_isDesktop()) {
-    const placeholder = document.getElementById('chalk-trade-placeholder');
-    const content     = document.getElementById('chalk-trade-content');
-    if (placeholder) placeholder.classList.remove('hidden');
-    if (content)     content.classList.add('hidden');
-  } else {
-    document.getElementById('chalk-trade-view').classList.add('hidden');
-  }
+  // Hide trade view on both mobile and desktop
+  const tradeView = document.getElementById('chalk-trade-view');
+  tradeView.classList.add('hidden');
+  tradeView.classList.remove('trade-selected');
+  const placeholder = document.getElementById('chalk-trade-placeholder');
+  const content     = document.getElementById('chalk-trade-content');
+  if (placeholder) placeholder.classList.remove('hidden');
+  if (content)     content.classList.add('hidden');
   const narPanel = document.getElementById('narrative-panel');
   if (narPanel) narPanel.classList.add('hidden');
   _selectedTradeId = null;

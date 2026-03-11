@@ -6,7 +6,7 @@
 <title>Trader Sim Classroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=20260311a">
+<link rel="stylesheet" href="/static/style.css?v=20260311c">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
 </head>
 <body>
@@ -61,6 +61,7 @@
         <div class="chalk-header">
           <span class="chalk-title" id="chalk-overview-title">MARKET OVERVIEW · 1-MIN · TODAY</span>
           <button class="sym-all-btn hidden" id="sym-all-btn" onclick="unfocusSymbol()">⊞ All Symbols</button>
+          <button class="sym-reset-zoom-btn hidden" id="sym-reset-zoom-btn" onclick="resetFocusedZoom()">↺ Reset Zoom</button>
           <span class="chalk-stat small" id="pred-checked"></span>
         </div>
         <div class="symbol-charts-grid" id="symbol-charts-grid">
@@ -307,6 +308,6 @@
 </div>
 <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
 
-<script src="/static/main.js?v=20260311p"></script>
+<script src="/static/main.js?v=20260311s"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@ interface/cogs/market_helpers2.py
 Extracted handler functions for large market_commands.py command bodies.
 No Discord decorators here — only async handler functions.
 """
+import asyncio
 import os
 import re
 import logging
@@ -274,7 +275,7 @@ async def handle_predict(ctx, minutes):
         await _send_embed(ctx, "Invalid timeframe.\nAllowed values: 30 or 60.")
         return
 
-    df = get_market_dataframe()
+    df = await asyncio.to_thread(get_market_dataframe)
 
     if df is None:
         await _send_embed(ctx, "Market data unavailable.")
@@ -351,7 +352,7 @@ async def handle_plan(ctx, side, strike, premium, contracts, expiry):
         return
 
     try:
-        df = get_market_dataframe()
+        df = await asyncio.to_thread(get_market_dataframe)
         if df is None:
             await _send_embed(ctx, "Market data unavailable.")
             return
@@ -364,7 +365,7 @@ async def handle_plan(ctx, side, strike, premium, contracts, expiry):
 
 async def handle_preopen(ctx):
     try:
-        df = get_market_dataframe()
+        df = await asyncio.to_thread(get_market_dataframe)
         if df is None or df.empty:
             await _send_embed(ctx, "Market data unavailable.", title="Pre-Open Check", color=0xE74C3C)
             return
