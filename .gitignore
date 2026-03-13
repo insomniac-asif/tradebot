@@ -97,8 +97,12 @@ research/optimization_report.md
 research/full_optimization_report.md
 research/patterns/
 
-# ── Generated data / weights ─────────────────────────────────────
+# ── Generated data / weights / configs ───────────────────────────
 data/predictor_weights.json
+data/calibration_config.json
+data/volatility_filter_config.json
+data/volatility_filter_meta.json
+data/direction_model_v2_meta.json
 
 # ── Scratch / debug scripts ──────────────────────────────────────
 test_*.py

@@ -161,7 +161,16 @@ def check_predictions(trade=None):
         else:
             result = "range"
 
-        direction_correct = int(result == row["direction"])
+        # Binary directional grading:
+        # bullish correct if high_hit, bearish correct if low_hit,
+        # range correct if neither hit. Handles "both" outcomes properly.
+        pred_dir = row["direction"]
+        if pred_dir == "bullish":
+            direction_correct = int(high_hit == 1)
+        elif pred_dir == "bearish":
+            direction_correct = int(low_hit == 1)
+        else:  # range
+            direction_correct = int(high_hit == 0 and low_hit == 0)
 
         # Compute confidence_band if missing
         cb = row.get("confidence_band")

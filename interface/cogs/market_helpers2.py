@@ -52,7 +52,7 @@ def _build_predict_embed(pred: dict, timeframe_minutes: int, df) -> discord.Embe
         else 0xE74C3C if pred["direction"] == "bearish"
         else 0x95A5A6
     )
-    pred_embed = discord.Embed(title=f"📊 SPY {timeframe_minutes}m Forecast", color=pred_color)
+    pred_embed = discord.Embed(title=f"📊 {timeframe_minutes}m Forecast", color=pred_color)
     pred_embed.add_field(name="📍 Direction", value=ab(dir_col(pred["direction"])), inline=True)
     pred_embed.add_field(name="💡 Confidence", value=ab(conf_col(pred["confidence"])), inline=True)
     pred_embed.add_field(name="🎯 Predicted High", value=ab(A(str(pred["high"]), "green", bold=True)), inline=True)

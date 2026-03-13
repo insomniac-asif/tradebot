@@ -157,7 +157,7 @@ async def run_sim_entries(
 
             # Filter symbols by DTE compatibility
             _dte_max = profile.get("dte_max", 7)
-            _DAILY_OPTS = {"SPY", "QQQ", "IWM"}   # have options every weekday
+            _DAILY_OPTS = {"SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT"}   # have options every weekday
             _WEEKLY_ONLY = {"VXX"}                  # weekly (Friday) expiry only
             if _dte_max == 0:
                 # 0DTE: only symbols with daily options
@@ -540,20 +540,62 @@ async def run_sim_entries(
                 except Exception:
                     pass
 
-                # ── Predictor veto gate (veto_only mode) ─────────────────
+                # ── Volatility filter gate (SIM00, SIM09 only) ──────────
+                try:
+                    from signals.volatility_filter import predict_trending, should_gate_sim
+                    if should_gate_sim(sim_id):
+                        _vol_result = predict_trending(sim_df)
+                        if not _vol_result.get("pass_filter", True):
+                            results.append({
+                                "sim_id": sim_id,
+                                "status": "skipped",
+                                "reason": "volatility_filter_range",
+                                "direction": direction,
+                                "vol_probability": _vol_result.get("probability"),
+                                "vol_reason": _vol_result.get("reason"),
+                                "entry_context": entry_context,
+                                "signal_mode": signal_mode,
+                            })
+                            continue
+                except Exception:
+                    pass  # filter failure = allow entry
+
+                # ── Calibrated predictor veto gate ─────────────────────────
                 _pred_mode = (_GLOBAL_CONFIG.get("predictor_mode") or "veto_only").lower()
                 # Analytics override: disable predictor if accuracy too low
                 if isinstance(_analytics_adj, dict) and _analytics_adj.get("predictor_override") == "disabled":
                     _pred_mode = "disabled"
                 if _pred_mode == "veto_only" and direction:
                     try:
-                        from signals.predictor import make_prediction as _mp
-                        _veto_pred = _mp(60, sim_df)
-                        if isinstance(_veto_pred, dict):
-                            _vp_dir = (_veto_pred.get("direction") or "").upper()
-                            _vp_conf = _veto_pred.get("confidence", 0) or 0
+                        from signals.prediction_calibrator import calibrated_prediction
+                        _now_et = None
+                        try:
+                            from datetime import datetime
+                            import pytz
+                            _now_et = datetime.now(pytz.timezone("US/Eastern"))
+                            _cur_hour = _now_et.hour
+                        except Exception:
+                            _cur_hour = None
+                        _cal_pred = calibrated_prediction(
+                            minutes=60, df=sim_df, regime=regime, hour=_cur_hour,
+                        )
+                        if isinstance(_cal_pred, dict):
+                            if not _cal_pred.get("pass_filter", True):
+                                results.append({
+                                    "sim_id": sim_id,
+                                    "status": "skipped",
+                                    "reason": "calibrator_filtered",
+                                    "direction": direction,
+                                    "cal_reason": _cal_pred.get("reason"),
+                                    "entry_context": entry_context,
+                                    "signal_mode": signal_mode,
+                                })
+                                continue
+                            # Veto: opposing direction with LOW confidence (inverted)
+                            _vp_dir = (_cal_pred.get("direction") or "").upper()
+                            _vp_conf = _cal_pred.get("confidence", 0) or 0
                             _sig_dir = direction.upper()
-                            if (_vp_conf > 0.70
+                            if (_vp_conf < 0.40
                                     and _vp_dir in ("BULLISH", "BEARISH")
                                     and _vp_dir != _sig_dir):
                                 results.append({

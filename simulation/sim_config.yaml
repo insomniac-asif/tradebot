@@ -1706,3 +1706,124 @@ SIM39:
   profit_target_pct: 0.35
   trailing_stop_activate_pct: 0.10
   trailing_stop_trail_pct: 0.05
+
+# ── Single-Ticker Sims (SIM40–SIM43) ─────────────────────────────────
+# Dedicated per-ticker paper sims for TSLA, NVDA, AAPL, MSFT.
+# TREND_PULLBACK strategy — best understood at 61.8% directional accuracy.
+# TSLA/NVDA: wider SL/TP (higher realized vol). AAPL/MSFT: tighter (lower vol).
+
+SIM40:
+  name: "TSLA Trend Pullback"
+  signal_mode: "TREND_PULLBACK"
+  symbols:
+  - TSLA
+  execution_mode: paper
+  horizon: intraday
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 600
+  hold_max_seconds: 5400
+  cutoff_time_et: '15:30'
+  balance_start: 500
+  small_account_mode: true
+  death_threshold: 50
+  max_position_pct: 0.20
+  risk_per_trade_pct: 0.02
+  daily_loss_limit_pct: 0.05
+  max_open_trades: 1
+  exposure_cap_pct: 0.20
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.35
+  profit_target_pct: 0.65
+  trailing_stop_activate_pct: 0.20
+  trailing_stop_trail_pct: 0.10
+
+SIM41:
+  name: "NVDA Trend Pullback"
+  signal_mode: "TREND_PULLBACK"
+  symbols:
+  - NVDA
+  execution_mode: paper
+  horizon: intraday
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 600
+  hold_max_seconds: 5400
+  cutoff_time_et: '15:30'
+  balance_start: 500
+  small_account_mode: true
+  death_threshold: 50
+  max_position_pct: 0.20
+  risk_per_trade_pct: 0.02
+  daily_loss_limit_pct: 0.05
+  max_open_trades: 1
+  exposure_cap_pct: 0.20
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.35
+  profit_target_pct: 0.65
+  trailing_stop_activate_pct: 0.20
+  trailing_stop_trail_pct: 0.10
+
+SIM42:
+  name: "AAPL Trend Pullback"
+  signal_mode: "TREND_PULLBACK"
+  symbols:
+  - AAPL
+  execution_mode: paper
+  horizon: intraday
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 600
+  hold_max_seconds: 5400
+  cutoff_time_et: '15:30'
+  balance_start: 500
+  small_account_mode: true
+  death_threshold: 50
+  max_position_pct: 0.20
+  risk_per_trade_pct: 0.02
+  daily_loss_limit_pct: 0.05
+  max_open_trades: 1
+  exposure_cap_pct: 0.20
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.30
+  profit_target_pct: 0.55
+  trailing_stop_activate_pct: 0.15
+  trailing_stop_trail_pct: 0.08
+
+SIM43:
+  name: "MSFT Trend Pullback"
+  signal_mode: "TREND_PULLBACK"
+  symbols:
+  - MSFT
+  execution_mode: paper
+  horizon: intraday
+  dte_min: 0
+  dte_max: 1
+  otm_pct: 0.005
+  hold_min_seconds: 600
+  hold_max_seconds: 5400
+  cutoff_time_et: '15:30'
+  balance_start: 500
+  small_account_mode: true
+  death_threshold: 50
+  max_position_pct: 0.20
+  risk_per_trade_pct: 0.02
+  daily_loss_limit_pct: 0.05
+  max_open_trades: 1
+  exposure_cap_pct: 0.20
+  max_spread_pct: 0.15
+  entry_slippage: 0.01
+  exit_slippage: 0.01
+  stop_loss_pct: 0.30
+  profit_target_pct: 0.55
+  trailing_stop_activate_pct: 0.15
+  trailing_stop_trail_pct: 0.08

@@ -10,7 +10,7 @@ How it works
 For each context slice (regime, session, volatility) and each predicted
 direction (bullish / bearish / range), we compute a Laplace-smoothed
 win rate.  The win rate is compared against the random-chance baseline
-(1/3 for a 3-class problem) and converted into an additive pre-softmax
+(1/2 for binary directional) and converted into an additive pre-softmax
 score adjustment:
 
     bias = (smoothed_wr - BASELINE) * SCALE
@@ -39,7 +39,7 @@ WEIGHTS_FILE = os.path.join(DATA_DIR, "predictor_weights.json")
 PRED_FILE    = os.path.join(DATA_DIR, "predictions.csv")  # legacy constant
 
 # ── tuning knobs ─────────────────────────────────────────────────────────────
-BASELINE        = 1 / 3          # random-chance win rate for 3-class problem
+BASELINE        = 1 / 2          # random-chance win rate for binary directional
 PRIOR_COUNT     = 8              # Laplace smoothing: equivalent to 8 balanced samples
 SCALE_REGIME    = 1.2            # pre-softmax bias strength for regime signal
 SCALE_SESSION   = 0.8            # pre-softmax bias strength for session signal

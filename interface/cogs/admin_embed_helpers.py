@@ -11,7 +11,7 @@ from interface.shared_state import _append_footer, _add_field_icons, _format_ts
 def _build_system_status_embed(acc, status, report, market_status, now, total_trades) -> discord.Embed:
     """Build the !system command embed. Returns a discord.Embed."""
     embed = discord.Embed(
-        title="🧠 SPY AI Control Center",
+        title="🧠 AI Control Center",
         color=discord.Color.green() if status == "HEALTHY" else discord.Color.orange()
     )
     embed.add_field(name=_add_field_icons("Market"), value=market_status, inline=True)

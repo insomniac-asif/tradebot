@@ -176,7 +176,7 @@ def _build_health_embed(acc: dict, now: datetime, start_time: float) -> discord.
         color = discord.Color.red()
         status_icon = "🔴"
 
-    embed = discord.Embed(title="🧠 SPY AI System Health", color=color)
+    embed = discord.Embed(title="🧠 AI System Health", color=color)
     embed.add_field(name="🧠 System Status", value=f"{status_icon} {status}", inline=True)
     embed.add_field(name="🟢 Market", value=market_status, inline=True)
     embed.add_field(name="🧰 Risk Mode", value=risk_mode, inline=True)
