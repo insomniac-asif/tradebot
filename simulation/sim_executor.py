@@ -1,6 +1,7 @@
 from datetime import datetime
 import pytz
 from typing import Dict, Tuple
+from core.slippage import estimate_spread_pct, compute_slippage
 
 
 def sim_try_fill(
@@ -16,22 +17,27 @@ def sim_try_fill(
     if bid <= 0 or ask <= 0 or ask < bid:
         return None, "invalid_quote"
     spread_pct = (ask - bid) / ask
-    if spread_pct > profile["max_spread_pct"]:
+    max_spread = float(profile.get("max_spread_pct", 0.15))
+    if spread_pct > max_spread:
         return None, "spread_too_wide"
     mid = (bid + ask) / 2
-    slippage = float(profile.get("entry_slippage" if side == "entry" else "exit_slippage", 0.01))
+
+    # Spread-aware slippage: use actual bid/ask spread
+    real_spread_pct = estimate_spread_pct(bid=bid, ask=ask)
+    slippage = compute_slippage(side, real_spread_pct)
+
     if side == "entry":
         fill_price = mid * (1 + slippage)
-        price_source = "mid_plus_slippage"
+        price_source = "mid_plus_spread_slippage"
     else:
         fill_price = mid * (1 - slippage)
-        price_source = "mid_minus_slippage"
+        price_source = "mid_minus_spread_slippage"
     return {
         "fill_price": round(fill_price, 4),
         "filled_qty": int(qty),
         "mid": round(mid, 4),
         "spread_pct": round(spread_pct, 4),
-        "slippage_applied": slippage,
+        "slippage_applied": round(slippage, 4),
         "side": side,
         "price_source": price_source
     }, None

@@ -33,6 +33,9 @@ class BacktestTrade:
     mfe_pct: float = 0.0       # max favorable excursion (option price % from entry)
     mae_pct: float = 0.0       # max adverse excursion (option price % from entry, positive)
     mfe_estimated: bool = False # True if any bar used synthetic price proxy
+    entry_slippage_pct: float = 0.0
+    exit_slippage_pct: float = 0.0
+    spread_pct_at_entry: float = 0.0
 
 
 @dataclass

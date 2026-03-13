@@ -8,9 +8,9 @@ Design:
 - If signal fires: selects an option contract, fetches its bars from Alpaca/cache
 - Tracks open position bar-by-bar, applying exit conditions
 - Respects death_threshold and target_hit tracking
-- Multiple runs: each "run" starts at balance_start=500, ends when blown (<= death_threshold)
-  or data is exhausted; then resets to 500 and continues from the same bar
-- Applies 2% slippage on entry (entry * 1.02), 2% slippage on exit (exit * 0.98)
+- Multiple runs: each "run" starts at balance_start (default $3000), ends when blown
+  (<= death_threshold) or data is exhausted; then resets and continues from the same bar
+- Applies spread-aware slippage based on option DTE and moneyness (via core.slippage)
 """
 from __future__ import annotations
 
@@ -29,16 +29,14 @@ from backtest.data_fetcher import fetch_stock_bars, fetch_option_bars, build_occ
 from backtest.signal_adapter import get_signal, compute_features_for_backtest, _prepare_df_with_indicators
 from backtest.exit_adapter import check_exit_conditions
 from backtest.results import BacktestTrade, BacktestRun, BacktestSummary
-
-ENTRY_SLIPPAGE = 0.01   # 1% worse than mid on entry
-EXIT_SLIPPAGE = 0.01    # 1% worse than mid on exit
+from core.slippage import estimate_spread_pct, compute_slippage
 
 MARKET_OPEN = dt_time(9, 31)
 ENTRY_CUTOFF = dt_time(15, 45)  # No new entries after this time
 EOD_CLOSE = dt_time(15, 58)     # Force close all at this time
 
-DEFAULT_BALANCE_START = 500.0
-DEFAULT_DEATH_THRESHOLD = 25.0
+DEFAULT_BALANCE_START = 3000.0
+DEFAULT_DEATH_THRESHOLD = 150.0
 TARGET_BALANCE = 5_000.0
 
 BARS_WARMUP = 30  # Minimum bars needed before signal evaluation
@@ -404,6 +402,11 @@ class _OpenTrade:
     mfe_pct: float = 0.0   # max favorable excursion (option price pct from entry)
     mae_pct: float = 0.0   # max adverse excursion (option price pct from entry, stored positive)
     mfe_estimated: bool = False  # True if any bar used synthetic price proxy
+    # Slippage tracking
+    entry_slippage_pct: float = 0.01
+    spread_pct_at_entry: float = 0.0
+    dte_at_entry: int = 0
+    otm_pct_at_entry: float = 0.0
     # Context for optimizer
     regime: str = ""
     confidence: float = 0.0
@@ -674,7 +677,8 @@ class BacktestEngine:
                 open_trade.trailing_stop_high = float(trade_dict.get("trailing_stop_high") or 0)
 
                 if should_exit and exit_reason != "still_open":
-                    actual_exit_price = exit_price * (1 - EXIT_SLIPPAGE)
+                    _exit_slip = compute_slippage("exit", open_trade.spread_pct_at_entry)
+                    actual_exit_price = exit_price * (1 - _exit_slip)
                     exit_proceeds = actual_exit_price * open_trade.qty * 100
                     entry_notional = open_trade.entry_price * open_trade.qty * 100
                     pnl = exit_proceeds - entry_notional
@@ -710,6 +714,9 @@ class BacktestEngine:
                         mfe_pct=round(open_trade.mfe_pct, 6),
                         mae_pct=round(open_trade.mae_pct, 6),
                         mfe_estimated=open_trade.mfe_estimated,
+                        entry_slippage_pct=round(open_trade.entry_slippage_pct, 4),
+                        exit_slippage_pct=round(_exit_slip, 4),
+                        spread_pct_at_entry=round(open_trade.spread_pct_at_entry, 4),
                     )
                     run_trades.append(bt_trade)
                     equity_curve.append({
@@ -830,7 +837,10 @@ class BacktestEngine:
                 if entry_opt_price is None or entry_opt_price <= 0:
                     continue
 
-                fill_price = entry_opt_price * (1 + ENTRY_SLIPPAGE)
+                _dte = max(0, (expiry - trade_date).days) if trade_date and expiry else 1
+                _entry_spread = estimate_spread_pct(dte=_dte, otm_pct=otm_pct)
+                _entry_slip = compute_slippage("entry", _entry_spread)
+                fill_price = entry_opt_price * (1 + _entry_slip)
 
                 qty, risk_dollars, block_reason = _position_size(balance, fill_price, self.profile)
                 if block_reason or qty <= 0:
@@ -862,6 +872,10 @@ class BacktestEngine:
                     balance_before=balance + notional,
                     peak_price=fill_price, regime=regime,
                     confidence=signal_confidence,
+                    entry_slippage_pct=_entry_slip,
+                    spread_pct_at_entry=_entry_spread,
+                    dte_at_entry=_dte,
+                    otm_pct_at_entry=otm_pct,
                 )
                 daily_trades += 1
 
@@ -876,7 +890,8 @@ class BacktestEngine:
                 )
                 if last_opt_price is None or last_opt_price <= 0:
                     last_opt_price = open_trade.entry_price * 0.80
-                actual_exit = last_opt_price * (1 - EXIT_SLIPPAGE)
+                _eod_exit_slip = compute_slippage("exit", open_trade.spread_pct_at_entry)
+                actual_exit = last_opt_price * (1 - _eod_exit_slip)
                 exit_proceeds = actual_exit * open_trade.qty * 100
                 entry_notional = open_trade.entry_price * open_trade.qty * 100
                 pnl = exit_proceeds - entry_notional
@@ -1058,6 +1073,9 @@ class BacktestEngine:
                 "mfe_pct": t.mfe_pct,
                 "mae_pct": t.mae_pct,
                 "mfe_estimated": t.mfe_estimated,
+                "entry_slippage_pct": t.entry_slippage_pct,
+                "exit_slippage_pct": t.exit_slippage_pct,
+                "spread_pct_at_entry": t.spread_pct_at_entry,
             }
             for t in trades
         ]
