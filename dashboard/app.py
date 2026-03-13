@@ -55,7 +55,7 @@ from dashboard.app_helpers2 import _handle_get_sim
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIM_DIR = os.path.join(BASE_DIR, "data", "sims")
 PREDICTIONS_CSV = os.path.join(BASE_DIR, "data", "predictions.csv")
-CANDLES_CSV = os.path.join(BASE_DIR, "data", "spy_1m.csv")
+CANDLES_CSV = os.path.join(BASE_DIR, "data")  # per-symbol CSVs in data/ dir
 CONFIG_PATH = os.path.join(BASE_DIR, "simulation", "sim_config.yaml")
 HEARTBEAT_PATH = os.path.join(BASE_DIR, "data", "heartbeat.json")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -129,7 +129,7 @@ async def list_sims():
         if not re.match(r'^SIM\d+$', str(sim_id).upper()):
             continue
         data = _load_sim(sim_id)
-        _cfg_syms = profile.get("symbols") or ([profile.get("symbol")] if profile.get("symbol") else ["SPY"])
+        _cfg_syms = profile.get("symbols") or ([profile.get("symbol")] if profile.get("symbol") else [])
         if data is None:
             results.append({
                 "sim_id": sim_id,
@@ -192,52 +192,68 @@ async def get_sim(sim_id: str):
 
 
 @app.get("/api/chart")
-async def get_chart(symbol: str = "SPY", bars: int = 480):
+async def get_chart(symbol: str = None, bars: int = 480):
     """Return last N 1-min candles for a symbol using live data_service (never stale CSV)."""
     return await _handle_get_chart(symbol, bars)
 
 
 @app.get("/api/predictions")
 async def get_predictions(symbol: str = None):
-    """Return last 30 minutes of predictions from predictions.csv, optionally filtered by symbol."""
+    """Return last 30 minutes of predictions from SQLite, optionally filtered by symbol."""
     try:
-        df = pd.read_csv(PREDICTIONS_CSV)
-        df.columns = [c.lower() for c in df.columns]
-        ts_col = next((c for c in ("time", "timestamp", "datetime") if c in df.columns), None)
-        if ts_col is None:
+        from core.analytics_db import read_df as _db_read_df
+        import asyncio
+
+        if symbol:
+            df = await asyncio.to_thread(
+                _db_read_df,
+                "SELECT * FROM predictions WHERE UPPER(symbol) = ?",
+                [symbol.upper()],
+            )
+        else:
+            df = await asyncio.to_thread(_db_read_df, "SELECT * FROM predictions")
+
+        if df.empty:
             return {"predictions": [], "latest": None}
 
+        ts_col = "time"
         df[ts_col] = pd.to_datetime(df[ts_col], format="mixed", errors="coerce")
         df = df.dropna(subset=[ts_col])
         df = df.sort_values(ts_col)
 
-        # Symbol filter — rows without "symbol" column are treated as SPY (legacy)
-        if symbol:
-            sym_upper = symbol.upper()
-            if "symbol" in df.columns:
-                df = df[df["symbol"].fillna("SPY").str.upper() == sym_upper]
-            elif sym_upper != "SPY":
-                # No symbol column yet and requesting non-SPY → no results
-                return {"predictions": [], "latest": None, "symbol": sym_upper}
+        if df.empty:
+            return {"predictions": [], "latest": None}
 
         # Use today's ET date as cutoff — fall back to last day with predictions if today is empty
         _et_tz = pytz.timezone("America/New_York")
         _today_date = datetime.now(_et_tz).date()
-        if df[ts_col].dt.tz is not None:
-            cutoff = pd.Timestamp(_today_date, tz=_et_tz)
-        else:
-            cutoff = pd.Timestamp(_today_date)
+        cutoff = pd.Timestamp(_today_date)
 
         recent = df[df[ts_col] >= cutoff]
 
         # If no predictions today, fall back to the last day that has data
         if recent.empty and not df.empty:
             _last_date = df[ts_col].dt.date.iloc[-1]
-            if df[ts_col].dt.tz is not None:
-                _last_cutoff = pd.Timestamp(_last_date, tz=_et_tz)
-            else:
-                _last_cutoff = pd.Timestamp(_last_date)
+            _last_cutoff = pd.Timestamp(_last_date)
             recent = df[df[ts_col] >= _last_cutoff]
+
+        # Deduplicate: backfill writes predictions at exact :00.000000 timestamps
+        # from potentially stale CSV data, while the live watcher writes at
+        # fractional-second timestamps with fresh prices. For today's predictions,
+        # drop backfill rows entirely when live rows exist for the same symbol.
+        # For historical dates, keep backfill rows (they're the only source).
+        if not recent.empty and "symbol" in recent.columns:
+            recent = recent.copy()
+            _today = pd.Timestamp(datetime.now(pytz.timezone("America/New_York")).date())
+            _is_today = recent[ts_col] >= _today
+            _is_backfill = recent[ts_col].dt.microsecond == 0
+            # For today: if any live (non-backfill) rows exist for a symbol, drop all backfill rows for it
+            if _is_today.any():
+                _today_df = recent[_is_today]
+                _live_symbols = set(_today_df.loc[~_is_backfill[_is_today], "symbol"]) if "symbol" in _today_df.columns else set()
+                if _live_symbols:
+                    _drop_mask = _is_today & _is_backfill & recent["symbol"].isin(_live_symbols)
+                    recent = recent[~_drop_mask]
 
         preds = []
         for _, row in recent.iterrows():
@@ -246,7 +262,7 @@ async def get_predictions(symbol: str = None):
                 ts_val = ts_val.tz_localize(pytz.timezone("America/New_York"), ambiguous=True, nonexistent="shift_forward")
             entry = {"time": ts_val.isoformat()}
             for col in df.columns:
-                if col == ts_col:
+                if col in (ts_col, "id"):
                     continue
                 val = row[col]
                 try:
@@ -515,6 +531,42 @@ async def get_backtest_results_sim(sim_id: str):
     if sim_id_upper in all_data:
         return all_data[sim_id_upper]
     return {"error": f"No backtest data for {sim_id}"}
+
+
+@app.get("/api/backtest/patterns/{sim_id}")
+async def get_backtest_patterns(sim_id: str):
+    path = os.path.join(BASE_DIR, "backtest", "results", f"patterns_{sim_id.upper()}.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+@app.get("/api/backtest/growth/{sim_id}")
+async def get_backtest_growth(sim_id: str):
+    path = os.path.join(BASE_DIR, "backtest", "results", f"growth_{sim_id.upper()}.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+@app.get("/api/backtest/optimizer/{sim_id}")
+async def get_backtest_optimizer_results(sim_id: str):
+    path = os.path.join(BASE_DIR, "backtest", "results", f"optimizer_{sim_id.upper()}.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 @app.get("/api/backtest/optimize/{sim_id}")
