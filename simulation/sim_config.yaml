@@ -20,6 +20,8 @@ _global:
   max_directional_sims: 4
   cross_sim_guard_enabled: true
   max_family_concurrent: 2
+  correlation_guard_enabled: true
+  max_correlated_group_sims: 6
   small_account_mode: true
   default_balance_start: 3000
   death_threshold: 150

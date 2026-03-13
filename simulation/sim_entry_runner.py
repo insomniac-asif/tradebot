@@ -305,6 +305,34 @@ async def run_sim_entries(
                             })
                             continue
 
+                    # Correlation-aware exposure guard (OPPORTUNITY path)
+                    if global_config.get("correlation_guard_enabled", False):
+                        try:
+                            _max_corr = int(global_config.get("max_correlated_group_sims", 6))
+                        except (TypeError, ValueError):
+                            _max_corr = 6
+                        try:
+                            from simulation.correlation_guard import check_correlation_limit
+                            _corr_block = check_correlation_limit(
+                                direction, _trade_symbol, _PROFILES,
+                                max_correlated=_max_corr, exclude_sim=sim_id,
+                            )
+                            if _corr_block is not None:
+                                results.append({
+                                    "sim_id": sim_id,
+                                    "status": "skipped",
+                                    "reason": "correlated_exposure_limit",
+                                    "correlation_group": _corr_block.get("correlation_group"),
+                                    "effective_direction": _corr_block.get("effective_direction"),
+                                    "current_count": _corr_block.get("current_count"),
+                                    "max_allowed": _corr_block.get("max_allowed"),
+                                    "entry_context": entry_context,
+                                    "signal_mode": signal_mode,
+                                })
+                                continue
+                        except Exception:
+                            pass
+
                     # ML prediction
                     from datetime import datetime
                     import pytz
@@ -590,6 +618,34 @@ async def run_sim_entries(
                                     "signal_mode": signal_mode,
                                 })
                                 continue
+
+                # ── Correlation-aware exposure guard ──────────────────────
+                if global_config.get("correlation_guard_enabled", False):
+                    try:
+                        _max_corr = int(global_config.get("max_correlated_group_sims", 6))
+                    except (TypeError, ValueError):
+                        _max_corr = 6
+                    try:
+                        from simulation.correlation_guard import check_correlation_limit
+                        _corr_block = check_correlation_limit(
+                            direction, _trade_symbol, _PROFILES,
+                            max_correlated=_max_corr, exclude_sim=sim_id,
+                        )
+                        if _corr_block is not None:
+                            results.append({
+                                "sim_id": sim_id,
+                                "status": "skipped",
+                                "reason": "correlated_exposure_limit",
+                                "correlation_group": _corr_block.get("correlation_group"),
+                                "effective_direction": _corr_block.get("effective_direction"),
+                                "current_count": _corr_block.get("current_count"),
+                                "max_allowed": _corr_block.get("max_allowed"),
+                                "entry_context": entry_context,
+                                "signal_mode": signal_mode,
+                            })
+                            continue
+                    except Exception:
+                        pass
 
                 # ── Confluence scoring ─────────────────────────────────
                 if direction and feature_snapshot is not None:
