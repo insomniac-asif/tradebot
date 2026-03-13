@@ -504,8 +504,19 @@ async def run_sim_entries(
                         pass
                     continue
 
+                # ── Analytics-driven adjustments ──────────────────────────
+                _analytics_adj = None
+                try:
+                    from analytics.decision_gates import get_analytics_adjustments
+                    _analytics_adj = get_analytics_adjustments(sim_id, profile)
+                except Exception:
+                    pass
+
                 # ── Predictor veto gate (veto_only mode) ─────────────────
                 _pred_mode = (_GLOBAL_CONFIG.get("predictor_mode") or "veto_only").lower()
+                # Analytics override: disable predictor if accuracy too low
+                if isinstance(_analytics_adj, dict) and _analytics_adj.get("predictor_override") == "disabled":
+                    _pred_mode = "disabled"
                 if _pred_mode == "veto_only" and direction:
                     try:
                         from signals.predictor import make_prediction as _mp
@@ -719,6 +730,12 @@ async def run_sim_entries(
                             continue
                     except Exception as _ap_exc:
                         logging.debug("anti_pattern_filter_error: %s", _ap_exc)
+
+                # Apply analytics size multiplier (feature drift → half size)
+                if isinstance(_analytics_adj, dict) and _analytics_adj.get("size_multiplier", 1.0) < 1.0:
+                    _sm = _analytics_adj["size_multiplier"]
+                    _orig_risk = float(effective_profile.get("risk_per_trade_pct", 0.02))
+                    effective_profile["risk_per_trade_pct"] = _orig_risk * _sm
 
                 execution_mode = sim.profile.get("execution_mode")
                 if execution_mode == "live":
