@@ -326,6 +326,8 @@ function updateWallPoster(sims) {
   const totalPnl    = sims.reduce((s, x) => s + (x.pnl_dollars || 0), 0);
   const activeCount = sims.filter(x => x.open_count > 0).length;
   const sign = totalPnl >= 0 ? '+' : '';
+  const pnlColor = totalPnl > 0 ? '#22c55e' : totalPnl < 0 ? '#ef4444' : '#6b4226';
+  el.style.color = pnlColor;
   if (activeCount > 0) {
     el.innerHTML = `${activeCount} OPEN<br>${sign}$${Math.abs(totalPnl).toFixed(0)}`;
   } else {
@@ -5143,3 +5145,4 @@ async function fetchPredictorChart() {
     console.warn('Predictor chart error:', e);
   }
 }
+

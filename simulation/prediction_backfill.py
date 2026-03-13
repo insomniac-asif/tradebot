@@ -62,36 +62,40 @@ def backfill_missed_predictions() -> dict:
     try:
         now_et = datetime.now(ET)
 
-        # Only backfill during market hours (9:30 - 16:00 ET)
+        # Skip weekends (no market data)
+        if now_et.weekday() >= 5:
+            return {"total_slots": 0, "predictions_generated": 0, "reason": "weekend"}
+
         market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
 
-        if now_et < market_open or now_et > market_close:
-            return {"total_slots": 0, "predictions_generated": 0, "reason": "outside_market_hours"}
+        # Too early — market hasn't opened yet
+        if now_et < market_open:
+            return {"total_slots": 0, "predictions_generated": 0, "reason": "before_market_open"}
 
         # If bot started within first 10 minutes, no backfill needed
         if now_et <= market_open + timedelta(minutes=10):
             return {"total_slots": 0, "predictions_generated": 0, "reason": "near_market_open"}
 
-        # Find last prediction timestamp in SQLite for today
-        last_pred_time = _get_last_prediction_time_today()
+        # Find existing prediction timestamps for today to detect ALL gaps
+        existing_slots = _get_prediction_slots_today()
 
-        if last_pred_time is not None:
-            gap_start = last_pred_time + timedelta(minutes=10)
-        else:
-            # No predictions today — start from first 10-min slot after open
-            gap_start = market_open + timedelta(minutes=10)
+        # Cap gap_end at market close (don't backfill beyond 16:00)
+        gap_end = min(now_et, market_close) - timedelta(minutes=1)
 
-        # Round gap_start up to next 10-minute boundary
-        gap_start = gap_start.replace(
-            minute=(gap_start.minute // 10) * 10,
-            second=0,
-            microsecond=0,
-        )
+        # Generate all expected 10-minute slots from 9:40 to gap_end
+        first_slot = market_open + timedelta(minutes=10)
+        all_expected = []
+        current = first_slot
+        while current <= gap_end:
+            if market_open <= current <= market_close:
+                all_expected.append(current)
+            current += timedelta(minutes=10)
 
-        # Don't backfill into the future
-        gap_end = now_et - timedelta(minutes=1)
-        if gap_start >= gap_end:
+        # Find missing slots (expected but no prediction exists within that window)
+        slots = [s for s in all_expected if s not in existing_slots]
+
+        if not slots:
             return {"total_slots": 0, "predictions_generated": 0, "reason": "no_gap"}
 
         # Load symbol registry
@@ -115,18 +119,11 @@ def backfill_missed_predictions() -> dict:
         if not sym_dfs:
             return {"total_slots": 0, "predictions_generated": 0, "reason": "no_dataframes"}
 
-        # Generate 10-minute slots to backfill
+        # Generate predictions for missing slots
         from signals.predictor import make_prediction
         from signals.regime import get_regime
         from signals.volatility import volatility_state
         from analytics.prediction_stats import log_prediction
-
-        slots = []
-        current = gap_start
-        while current <= gap_end:
-            if market_open <= current <= market_close:
-                slots.append(current)
-            current += timedelta(minutes=10)
 
         total_predictions = 0
 
@@ -134,14 +131,23 @@ def backfill_missed_predictions() -> dict:
             for sym, sym_df in sym_dfs.items():
                 try:
                     # Slice df up to this slot time (simulate having data only up to that point)
+                    # The dataframe may have timestamp as index or as a column
+                    slot_naive = slot_time.replace(tzinfo=None) if slot_time.tzinfo else slot_time
                     if "timestamp" in sym_df.columns:
                         ts_col = sym_df["timestamp"]
                         if hasattr(ts_col.iloc[0], "tzinfo") and ts_col.iloc[0].tzinfo is not None:
-                            slot_aware = slot_time if slot_time.tzinfo else ET.localize(slot_time)
-                            mask = ts_col <= slot_aware
+                            slot_cmp = slot_time if slot_time.tzinfo else ET.localize(slot_time)
                         else:
-                            mask = ts_col <= slot_time.replace(tzinfo=None)
-                        sliced = sym_df[mask]
+                            slot_cmp = slot_naive
+                        sliced = sym_df[ts_col <= slot_cmp]
+                    elif sym_df.index.name and "time" in sym_df.index.name.lower():
+                        # Timestamp is the index (common from get_symbol_dataframe)
+                        idx = sym_df.index
+                        if hasattr(idx, "tz") and idx.tz is not None:
+                            slot_cmp = slot_time if slot_time.tzinfo else ET.localize(slot_time)
+                        else:
+                            slot_cmp = slot_naive
+                        sliced = sym_df[idx <= slot_cmp]
                     else:
                         sliced = sym_df
 
@@ -166,15 +172,16 @@ def backfill_missed_predictions() -> dict:
         logging.error(
             "prediction_backfill_complete: slots=%d predictions=%d symbols=%d gap=%s_to_%s",
             len(slots), total_predictions, len(sym_dfs),
-            gap_start.strftime("%H:%M"), gap_end.strftime("%H:%M"),
+            slots[0].strftime("%H:%M") if slots else "N/A",
+            slots[-1].strftime("%H:%M") if slots else "N/A",
         )
 
         return {
             "total_slots": len(slots),
             "predictions_generated": total_predictions,
             "symbols": list(sym_dfs.keys()),
-            "gap_start": gap_start.isoformat(),
-            "gap_end": gap_end.isoformat(),
+            "gap_start": slots[0].isoformat() if slots else None,
+            "gap_end": slots[-1].isoformat() if slots else None,
         }
 
     except Exception:
@@ -182,25 +189,35 @@ def backfill_missed_predictions() -> dict:
         return {"total_slots": 0, "predictions_generated": 0, "reason": "error"}
 
 
-def _get_last_prediction_time_today() -> datetime | None:
-    """Query SQLite for the most recent prediction timestamp today."""
+def _get_prediction_slots_today() -> set:
+    """Return the set of 10-min slot datetimes that already have predictions today."""
     try:
         from core.analytics_db import get_conn
         today_str = datetime.now(ET).strftime("%Y-%m-%d")
         conn = get_conn()
         try:
             cursor = conn.execute(
-                "SELECT MAX(time) FROM predictions WHERE time LIKE ?",
+                "SELECT time FROM predictions WHERE time LIKE ?",
                 (f"{today_str}%",),
             )
-            row = cursor.fetchone()
-            if row and row[0]:
-                dt = datetime.fromisoformat(str(row[0]))
-                if dt.tzinfo is None:
-                    dt = ET.localize(dt)
-                return dt
+            slots = set()
+            for row in cursor.fetchall():
+                try:
+                    dt = datetime.fromisoformat(str(row[0]))
+                    if dt.tzinfo is None:
+                        dt = ET.localize(dt)
+                    # Round down to 10-min boundary
+                    slot = dt.replace(
+                        minute=(dt.minute // 10) * 10,
+                        second=0,
+                        microsecond=0,
+                    )
+                    slots.add(slot)
+                except Exception:
+                    continue
+            return slots
         finally:
             conn.close()
     except Exception:
         pass
-    return None
+    return set()

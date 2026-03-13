@@ -433,4 +433,12 @@ async def on_command_error(ctx, error):
         return
     await _send_embed(ctx, "⚠️ Internal error occurred. Logged for review.")
 
-bot.run(DISCORD_TOKEN)
+try:
+    bot.run(DISCORD_TOKEN)
+except KeyboardInterrupt:
+    logging.error("bot_stopped_by_user")
+except RuntimeError as e:
+    if "Event loop stopped" in str(e):
+        logging.error("bot_shutdown_complete")
+    else:
+        raise

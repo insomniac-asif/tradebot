@@ -215,13 +215,23 @@ async def conviction_watcher(bot, alert_channel_id):
 
     drift = detect_feature_drift()
     if drift:
-        severity = drift["severity"]
-        features = "\n".join(drift["features"])
-        await _send(channel,
-            f"⚠️ **Feature Drift Detected**\n\n"
-            f"Severity: {severity}\n"
-            f"{features}"
+        # Only send drift alerts during/near market hours (9:30-16:15 ET)
+        _now_et = datetime.now(pytz.timezone("US/Eastern"))
+        _in_market_window = (
+            _now_et.weekday() < 5
+            and _now_et.hour * 60 + _now_et.minute >= 9 * 60 + 30
+            and _now_et.hour * 60 + _now_et.minute <= 16 * 60 + 15
         )
+        if _in_market_window:
+            severity = drift["severity"]
+            features = "\n".join(drift["features"])
+            await _send(channel,
+                f"⚠️ **Feature Drift Detected**\n\n"
+                f"Severity: {severity}\n"
+                f"{features}"
+            )
+        else:
+            logging.error("feature_drift_suppressed: severity=%s after_hours=true", drift["severity"])
 
     while not bot.is_closed():
         try:

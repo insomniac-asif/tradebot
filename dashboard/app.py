@@ -259,23 +259,24 @@ async def get_predictions(symbol: str = None):
             _last_cutoff = pd.Timestamp(_last_date)
             recent = df[df[ts_col] >= _last_cutoff]
 
-        # Deduplicate: backfill writes predictions at exact :00.000000 timestamps
-        # from potentially stale CSV data, while the live watcher writes at
-        # fractional-second timestamps with fresh prices. For today's predictions,
-        # drop backfill rows entirely when live rows exist for the same symbol.
-        # For historical dates, keep backfill rows (they're the only source).
+        # Deduplicate: if both a backfill row and a live row exist for the
+        # exact same (symbol, 10-min slot), keep only the live row.  Backfill
+        # rows are identified by microsecond == 0.  This is narrow: non-
+        # overlapping backfill rows (filling gaps before the bot started) are
+        # always kept.
         if not recent.empty and "symbol" in recent.columns:
             recent = recent.copy()
-            _today = pd.Timestamp(datetime.now(pytz.timezone("America/New_York")).date())
-            _is_today = recent[ts_col] >= _today
             _is_backfill = recent[ts_col].dt.microsecond == 0
-            # For today: if any live (non-backfill) rows exist for a symbol, drop all backfill rows for it
-            if _is_today.any():
-                _today_df = recent[_is_today]
-                _live_symbols = set(_today_df.loc[~_is_backfill[_is_today], "symbol"]) if "symbol" in _today_df.columns else set()
-                if _live_symbols:
-                    _drop_mask = _is_today & _is_backfill & recent["symbol"].isin(_live_symbols)
-                    recent = recent[~_drop_mask]
+            # Round to 10-min slot for overlap detection
+            recent["_slot"] = recent[ts_col].dt.floor("10min")
+            _live = recent[~_is_backfill]
+            if not _live.empty:
+                _live_keys = set(zip(_live["symbol"], _live["_slot"]))
+                _dup_mask = _is_backfill & recent.apply(
+                    lambda r: (r["symbol"], r["_slot"]) in _live_keys, axis=1
+                )
+                recent = recent[~_dup_mask]
+            recent = recent.drop(columns=["_slot"])
 
         preds = []
         for _, row in recent.iterrows():
