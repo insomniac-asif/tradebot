@@ -9,14 +9,13 @@
 # to fill in the forward-return columns once market data is available.
 
 import os
-import csv
 from datetime import datetime, timedelta
 
 import pandas as pd
-from pandas.errors import EmptyDataError
 import pytz
 
 from core.paths import DATA_DIR
+from core.analytics_db import insert, read_df, transaction
 
 FILE = os.path.join(DATA_DIR, "blocked_signals.csv")
 HEADERS = [
@@ -41,17 +40,15 @@ HEADERS = [
 
 
 def _ensure_file() -> None:
-    if os.path.exists(FILE) and os.path.getsize(FILE) > 0:
-        return
-    with open(FILE, "w", newline="") as f:
-        csv.writer(f).writerow(HEADERS)
+    """No-op: schema is ensured at startup via analytics_db.init_db()."""
+    pass
 
 
 def _safe_round(val, decimals=4):
     try:
         return round(float(val), decimals)
     except (TypeError, ValueError):
-        return ""
+        return None
 
 
 def log_blocked_signal(ctx, spy_price) -> None:
@@ -64,32 +61,32 @@ def log_blocked_signal(ctx, spy_price) -> None:
     spy_price : float — current SPY price at decision time (pass df.iloc[-1]["close"])
     """
     try:
-        _ensure_file()
-
         blended = getattr(ctx, "blended_score", None)
         threshold = getattr(ctx, "threshold", None)
         delta = (
             _safe_round(blended - threshold, 6)
             if blended is not None and threshold is not None
-            else ""
+            else None
         )
 
-        row = [
-            datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-            _safe_round(spy_price),
-            getattr(ctx, "regime", None) or "",
-            getattr(ctx, "volatility", None) or "",
-            getattr(ctx, "direction_60m", None) or "",
-            _safe_round(getattr(ctx, "confidence_60m", None)),
-            _safe_round(blended),
-            _safe_round(threshold),
-            delta,
-            getattr(ctx, "block_reason", None) or "",
-            "", "", "", "", "pending", "pending",   # forward-return placeholders
-        ]
-
-        with open(FILE, "a", newline="") as f:
-            csv.writer(f).writerow(row)
+        insert("blocked_signals", {
+            "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+            "spy_price": _safe_round(spy_price),
+            "regime": getattr(ctx, "regime", None) or None,
+            "volatility": getattr(ctx, "volatility", None) or None,
+            "direction": getattr(ctx, "direction_60m", None) or None,
+            "confidence": _safe_round(getattr(ctx, "confidence_60m", None)),
+            "blended_score": _safe_round(blended),
+            "threshold": _safe_round(threshold),
+            "threshold_delta": delta,
+            "block_reason": getattr(ctx, "block_reason", None) or None,
+            "fwd_5m": None,
+            "fwd_15m": None,
+            "fwd_5m_price": None,
+            "fwd_15m_price": None,
+            "fwd_5m_status": "pending",
+            "fwd_15m_status": "pending",
+        })
     except Exception:
         pass
 
@@ -101,7 +98,7 @@ def update_blocked_outcomes(df=None) -> None:
     happens in the same cycle that already has a fresh market DataFrame.
 
     Only rows whose status is not already "filled" are updated.
-    Writes back to CSV only when at least one row changed.
+    Writes back only when at least one row changed.
     """
     try:
         if df is None:
@@ -110,20 +107,12 @@ def update_blocked_outcomes(df=None) -> None:
         if df is None:
             return
 
-        _ensure_file()
-
-        try:
-            signals = pd.read_csv(FILE, parse_dates=["timestamp"])
-        except (EmptyDataError, Exception):
-            return
+        signals = read_df(
+            "SELECT * FROM blocked_signals WHERE fwd_5m_status != 'filled' OR fwd_15m_status != 'filled'"
+        )
 
         if signals.empty:
             return
-
-        # Ensure all forward-return columns exist
-        for col in HEADERS:
-            if col not in signals.columns:
-                signals[col] = ""
 
         signals["timestamp"] = pd.to_datetime(signals["timestamp"], errors="coerce")
         signals = signals.dropna(subset=["timestamp"])
@@ -180,34 +169,38 @@ def update_blocked_outcomes(df=None) -> None:
                 return price, "filled"
             return price, "estimated"
 
-        changed = False
-        for i, row in signals.iterrows():
-            try:
-                base_price = float(row["spy_price"])
-            except (TypeError, ValueError):
-                continue
+        with transaction() as conn:
+            for _, row in signals.iterrows():
+                try:
+                    base_price = float(row["spy_price"])
+                except (TypeError, ValueError):
+                    continue
 
-            ts = row["timestamp"]
+                ts = row["timestamp"]
+                row_id = int(row["id"])
+                updates = {}
 
-            # 5-minute forward return
-            if row.get("fwd_5m_status") != "filled":
-                p5, s5 = _lookup(ts + timedelta(minutes=5))
-                if p5 is not None:
-                    signals.loc[i, "fwd_5m_price"] = round(p5, 4)
-                    signals.loc[i, "fwd_5m"] = round(p5 - base_price, 4)
-                    signals.loc[i, "fwd_5m_status"] = s5
-                    changed = True
+                # 5-minute forward return
+                if row.get("fwd_5m_status") != "filled":
+                    p5, s5 = _lookup(ts + timedelta(minutes=5))
+                    if p5 is not None:
+                        updates["fwd_5m_price"] = round(p5, 4)
+                        updates["fwd_5m"] = round(p5 - base_price, 4)
+                        updates["fwd_5m_status"] = s5
 
-            # 15-minute forward return
-            if row.get("fwd_15m_status") != "filled":
-                p15, s15 = _lookup(ts + timedelta(minutes=15))
-                if p15 is not None:
-                    signals.loc[i, "fwd_15m_price"] = round(p15, 4)
-                    signals.loc[i, "fwd_15m"] = round(p15 - base_price, 4)
-                    signals.loc[i, "fwd_15m_status"] = s15
-                    changed = True
+                # 15-minute forward return
+                if row.get("fwd_15m_status") != "filled":
+                    p15, s15 = _lookup(ts + timedelta(minutes=15))
+                    if p15 is not None:
+                        updates["fwd_15m_price"] = round(p15, 4)
+                        updates["fwd_15m"] = round(p15 - base_price, 4)
+                        updates["fwd_15m_status"] = s15
 
-        if changed:
-            signals.to_csv(FILE, index=False)
+                if updates:
+                    set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+                    conn.execute(
+                        f"UPDATE blocked_signals SET {set_clause} WHERE id = ?",
+                        list(updates.values()) + [row_id],
+                    )
     except Exception:
         pass

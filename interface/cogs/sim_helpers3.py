@@ -43,7 +43,9 @@ def _contract_label(symbol, direction, expiry, strike):
             elif c == "P": cp = "PUT"
         except Exception: cp = None
     et = expiry[:10] if isinstance(expiry, str) and len(expiry) >= 10 else ""
-    label = "SPY"
+    import re as _re_und
+    _und_m = _re_und.match(r'^([A-Z]{1,6})', symbol or "")
+    label = _und_m.group(1) if _und_m else ""
     if cp: label = f"{label} {cp}"
     if et: label = f"{label} {et}"
     if strike is None: strike = _parse_strike_from_symbol(symbol)
@@ -66,7 +68,7 @@ async def handle_simopen(ctx, bot, sim_id, page):
             try:
                 sp = _sim_path(sk)
                 if not os.path.exists(sp): continue
-                sim = SimPortfolio(sk, profiles.get(sk, {})); sim.load()
+                sim = SimPortfolio(sk, profiles.get(sk, {})); await asyncio.to_thread(sim.load)
                 ot = sim.open_trades if isinstance(sim.open_trades, list) else []
                 for t in ot:
                     tc = dict(t) if isinstance(t, dict) else {"trade_id": str(t)}

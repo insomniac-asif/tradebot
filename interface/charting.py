@@ -30,28 +30,29 @@ load_dotenv()
 API_KEY = os.getenv("APCA_API_KEY_ID")
 SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
 
-DATA_FILE = os.path.join(DATA_DIR, "qqq_1m.csv")
+DATA_FILE = os.path.join(DATA_DIR, "spy_1m.csv")
 from core.data_service import get_client, get_symbol_csv_path
 
 client = get_client()
 
-def generate_chart(symbol: str = "SPY"):
-    symbol = symbol.upper()
+def generate_chart(symbol: str = None):
+    symbol = (symbol or "").upper() or None
     df = None
 
-    # Try per-symbol CSV first (via registry), then SPY default CSV
-    csv_path = get_symbol_csv_path(symbol) or (DATA_FILE if symbol == "SPY" else None)
-    if csv_path and os.path.exists(csv_path):
-        try:
-            df = pd.read_csv(csv_path)
-        except Exception:
-            df = None
+    if symbol:
+        # Try per-symbol CSV first (via registry)
+        csv_path = get_symbol_csv_path(symbol)
+        if csv_path and os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path)
+            except Exception:
+                df = None
 
     if df is None or df.empty:
-        # Fallback to Alpaca via data_service (works for SPY)
-        df = get_market_dataframe()
+        # Fallback to data_service for the given symbol
+        df = get_market_dataframe(symbol=symbol)
         if df is None or df.empty:
-            print("No data available (CSV missing + Alpaca fallback failed)")
+            print(f"No data available for {symbol} (CSV missing + Alpaca fallback failed)")
             return False
 
     if df.empty or "timestamp" not in df.columns:
@@ -138,8 +139,10 @@ def generate_chart(symbol: str = "SPY"):
 
     return filepath
 
-def generate_live_chart(symbol: str = "SPY"):
-    symbol = symbol.upper()
+def generate_live_chart(symbol: str = None):
+    symbol = (symbol or "").upper() or None
+    if not symbol:
+        return False
     eastern = pytz.timezone("US/Eastern")
     now = datetime.now(eastern)
 
@@ -301,7 +304,7 @@ def generate_trade_replay(
         symbol  = trade.get("symbol") or ""
         if not symbol:
             m = _re.match(r'^([A-Z]{1,6})', opt_sym.upper())
-            symbol = m.group(1) if m else "SPY"
+            symbol = m.group(1) if m else ""
 
         # Parse ISO-8601 timestamps to naive Eastern Time
         def _to_et_naive(ts_str):

@@ -40,7 +40,7 @@ def _build_opp_embed_from_parts(
     vol: str,
     regime: str,
     _format_et,
-    symbol: str = "SPY",
+    symbol: str = None,
 ) -> discord.Embed:
     """Build and return the opportunity embed."""
     from datetime import datetime

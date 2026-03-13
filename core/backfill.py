@@ -8,13 +8,13 @@ Usage:
     from core.backfill import run_backfill, run_backfill_all_symbols, backfill_status
 
     # Single symbol (synchronous)
-    result = run_backfill(symbol="SPY", days_back=30)
+    result = run_backfill(symbol="AAPL", days_back=30)
 
     # All registered symbols (synchronous)
     results = run_backfill_all_symbols(days_back=30)
 
     # Async wrapper — use from bot commands
-    result  = await run_backfill_async(symbol="SPY", days_back=30, progress_cb=cb)
+    result  = await run_backfill_async(symbol="AAPL", days_back=30, progress_cb=cb)
     results = await run_backfill_all_symbols_async(days_back=30, progress_cb=cb)
 """
 
@@ -159,7 +159,7 @@ def _merge(existing: Optional[pd.DataFrame], new_rows: pd.DataFrame) -> pd.DataF
 
 # ── Public API ─────────────────────────────────────────────────────────────
 
-def backfill_status(symbol: str = "SPY") -> dict:
+def backfill_status(symbol: str = None) -> dict:
     """Return basic info about a symbol's CSV."""
     data_file = _get_data_file(symbol)
     df = _load_csv(data_file)
@@ -182,7 +182,7 @@ def backfill_status(symbol: str = "SPY") -> dict:
 
 def run_backfill(
     days_back: int = 30,
-    symbol: str = "SPY",
+    symbol: str = None,
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
@@ -256,7 +256,7 @@ def run_backfill_all_symbols(
     Returns {ok, results: {SYMBOL: {...}, ...}, total_added, total_errors}.
     """
     registry = _load_registered_symbols()
-    symbols  = list(registry.keys()) if registry else ["SPY"]
+    symbols  = list(registry.keys()) if registry else []
 
     results = {}
     total_added = total_errors = 0
@@ -281,7 +281,7 @@ def run_backfill_all_symbols(
 
 async def run_backfill_async(
     days_back: int = 30,
-    symbol: str = "SPY",
+    symbol: str = None,
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Async wrapper for run_backfill."""

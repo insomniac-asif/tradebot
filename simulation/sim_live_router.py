@@ -78,7 +78,7 @@ async def sim_live_router(sim_id, direction, price, ml_prediction=None, regime=N
             return {"status": "error", "message": "sim_disabled"}
 
         sim = SimPortfolio(sim_id, profile)
-        sim.load()
+        await asyncio.to_thread(sim.load)
 
         daily_loss_limit = profile.get("daily_loss_limit")
         if daily_loss_limit is not None:
@@ -113,7 +113,7 @@ async def sim_live_router(sim_id, direction, price, ml_prediction=None, regime=N
         elif _symbols_list and isinstance(_symbols_list, list) and len(_symbols_list) > 0:
             _trade_symbol = str(_symbols_list[0]).upper()
         else:
-            _trade_symbol = "SPY"
+            _trade_symbol = ""
         contract, contract_reason = select_sim_contract_with_reason(direction, price_val, profile, symbol=_trade_symbol)
         if contract is None:
             return {"status": "error", "message": contract_reason or "no_contract"}

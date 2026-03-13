@@ -184,7 +184,7 @@ def _build_trade_open_embed(trade: dict, decision_ctx, df, now: datetime) -> dis
         contract_lines.append(A(option_sym, "white"))
     open_embed.add_field(name="🧾 Contract", value=ab(*contract_lines), inline=False)
 
-    _und = (trade.get("symbol") or "SPY").upper()
+    _und = (trade.get("symbol") or trade.get("underlying", "")).upper()
     _und_price = _get_underlying_price(_und)
     if isinstance(_und_price, (int, float)):
         open_embed.add_field(
@@ -249,7 +249,7 @@ def _build_trade_close_embed(
             contract_lines.append(A(option_sym, "white"))
         close_embed.add_field(name="🧾 Contract", value=ab(*contract_lines), inline=False)
 
-        _und = (trade.get("symbol") or "SPY").upper()
+        _und = (trade.get("symbol") or trade.get("underlying", "")).upper()
         _und_price = _get_underlying_price(_und)
         if isinstance(_und_price, (int, float)):
             close_embed.add_field(

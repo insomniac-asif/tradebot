@@ -5,13 +5,13 @@ import json
 import logging
 import pandas as pd
 from datetime import timedelta
-from pandas.errors import EmptyDataError
 
 from core.paths import DATA_DIR
 from core.data_service import get_market_dataframe
 from core.debug import debug_log
+from core.analytics_db import read_df, update, transaction, get_conn
 
-PRED_FILE = os.path.join(DATA_DIR, "predictions.csv")
+PRED_FILE = os.path.join(DATA_DIR, "predictions.csv")  # legacy constant
 EDGE_FILE = os.path.join(DATA_DIR, "edge_stats.json")
 
 
@@ -82,81 +82,33 @@ def check_predictions(trade=None):
             logging.exception("trade_prediction_grade_error: %s", e)
             return None
 
-    if not os.path.exists(PRED_FILE):
-        return
-
+    # Grade unchecked predictions from SQLite
     try:
-        preds = pd.read_csv(PRED_FILE)
-    except EmptyDataError:
-        return
+        preds = read_df("SELECT * FROM predictions WHERE checked = 0")
     except Exception as e:
         logging.warning("prediction_read_failed: %s", e)
         return
 
     if preds.empty or "time" not in preds.columns:
         return
-    raw_len = len(preds)
 
     def _parse_pred_time(val):
-        """Parse prediction timestamp to naive ET. Handles both tz-aware ISO strings
-        and naive strings (already stored as ET). Using utc=True on naive strings would
-        misinterpret them as UTC and shift by -5h on each grader run."""
+        """Parse prediction timestamp to naive ET."""
         if pd.isna(val):
             return pd.NaT
         try:
             t = pd.to_datetime(val)
             if t.tzinfo is not None:
                 return t.tz_convert("US/Eastern").tz_localize(None)
-            return t  # already naive ET — no conversion needed
+            return t
         except Exception:
             return pd.NaT
 
     preds["time"] = preds["time"].apply(_parse_pred_time)
-    if bool(preds["time"].isna().all()):
-        # Avoid wiping file if parsing fails across all rows.
-        logging.warning("prediction_time_parse_failed_all")
-        return
     preds = preds.dropna(subset=["time"])
 
     if preds.empty:
-        # Avoid overwriting a non-empty file with only headers.
-        if raw_len > 0:
-            logging.warning("prediction_rows_dropped_after_parse", extra={"raw_len": raw_len})
         return
-
-    # Ensure required columns exist
-    if "checked" not in preds.columns:
-        preds["checked"] = False
-
-    if "actual" not in preds.columns:
-        preds["actual"] = ""
-
-    if "correct" not in preds.columns:
-        preds["correct"] = 0
-
-    if "high_hit" not in preds.columns:
-        preds["high_hit"] = 0
-
-    if "low_hit" not in preds.columns:
-        preds["low_hit"] = 0
-
-    if "price_at_check" not in preds.columns:
-        preds["price_at_check"] = 0.0
-
-    if "close_at_check" not in preds.columns:
-        preds["close_at_check"] = 0.0
-
-    if "confidence" in preds.columns:
-        if "confidence_band" not in preds.columns:
-            preds["confidence_band"] = ""
-        # Ensure object dtype before assigning strings
-        try:
-            preds["confidence_band"] = preds["confidence_band"].astype("object")
-        except Exception:
-            pass
-        mask = preds["confidence_band"].isna() | (preds["confidence_band"] == "")
-        if mask.any():
-            preds.loc[mask, "confidence_band"] = preds.loc[mask, "confidence"].apply(_safe_confidence_band)
 
     # Load price data
     df = get_market_dataframe()
@@ -170,32 +122,22 @@ def check_predictions(trade=None):
     if df.empty:
         return
 
-    # Grade predictions
+    # Grade predictions and collect updates
+    updates = []
     for i, row in preds.iterrows():
 
-        if bool(row.get("checked", False)):
-            continue
-
-        # Safe timeframe parsing
         try:
             tf = int(row["timeframe"])
         except Exception:
             continue
 
         target_time = row["time"] + timedelta(minutes=tf)
-
-        # Round to nearest minute (prevents seconds mismatch bug)
         target_time = target_time.replace(second=0, microsecond=0)
-        
-        # --------------------------------
-        # Only grade if timeframe has fully passed
-        # --------------------------------
-        current_time = pd.Timestamp.now(tz="US/Eastern").tz_localize(None)
 
+        current_time = pd.Timestamp.now(tz="US/Eastern").tz_localize(None)
         if current_time < target_time:
             continue
 
-        # Find first available bar at or after target_time.
         future = df[df["timestamp"] >= target_time]
         if future.empty:
             continue
@@ -207,15 +149,9 @@ def check_predictions(trade=None):
         predicted_high = row["high"]
         predicted_low = row["low"]
 
-        # --------------------------------
-        # Check range accuracy
-        # --------------------------------
         high_hit = int(future_high >= predicted_high)
         low_hit = int(future_low <= predicted_low)
 
-        # --------------------------------
-        # Determine directional result
-        # --------------------------------
         if high_hit and not low_hit:
             result = "bullish"
         elif low_hit and not high_hit:
@@ -227,16 +163,23 @@ def check_predictions(trade=None):
 
         direction_correct = int(result == row["direction"])
 
-        # --------------------------------
-        # Save results
-        # --------------------------------
-        preds.loc[i, "actual"] = result
-        preds.loc[i, "correct"] = direction_correct
-        preds.loc[i, "high_hit"] = high_hit
-        preds.loc[i, "low_hit"] = low_hit
-        preds.loc[i, "price_at_check"] = future_close
-        preds.loc[i, "close_at_check"] = future_close
-        preds.loc[i, "checked"] = True
+        # Compute confidence_band if missing
+        cb = row.get("confidence_band")
+        if not cb or pd.isna(cb) or cb == "":
+            cb = _safe_confidence_band(row.get("confidence"))
+
+        updates.append({
+            "row_id": int(row["id"]),
+            "actual": result,
+            "correct": direction_correct,
+            "high_hit": high_hit,
+            "low_hit": low_hit,
+            "price_at_check": round(float(future_close), 4),
+            "close_at_check": round(float(future_close), 4),
+            "checked": 1,
+            "confidence_band": cb if cb else None,
+        })
+
         debug_log(
             "prediction_graded",
             timeframe=tf,
@@ -248,13 +191,22 @@ def check_predictions(trade=None):
             price_at_check=round(float(future_close), 2)
         )
 
-    graded = preds[preds["checked"] == True]
+    # Batch update graded predictions
+    if updates:
+        with transaction() as conn:
+            for u in updates:
+                row_id = u.pop("row_id")
+                set_clause = ", ".join(f"{k} = ?" for k in u.keys())
+                conn.execute(
+                    f"UPDATE predictions SET {set_clause} WHERE id = ?",
+                    list(u.values()) + [row_id],
+                )
 
+    # Update edge stats from all graded predictions
+    graded = read_df("SELECT * FROM predictions WHERE checked = 1")
     update_edge_stats(graded)
 
-    preds.to_csv(PRED_FILE, index=False)
-
-    # Refresh learned predictor bias weights from updated graded history
+    # Refresh learned predictor bias weights
     try:
         from analytics.predictor_optimizer import update_predictor_weights
         update_predictor_weights()
@@ -266,6 +218,8 @@ def update_edge_stats(graded):
 
     if graded.empty:
         return
+
+    graded["correct"] = pd.to_numeric(graded["correct"], errors="coerce").fillna(0)
 
     stats = {}
 
@@ -286,7 +240,7 @@ def update_edge_stats(graded):
     stats["timeframes"] = {}
 
     for tf, row in tf_group.iterrows():
-        stats["timeframes"][str(int(tf))] = {
+        stats["timeframes"][str(int(float(tf)))] = {
             "total": int(row["total"]),
             "wins": int(row["wins"]),
             "winrate": round(row["wins"] / row["total"], 4)

@@ -10,11 +10,11 @@
 # Use this to build a realistic slippage model for sim profiles over time.
 
 import os
-import csv
 from datetime import datetime
 import pytz
 
 from core.paths import DATA_DIR
+from core.analytics_db import insert
 
 FILE = os.path.join(DATA_DIR, "execution_quality_log.csv")
 HEADERS = [
@@ -35,17 +35,15 @@ HEADERS = [
 
 
 def _ensure_file() -> None:
-    if os.path.exists(FILE) and os.path.getsize(FILE) > 0:
-        return
-    with open(FILE, "w", newline="") as f:
-        csv.writer(f).writerow(HEADERS)
+    """No-op: schema is ensured at startup via analytics_db.init_db()."""
+    pass
 
 
 def _safe(val, decimals=4):
     try:
         return round(float(val), decimals)
     except (TypeError, ValueError):
-        return ""
+        return None
 
 
 def log_execution(
@@ -72,9 +70,7 @@ def log_execution(
     bid_at_order / ask_at_order : quote snapshot at submission time
     """
     try:
-        _ensure_file()
-
-        slippage_pct = ""
+        slippage_pct = None
         try:
             if expected_mid and float(expected_mid) > 0:
                 slippage_pct = _safe(
@@ -83,7 +79,7 @@ def log_execution(
         except (TypeError, ValueError):
             pass
 
-        spread_at_order_pct = ""
+        spread_at_order_pct = None
         try:
             a = float(ask_at_order)
             b = float(bid_at_order)
@@ -92,22 +88,20 @@ def log_execution(
         except (TypeError, ValueError):
             pass
 
-        row = [
-            datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-            option_symbol,
-            side,
-            order_type,
-            qty_requested,
-            qty_filled,
-            _safe(fill_ratio),
-            _safe(expected_mid),
-            _safe(fill_price),
-            slippage_pct,
-            _safe(bid_at_order),
-            _safe(ask_at_order),
-            spread_at_order_pct,
-        ]
-        with open(FILE, "a", newline="") as f:
-            csv.writer(f).writerow(row)
+        insert("execution_quality_log", {
+            "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+            "option_symbol": option_symbol,
+            "side": side,
+            "order_type": order_type,
+            "qty_requested": qty_requested,
+            "qty_filled": qty_filled,
+            "fill_ratio": _safe(fill_ratio),
+            "expected_mid": _safe(expected_mid),
+            "fill_price": _safe(fill_price),
+            "slippage_pct": slippage_pct,
+            "bid_at_order": _safe(bid_at_order),
+            "ask_at_order": _safe(ask_at_order),
+            "spread_at_order_pct": spread_at_order_pct,
+        })
     except Exception:
         pass

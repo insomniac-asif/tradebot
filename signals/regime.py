@@ -25,13 +25,18 @@ def get_regime(df=None):
 
     directionality = abs(price_change) / total_range if total_range != 0 else 0
 
-    if avg_candle < 0.08:
+    # Use price-relative thresholds so regime detection works for any symbol
+    mid_price = float(recent["close"].mean()) or 1.0
+    compression_pct = avg_candle / mid_price  # ~0.012% for SPY at 0.08/666
+    range_pct = total_range / mid_price        # ~0.18% for SPY at 1.2/666
+
+    if compression_pct < 0.00012:
         return "COMPRESSION"
 
     if directionality > 0.6 and abs(above_vwap - below_vwap) > 30:
         return "TREND"
 
-    if total_range > 1.2:
+    if range_pct > 0.0018:
         return "VOLATILE"
 
     return "RANGE"

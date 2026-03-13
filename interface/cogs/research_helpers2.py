@@ -36,9 +36,12 @@ async def handle_ask_trade(ctx, symbol: str):
         _cfg_path  = os.path.join(_base_dir, "simulation", "sim_config.yaml")
 
         # Load sim config
+        import asyncio
         import yaml as _yaml
-        with open(_cfg_path) as f:
-            sim_cfg = _yaml.safe_load(f) or {}
+        def _load_yaml():
+            with open(_cfg_path) as f:
+                return _yaml.safe_load(f) or {}
+        sim_cfg = await asyncio.to_thread(_load_yaml)
 
         # Discover all sim IDs dynamically
         all_sim_ids = [k for k, v in sim_cfg.items()
@@ -53,8 +56,10 @@ async def handle_ask_trade(ctx, symbol: str):
             if not os.path.exists(path):
                 continue
             try:
-                with open(path) as f:
-                    data = json.load(f)
+                def _load_json(p=path):
+                    with open(p) as f:
+                        return json.load(f)
+                data = await asyncio.to_thread(_load_json)
             except Exception:
                 continue
             profile = sim_cfg.get(sid, {})
@@ -77,7 +82,7 @@ async def handle_ask_trade(ctx, symbol: str):
         import pandas as _pd
         from core.data_service import get_candle_data as _get_candle_data
 
-        def _get_window(entry_str, exit_str, symbol="SPY"):
+        def _get_window(entry_str, exit_str, symbol=None):
             try:
                 e_dt = _pd.to_datetime(entry_str).tz_localize(None) if hasattr(_pd.to_datetime(entry_str), "tz") and _pd.to_datetime(entry_str).tzinfo else _pd.to_datetime(entry_str)
                 x_dt = _pd.to_datetime(exit_str).tz_localize(None)  if exit_str and hasattr(_pd.to_datetime(exit_str), "tz") and _pd.to_datetime(exit_str).tzinfo  else (_pd.to_datetime(exit_str) if exit_str else e_dt)
@@ -121,7 +126,7 @@ async def handle_ask_trade(ctx, symbol: str):
             _undl = trade.get("symbol") or ""
             if not _undl:
                 _m = re.match(r'^([A-Z]{1,6})', _opt_sym_ask)
-                _undl = _m.group(1) if _m else "SPY"
+                _undl = _m.group(1) if _m else ""
 
             # Try to get cached narrative or generate new one
             candle_data = _get_window(trade.get("entry_time",""), trade.get("exit_time",""), symbol=_undl)

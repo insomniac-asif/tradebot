@@ -35,8 +35,10 @@ async def _run_emergency_exit_check() -> None:
         import yaml as _yaml
         _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         _cfg_path = os.path.join(_base, "simulation", "sim_config.yaml")
-        with open(_cfg_path) as _f:
-            _profiles = _yaml.safe_load(_f) or {}
+        def _load_sim00_config():
+            with open(_cfg_path) as _f:
+                return _yaml.safe_load(_f) or {}
+        _profiles = await asyncio.to_thread(_load_sim00_config)
         _sim00_profile = _profiles.get("SIM00", {})
         if not isinstance(_sim00_profile, dict):
             return
@@ -44,7 +46,7 @@ async def _run_emergency_exit_check() -> None:
             return
         from simulation.sim_portfolio import SimPortfolio
         _sim = SimPortfolio("SIM00", _sim00_profile)
-        _sim.load()
+        await asyncio.to_thread(_sim.load)
     except Exception:
         return
 

@@ -93,12 +93,13 @@ def _conf_band(c: float) -> str:
     return "high"
 
 
-def _load_existing_keys(pred_file: str) -> set:
-    """Return set of (time_str, symbol) already in predictions.csv."""
-    if not os.path.exists(pred_file) or os.path.getsize(pred_file) == 0:
-        return set()
+def _load_existing_keys(pred_file: str = None) -> set:
+    """Return set of (time_str, symbol) already in predictions table."""
     try:
-        df = pd.read_csv(pred_file, usecols=["time", "symbol"])
+        from core.analytics_db import read_df
+        df = read_df("SELECT time, symbol FROM predictions")
+        if df.empty:
+            return set()
         return set(zip(df["time"].astype(str), df["symbol"].str.upper()))
     except Exception:
         return set()
@@ -473,30 +474,25 @@ def main():
         print("Nothing new to write.")
         return
 
-    # If overwrite mode, rewrite the file from scratch; otherwise append
+    # Write to SQLite
+    from core.analytics_db import init_db, insert_many, read_df, delete_all
+    init_db()
+
     if args.overwrite:
-        with open(PRED_FILE, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=PRED_HEADERS)
-            writer.writeheader()
-            writer.writerows(sorted(all_new, key=lambda r: (r["time"], r["symbol"])))
+        delete_all("predictions")
+        insert_many("predictions", sorted(all_new, key=lambda r: (r["time"], r["symbol"])))
     else:
-        write_header = (not os.path.exists(PRED_FILE) or os.path.getsize(PRED_FILE) == 0)
-        with open(PRED_FILE, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=PRED_HEADERS)
-            if write_header:
-                writer.writeheader()
-            writer.writerows(all_new)
+        insert_many("predictions", all_new)
 
-    print(f"\nWrote {len(all_new)} predictions to {PRED_FILE}")
+    print(f"\nWrote {len(all_new)} predictions to analytics.db")
 
-    # Update edge_stats.json from the full file
+    # Update edge_stats.json from the full table
     try:
         from analytics.grader import update_edge_stats
-        full_df = pd.read_csv(PRED_FILE)
-        graded = full_df[full_df["checked"] == True]
-        if not graded.empty:
-            update_edge_stats(graded)
-            print(f"Edge stats updated ({len(graded)} graded rows).")
+        full_df = read_df("SELECT * FROM predictions WHERE checked = 1")
+        if not full_df.empty:
+            update_edge_stats(full_df)
+            print(f"Edge stats updated ({len(full_df)} graded rows).")
     except Exception as e:
         print(f"Edge stats update failed: {e}")
 

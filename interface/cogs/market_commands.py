@@ -164,7 +164,7 @@ class MarketCommands(commands.Cog, name="Market"):
 
     @commands.command(name="replay")
     async def replay(self, ctx, symbol: str | None = None):
-        sym = (symbol or "SPY").upper()
+        sym = symbol.upper() if symbol else None
         try:
             chart_path = generate_chart(sym)
 

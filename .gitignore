@@ -35,6 +35,9 @@ data/postmortems/
 data/journals/
 data/adaptive_overrides.json
 data/adaptive_tuning_log.json
+data/analytics.db
+data/analytics.db-wal
+data/analytics.db-shm
 
 # ── Generated chart images ────────────────────────────────────────
 charts/*.png

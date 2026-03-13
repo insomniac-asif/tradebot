@@ -339,7 +339,7 @@ async def open_trade_if_valid(ctx=None):
         import re as _re_und
         _opt_sym = option.get("symbol") or ""
         _und_match = _re_und.match(r'^([A-Z]{1,6})', _opt_sym)
-        trade["underlying"] = _und_match.group(1) if _und_match else "SPY"
+        trade["underlying"] = _und_match.group(1) if _und_match else option.get("underlying", "")
         trade["symbol"] = trade["underlying"]
         trade["option_symbol"] = option.get("symbol")
         trade["strike"] = option.get("strike")

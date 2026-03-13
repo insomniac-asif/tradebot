@@ -55,10 +55,10 @@ async def _run_snapshot_probe(last_close, now_et: datetime) -> str | None:
             _reg = _load_symbol_registry()
             _probe_sym = next(
                 (s for s, v in _reg.items() if v.get("options")),
-                "SPY"
+                next(iter(_reg), "")
             )
         except Exception:
-            _probe_sym = "SPY"
+            _probe_sym = ""
         chain = client.get_option_chain(
             OptionChainRequest(
                 underlying_symbol=_probe_sym,

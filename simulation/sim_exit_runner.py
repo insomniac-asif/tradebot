@@ -71,7 +71,7 @@ async def run_sim_exits() -> list[dict]:
     for sim_id, profile in _PROFILES.items():
         try:
             sim = SimPortfolio(sim_id, profile)
-            sim.load()
+            await asyncio.to_thread(sim.load)
         except Exception as e:
             logging.exception("run_sim_exits_load_error: %s", e)
             results.append({

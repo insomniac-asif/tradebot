@@ -47,7 +47,7 @@ def _get_option_data_client():
         return None
 
 
-def _fetch_options_chain(underlying: str = "SPY") -> list[dict]:
+def _fetch_options_chain(underlying: str = None) -> list[dict]:
     """Fetch option chain data with OI from contracts + greeks from snapshots.
 
     Returns list of dicts with keys: symbol, type, strike_price, expiration_date,
@@ -429,7 +429,7 @@ def compute_liquidation_zones(chain: list[dict], spot_price: float) -> dict:
         return {}
 
 
-def compute_all_options_positioning(spot_price: float, symbol: str = "SPY") -> dict:
+def compute_all_options_positioning(spot_price: float, symbol: str = None) -> dict:
     """Aggregate all options positioning computations for a given symbol."""
     try:
         if not spot_price or spot_price <= 0:

@@ -54,15 +54,13 @@ async def _run_conviction_cycle(
     except Exception:
         _registry_syms = []
 
-    # Fall back to the passed-in df as SPY when registry is unavailable
-    if not _registry_syms:
-        _registry_syms = [("SPY", {})]
-
-    # Fetch all non-SPY dataframes concurrently to avoid blocking the event loop
     import asyncio as _asyncio
     _sym_names = [s.upper() for s, _ in _registry_syms]
+    # Determine which symbol the pre-fetched df belongs to (first in registry)
+    _primary_sym = _sym_names[0] if _sym_names else None
+    # Reuse the pre-fetched df for the primary symbol to avoid a redundant call
     _fetch_tasks = [
-        _asyncio.to_thread(get_symbol_dataframe, s) if s != "SPY" else _asyncio.sleep(0, result=df)
+        _asyncio.sleep(0, result=df) if (s == _primary_sym and df is not None) else _asyncio.to_thread(get_symbol_dataframe, s)
         for s in _sym_names
     ]
     _fetched_dfs = await _asyncio.gather(*_fetch_tasks, return_exceptions=True)
@@ -81,7 +79,7 @@ async def _run_conviction_cycle(
             # Queue CSV I/O for concurrent execution (avoid blocking event loop)
             _io_coros.append(_asyncio.to_thread(log_conviction_signal, _sym_df, _d, _i, _f))
             _io_coros.append(_asyncio.to_thread(update_expectancy, _sym_df))
-            if _sym_upper == "SPY":
+            if _sym_upper == _primary_sym:
                 _io_coros.append(_asyncio.to_thread(update_blocked_outcomes, _sym_df))
         except Exception:
             pass

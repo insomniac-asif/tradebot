@@ -250,14 +250,10 @@ def predict_sim_trade(df, context: dict, feature_snapshot: dict | None = None) -
 
 def _init_trade_count() -> int:
     try:
-        if os.path.exists(FEATURE_FILE):
-            with open(FEATURE_FILE, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            count = max(0, len(lines) - 1)
-            return count
+        from core.analytics_db import row_count
+        return row_count("trade_features") or 0
     except Exception:
         return 0
-    return 0
 
 
 def maybe_retrain_models(trade_count: int, min_trades: int = 50) -> bool:

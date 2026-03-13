@@ -52,7 +52,7 @@ def _parse_option_symbol(symbol):
     return expiry, cp, strike
 
 
-def _select_option_contract(direction, underlying_price, symbol="SPY"):
+def _select_option_contract(direction, underlying_price, symbol=None):
     client = _get_option_client()
     if client is None or underlying_price is None:
         return None, None
@@ -175,7 +175,7 @@ def build_execution_plan(
     style,
     price,
     setup_type,
-    symbol="SPY",
+    symbol=None,
 ):
     option, selection_block = _select_option_contract(direction, price, symbol=symbol)
     if selection_block:

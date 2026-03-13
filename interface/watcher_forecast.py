@@ -36,15 +36,13 @@ async def _run_forecast_cycle(
     except Exception:
         _registry_syms = []
 
-    # If registry is empty, fall back to the passed-in df as SPY
-    if not _registry_syms:
-        _registry_syms = [("SPY", {})]
-
-    # Fetch all non-SPY dataframes concurrently to avoid blocking the event loop
     import asyncio as _asyncio
     _sym_names = [s.upper() for s, _ in _registry_syms]
+    # Determine which symbol the pre-fetched df belongs to (first in registry)
+    _primary_sym = _sym_names[0] if _sym_names else None
+    # Reuse the pre-fetched df for the primary symbol to avoid a redundant call
     _fetch_tasks = [
-        _asyncio.to_thread(get_symbol_dataframe, s) if s != "SPY" else _asyncio.sleep(0, result=df)
+        _asyncio.sleep(0, result=df) if (s == _primary_sym and df is not None) else _asyncio.to_thread(get_symbol_dataframe, s)
         for s in _sym_names
     ]
     _fetched_dfs = await _asyncio.gather(*_fetch_tasks, return_exceptions=True)
@@ -76,8 +74,8 @@ async def _run_forecast_cycle(
     except Exception:
         pass
 
-    # Determine embed color from the first available prediction (prefer SPY)
-    _anchor = next((x for x in _all_preds if x[0] == "SPY"), _all_preds[0])
+    # Determine embed color from the first available prediction (prefer primary symbol)
+    _anchor = next((x for x in _all_preds if x[0] == _primary_sym), _all_preds[0]) if _primary_sym else _all_preds[0]
     direction = _anchor[1].get("direction", "range")
     if direction == "bullish":
         fcast_color = 0x2ECC71

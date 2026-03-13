@@ -5,11 +5,11 @@
 # without waiting for fills. Use for gate calibration and ML training.
 
 import os
-import csv
 from datetime import datetime
 import pytz
 
 from core.paths import DATA_DIR
+from core.analytics_db import insert
 
 FILE = os.path.join(DATA_DIR, "signal_log.csv")
 HEADERS = [
@@ -39,17 +39,22 @@ HEADERS = [
 
 
 def _ensure_file() -> None:
-    if os.path.exists(FILE) and os.path.getsize(FILE) > 0:
-        return
-    with open(FILE, "w", newline="") as f:
-        csv.writer(f).writerow(HEADERS)
+    """No-op: schema is ensured at startup via analytics_db.init_db()."""
+    pass
 
 
 def _safe_round(val, decimals=4):
     try:
         return round(float(val), decimals)
     except (TypeError, ValueError):
-        return ""
+        return None
+
+
+def _safe_int(val):
+    try:
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def log_signal_attempt(ctx, trade=None) -> None:
@@ -62,43 +67,38 @@ def log_signal_attempt(ctx, trade=None) -> None:
     trade : the return value from open_trade_if_valid() (dict on success, else None/str)
     """
     try:
-        _ensure_file()
-
         outcome = getattr(ctx, "outcome", "blocked")
         blended = getattr(ctx, "blended_score", None)
         threshold = getattr(ctx, "threshold", None)
         delta = (
             _safe_round(blended - threshold, 6)
             if blended is not None and threshold is not None
-            else ""
+            else None
         )
 
-        row = [
-            datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-            outcome,
-            getattr(ctx, "block_reason", None) or "",
-            getattr(ctx, "regime", None) or "",
-            getattr(ctx, "volatility", None) or "",
-            getattr(ctx, "direction_60m", None) or "",
-            _safe_round(getattr(ctx, "confidence_60m", None)),
-            getattr(ctx, "direction_15m", None) or "",
-            _safe_round(getattr(ctx, "confidence_15m", None)),
-            getattr(ctx, "dual_alignment", ""),
-            getattr(ctx, "conviction_score", "") if getattr(ctx, "conviction_score", None) is not None else "",
-            _safe_round(getattr(ctx, "impulse", None)),
-            _safe_round(getattr(ctx, "follow", None)),
-            _safe_round(blended),
-            _safe_round(threshold),
-            delta,
-            _safe_round(getattr(ctx, "ml_weight", None)),
-            getattr(ctx, "regime_samples", "") if getattr(ctx, "regime_samples", None) is not None else "",
-            getattr(ctx, "expectancy_samples", "") if getattr(ctx, "expectancy_samples", None) is not None else "",
-            getattr(ctx, "regime_transition", ""),
-            _safe_round(getattr(ctx, "regime_transition_severity", None)),
-            _safe_round(getattr(ctx, "spy_price", None)),
-        ]
-
-        with open(FILE, "a", newline="") as f:
-            csv.writer(f).writerow(row)
+        insert("signal_log", {
+            "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+            "outcome": outcome,
+            "block_reason": getattr(ctx, "block_reason", None) or None,
+            "regime": getattr(ctx, "regime", None) or None,
+            "volatility": getattr(ctx, "volatility", None) or None,
+            "direction_60m": getattr(ctx, "direction_60m", None) or None,
+            "confidence_60m": _safe_round(getattr(ctx, "confidence_60m", None)),
+            "direction_15m": getattr(ctx, "direction_15m", None) or None,
+            "confidence_15m": _safe_round(getattr(ctx, "confidence_15m", None)),
+            "dual_alignment": str(getattr(ctx, "dual_alignment", "")) if getattr(ctx, "dual_alignment", None) is not None else None,
+            "conviction_score": _safe_round(getattr(ctx, "conviction_score", None)) if getattr(ctx, "conviction_score", None) is not None else None,
+            "impulse": _safe_round(getattr(ctx, "impulse", None)),
+            "follow_through": _safe_round(getattr(ctx, "follow", None)),
+            "blended_score": _safe_round(blended),
+            "threshold": _safe_round(threshold),
+            "threshold_delta": delta,
+            "ml_weight": _safe_round(getattr(ctx, "ml_weight", None)),
+            "regime_samples": _safe_int(getattr(ctx, "regime_samples", None)),
+            "expectancy_samples": _safe_int(getattr(ctx, "expectancy_samples", None)),
+            "regime_transition": str(getattr(ctx, "regime_transition", "")) if getattr(ctx, "regime_transition", None) is not None else None,
+            "regime_transition_severity": _safe_round(getattr(ctx, "regime_transition_severity", None)),
+            "spy_price": _safe_round(getattr(ctx, "spy_price", None)),
+        })
     except Exception:
         pass  # never crash the watcher

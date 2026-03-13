@@ -12,7 +12,7 @@ import time
 from core.paths import DATA_DIR
 
 FEATURE_FILE = os.path.join(DATA_DIR, "trade_features.csv")
-CANDLE_FILE = os.path.join(DATA_DIR, "qqq_1m.csv")
+CANDLE_FILE = os.path.join(DATA_DIR, "spy_1m.csv")
 
 DIR_MODEL_FILE = os.path.join(DATA_DIR, "direction_model.pkl")
 EDGE_MODEL_FILE = os.path.join(DATA_DIR, "edge_model.pkl")
@@ -115,17 +115,19 @@ def train_direction_model():
 
 def train_edge_model():
 
-    if not os.path.exists(FEATURE_FILE):
-        print("No trade feature file found.")
-        return
-    if not _is_file_recent(FEATURE_FILE, DATA_MAX_AGE_MINUTES):
-        print("Trade feature data is stale. Skipping edge model retrain.")
+    try:
+        from core.analytics_db import read_df, DB_PATH
+        df = read_df("SELECT * FROM trade_features")
+    except Exception:
+        print("Trade feature data unreadable. Skipping edge model retrain.")
         return
 
-    try:
-        df = pd.read_csv(FEATURE_FILE)
-    except Exception:
-        print("Trade feature file unreadable. Skipping edge model retrain.")
+    if df.empty:
+        print("No trade feature data found.")
+        return
+
+    if not _is_file_recent(DB_PATH, DATA_MAX_AGE_MINUTES):
+        print("Trade feature data is stale. Skipping edge model retrain.")
         return
 
     if len(df) < 50:

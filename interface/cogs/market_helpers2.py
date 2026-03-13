@@ -383,9 +383,11 @@ async def handle_preopen(ctx):
         )
         profile = None
         try:
-            with open(profile_path, "r") as f:
-                profiles = yaml.safe_load(f) or {}
-                profile = profiles.get("SIM03") or profiles.get("SIM01")
+            def _load_yaml():
+                with open(profile_path, "r") as f:
+                    _profs = yaml.safe_load(f) or {}
+                    return _profs.get("SIM03") or _profs.get("SIM01")
+            profile = await asyncio.to_thread(_load_yaml)
         except Exception:
             profile = None
 

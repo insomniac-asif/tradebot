@@ -125,7 +125,7 @@ def test_known_signal_modes_complete():
         "FVG_4H", "FVG_5M", "LIQUIDITY_SWEEP", "FVG_SWEEP_COMBO",
         "FLOW_DIVERGENCE", "MULTI_TF_CONFIRM", "GAP_FADE", "VPOC_REVERSION",
         "OPENING_RANGE_RECLAIM", "VOL_COMPRESSION_BREAKOUT", "VOL_SPIKE_FADE",
-        "STRUCTURE_FADE", "GEX_FLOW",
+        "STRUCTURE_FADE", "GEX_FLOW", "FVG_FILL",
     }
     assert expected == _KNOWN_SIGNAL_MODES, \
         f"Missing: {expected - _KNOWN_SIGNAL_MODES}, extra: {_KNOWN_SIGNAL_MODES - expected}"

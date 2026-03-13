@@ -104,7 +104,7 @@ def _to_naive_et(ts_str: str):
 def _get_candle_window(
     entry_time_str: str,
     exit_time_str: str,
-    symbol: str = 'SPY',
+    symbol: str = None,
     before_min: int = 30,
     after_min: int = 10,
 ) -> list[dict]:
@@ -284,7 +284,7 @@ def _compute_stats(sim_id: str, data: dict, profile: dict) -> dict:
     }
 
     # Configured symbols list
-    _cfg_syms = profile.get("symbols") or ([profile.get("symbol")] if profile.get("symbol") else ["SPY"])
+    _cfg_syms = profile.get("symbols") or ([profile.get("symbol")] if profile.get("symbol") else [])
 
     return {
         "sim_id": sim_id,

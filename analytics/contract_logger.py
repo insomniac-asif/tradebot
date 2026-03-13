@@ -7,11 +7,11 @@
 #   - What IV/delta the system traded at vs. what was available.
 
 import os
-import csv
 from datetime import datetime
 import pytz
 
 from core.paths import DATA_DIR
+from core.analytics_db import insert
 
 FILE = os.path.join(DATA_DIR, "contract_selection_log.csv")
 HEADERS = [
@@ -38,17 +38,15 @@ HEADERS = [
 
 
 def _ensure_file() -> None:
-    if os.path.exists(FILE) and os.path.getsize(FILE) > 0:
-        return
-    with open(FILE, "w", newline="") as f:
-        csv.writer(f).writerow(HEADERS)
+    """No-op: schema is ensured at startup via analytics_db.init_db()."""
+    pass
 
 
 def _safe(val, decimals=4):
     try:
         return round(float(val), decimals)
     except (TypeError, ValueError):
-        return ""
+        return None
 
 
 def log_contract_attempt(
@@ -77,28 +75,25 @@ def log_contract_attempt(
     picture of chain quality at any given time.
     """
     try:
-        _ensure_file()
-        row = [
-            datetime.now(pytz.timezone("US/Eastern")).isoformat(),
-            source,
-            direction,
-            _safe(underlying_price),
-            str(expiry) if expiry is not None else "",
-            dte if dte is not None else "",
-            _safe(strike),
-            result,
-            reason or "",
-            _safe(bid),
-            _safe(ask),
-            _safe(mid),
-            _safe(spread_pct),
-            _safe(iv),
-            _safe(delta),
-            _safe(gamma, decimals=6),
-            _safe(theta),
-            _safe(vega),
-        ]
-        with open(FILE, "a", newline="") as f:
-            csv.writer(f).writerow(row)
+        insert("contract_selection_log", {
+            "timestamp": datetime.now(pytz.timezone("US/Eastern")).isoformat(),
+            "source": source,
+            "direction": direction,
+            "underlying_price": _safe(underlying_price),
+            "expiry": str(expiry) if expiry is not None else None,
+            "dte": str(dte) if dte is not None else None,
+            "strike": _safe(strike),
+            "result": result,
+            "reason": reason or None,
+            "bid": _safe(bid),
+            "ask": _safe(ask),
+            "mid": _safe(mid),
+            "spread_pct": _safe(spread_pct),
+            "iv": _safe(iv),
+            "delta": _safe(delta),
+            "gamma": _safe(gamma, decimals=6),
+            "theta": _safe(theta),
+            "vega": _safe(vega),
+        })
     except Exception:
         pass

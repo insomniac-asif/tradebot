@@ -219,7 +219,7 @@ Analyzes:
     # ── backfill ──────────────────────────────────────────────────────────────
 
     @commands.command(name="backfill")
-    async def backfill(self, ctx, days: int = 30, symbol: str = "SPY"):
+    async def backfill(self, ctx, days: int = 30, symbol: str = "all"):
         """
         Backfill historical 1m candles from Alpaca.
         Usage: !backfill [days] [SPY|QQQ|all]
@@ -241,7 +241,7 @@ Analyzes:
 
         if backfill_all:
             registry = _backfill_get_symbols()
-            sym_list = list(registry.keys()) if registry else ["SPY"]
+            sym_list = list(registry.keys()) if registry else []
             status_lines = []
             for s in sym_list:
                 st = backfill_status(s)
@@ -385,14 +385,12 @@ Analyzes:
     @commands.command(name="features_reset")
     async def features_reset(self, ctx):
         try:
-            from analytics.feature_logger import FEATURE_FILE, FEATURE_HEADERS
+            from core.analytics_db import delete_all
 
-            with open(FEATURE_FILE, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(FEATURE_HEADERS)
+            await asyncio.to_thread(delete_all, "trade_features")
             await _send_embed(
                 ctx,
-                "trade_features.csv reset to clean header.",
+                "trade_features table cleared.",
                 title="Features Reset",
                 color=0x2ecc71,
             )
@@ -410,14 +408,12 @@ Analyzes:
     @commands.command(name="pred_reset")
     async def pred_reset(self, ctx):
         try:
-            from analytics.prediction_stats import PRED_FILE, PRED_HEADERS
+            from core.analytics_db import delete_all
 
-            with open(PRED_FILE, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(PRED_HEADERS)
+            await asyncio.to_thread(delete_all, "predictions")
             await _send_embed(
                 ctx,
-                "predictions.csv reset to clean header.",
+                "predictions table cleared.",
                 title="Predictions Reset",
                 color=0x2ecc71,
             )

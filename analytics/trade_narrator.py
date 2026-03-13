@@ -164,7 +164,7 @@ def _build_prompt(trade: dict, candle_data: list[dict], sim_config: dict) -> str
     underlying = trade.get("symbol") or ""
     if not underlying:
         opt_prefix = re.match(r'^([A-Z]{1,6})', (trade.get("option_symbol") or "").upper())
-        underlying = opt_prefix.group(1) if opt_prefix else "SPY"
+        underlying = opt_prefix.group(1) if opt_prefix else ""
 
     direction   = trade.get("direction", "?")
     opt_sym     = trade.get("option_symbol", "?")

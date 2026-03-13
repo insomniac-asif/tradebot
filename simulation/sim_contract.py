@@ -55,8 +55,10 @@ def _resolve_contract_params(
     """
     today = now_et.date()
 
-    # Resolve underlying symbol: explicit param > profile key > default SPY
-    underlying_sym = (symbol or profile.get("symbol") or "SPY").upper()
+    # Resolve underlying symbol: explicit param > profile key > first profile symbol
+    _profile_syms = profile.get("symbols", [])
+    _first_profile_sym = _profile_syms[0] if isinstance(_profile_syms, list) and _profile_syms else ""
+    underlying_sym = (symbol or profile.get("symbol") or _first_profile_sym).upper()
 
     dte_min = int(profile["dte_min"])
     dte_max = int(profile["dte_max"])

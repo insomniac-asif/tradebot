@@ -32,7 +32,7 @@ from core.backfill import (
 def main():
     parser = argparse.ArgumentParser(description="Backfill 1m candles from Alpaca")
     parser.add_argument("--days",   type=int, default=30,  help="Calendar days to look back (default: 30)")
-    parser.add_argument("--symbol", type=str, default="SPY", help="Symbol to backfill (default: SPY)")
+    parser.add_argument("--symbol", type=str, default="all", help="Symbol to backfill (default: all)")
     parser.add_argument("--all",    action="store_true",   help="Backfill ALL registered symbols")
     args = parser.parse_args()
 
@@ -41,7 +41,7 @@ def main():
 
     if args.all:
         registry = _load_registered_symbols()
-        symbols  = list(registry.keys()) if registry else ["SPY"]
+        symbols  = list(registry.keys()) if registry else []
         print(f"Backfilling ALL symbols: {', '.join(symbols)}")
         print(f"Days: {args.days}\n")
 

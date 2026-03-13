@@ -354,11 +354,8 @@ def load_models():
 
 def _feature_trade_count() -> int:
     try:
-        if not os.path.exists(FEATURE_FILE):
-            return 0
-        with open(FEATURE_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        return max(0, len(lines) - 1)
+        from core.analytics_db import row_count
+        return row_count("trade_features") or 0
     except Exception:
         return 0
 

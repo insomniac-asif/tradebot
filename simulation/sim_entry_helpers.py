@@ -261,7 +261,7 @@ async def _execute_live_entry(
         try:
             src_profile = _PROFILES.get(source_sim_id, {})
             src_sim = SimPortfolio(source_sim_id, src_profile)
-            src_sim.load()
+            await asyncio.to_thread(src_sim.load)
             src_trade_count = len(src_sim.trade_log) if isinstance(src_sim.trade_log, list) else 0
         except Exception:
             src_trade_count = 0

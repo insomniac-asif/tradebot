@@ -120,6 +120,8 @@ SIM_CHANNEL_MAP = {
     "SIM35": 1480737079616077844,
     "SIM36": 1481379703549071484,
     "SIM37": 1481379730510053417,
+    "SIM38": 1481840721936777246,
+    "SIM39": 1481840745756495896,
 }
 
 _SIM_BOT = None
@@ -401,12 +403,14 @@ async def sim_entry_loop() -> None:
                     from analytics.options_positioning import compute_all_options_positioning
                     _spot = float(df.iloc[-1]["close"]) if df is not None and len(df) > 0 else None
                     if _spot:
-                        _options_data = await asyncio.to_thread(compute_all_options_positioning, _spot, "SPY")
+                        from core.data_service import _load_symbol_registry as _lsr
+                        _primary = next(iter(_lsr() or {}), None)
+                        _options_data = await asyncio.to_thread(compute_all_options_positioning, _spot, _primary)
                 except Exception:
                     pass
 
-                # Primary structure data = SPY (most sims trade SPY options)
-                _structure_data = _all_structure_data.get("SPY")
+                # Primary structure data = first registry symbol
+                _structure_data = _all_structure_data.get(_primary) if _primary else next(iter(_all_structure_data.values()), None)
 
                 results = await run_sim_entries(
                     df, regime=_derive_regime(df), trader_signal=_trader_signal,

@@ -39,7 +39,7 @@ def _build_entry_embed(sim_id: str, result: dict) -> "discord.Embed":
         strike = _helpers()._parse_strike_from_symbol(option_symbol)
     call_put = "CALL" if str(direction).upper() == "BULLISH" else "PUT" if str(direction).upper() == "BEARISH" else None
     expiry_text = expiry[:10] if isinstance(expiry, str) and len(expiry) >= 10 else ""
-    contract_label = (result.get("symbol") or "SPY").upper()
+    contract_label = (result.get("symbol") or result.get("underlying", "")).upper()
     if call_put:
         contract_label = f"{contract_label} {call_put}"
     if expiry_text:
@@ -178,7 +178,7 @@ def _build_entry_embed(sim_id: str, result: dict) -> "discord.Embed":
                 inline=True,
             )
 
-    _und_sym = (result.get("symbol") or "SPY").upper()
+    _und_sym = (result.get("symbol") or result.get("underlying", "")).upper()
     try:
         from core.data_service import get_symbol_dataframe
         _und_df = get_symbol_dataframe(_und_sym)
@@ -220,7 +220,7 @@ def _build_exit_embed(sim_id: str, result: dict) -> "discord.Embed":
     strike = result.get("strike") or _helpers()._parse_strike_from_symbol(option_symbol)
     call_put = "CALL" if str(direction).upper() == "BULLISH" else "PUT" if str(direction).upper() == "BEARISH" else None
     expiry_text = expiry[:10] if isinstance(expiry, str) and len(expiry) >= 10 else ""
-    contract_label = (result.get("symbol") or "SPY").upper()
+    contract_label = (result.get("symbol") or result.get("underlying", "")).upper()
     if call_put:
         contract_label = f"{contract_label} {call_put}"
     if expiry_text:
@@ -294,7 +294,7 @@ def _build_exit_embed(sim_id: str, result: dict) -> "discord.Embed":
         ),
         inline=False
     )
-    _und_sym2 = (result.get("symbol") or "SPY").upper()
+    _und_sym2 = (result.get("symbol") or result.get("underlying", "")).upper()
     try:
         from core.data_service import get_symbol_dataframe
         _und_df2 = get_symbol_dataframe(_und_sym2)

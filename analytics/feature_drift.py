@@ -1,7 +1,7 @@
 import os
 import pandas as pd
-from pandas.errors import EmptyDataError
 from core.paths import DATA_DIR
+from core.analytics_db import read_df
 
 FEATURE_FILE = os.path.join(DATA_DIR, "trade_features.csv")
 
@@ -16,21 +16,17 @@ def detect_feature_drift():
         OR structured drift report dict
     """
 
-    if not os.path.exists(FEATURE_FILE):
-        return None
-
-    if os.path.getsize(FEATURE_FILE) == 0:
-        return None
-
     try:
-        df = pd.read_csv(FEATURE_FILE)
-    except (EmptyDataError, Exception):
+        df = read_df("SELECT * FROM trade_features")
+    except Exception:
         return None
 
-    if len(df) < 80:
+    if df.empty or len(df) < 80:
         return None
 
     numeric_cols = df.select_dtypes(include="number").columns
+    # Exclude the 'id' column from drift checks
+    numeric_cols = [c for c in numeric_cols if c != "id"]
 
     if len(numeric_cols) == 0:
         return None

@@ -71,7 +71,7 @@ async def sim_eod_report_loop(channel_id: int) -> None:
                     if int(profile.get("dte_max", 0)) == 0:
                         continue
                     sim = SimPortfolio(sim_id, profile)
-                    sim.load()
+                    await asyncio.to_thread(sim.load)
                     if not sim.open_trades:
                         continue
                     lines = []
@@ -131,7 +131,7 @@ async def sim_eod_report_loop(channel_id: int) -> None:
                         continue
                     _src_profile = _sw._SIM_PROFILES.get(_grad_source, {})
                     _src_sim = SimPortfolio(_grad_source, _src_profile)
-                    _src_sim.load()
+                    await asyncio.to_thread(_src_sim.load)
                     _src_count = len(_src_sim.trade_log) if isinstance(_src_sim.trade_log, list) else 0
                     _prog_embed = _build_graduation_embed(
                         _grad_sim_id, _grad_source, _src_count, _grad_min, now_et, _sw._SIM_LAST_DATA_AGE
@@ -175,7 +175,7 @@ async def sim_daily_summary_loop(channel_id: int) -> None:
                     continue
                 try:
                     sim = SimPortfolio(sim_id, profile)
-                    sim.load()
+                    await asyncio.to_thread(sim.load)
                     trade_log = sim.trade_log if isinstance(sim.trade_log, list) else []
 
                     today_trades = []

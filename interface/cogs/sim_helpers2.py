@@ -41,7 +41,7 @@ async def handle_simstats(ctx, sim_id):
             sp = _sim_path(sim_key)
             if not os.path.exists(sp):
                 await _send_embed(ctx, f"No data for {sim_key} yet."); return
-            sim = SimPortfolio(sim_key, profile); sim.load()
+            sim = SimPortfolio(sim_key, profile); await asyncio.to_thread(sim.load)
             trade_log = sim.trade_log if isinstance(sim.trade_log, list) else []
             total_trades = len(trade_log)
             open_count = len(sim.open_trades) if isinstance(sim.open_trades, list) else 0
@@ -117,7 +117,7 @@ async def handle_simstats(ctx, sim_id):
                 sp = _sim_path(sk)
                 if not os.path.exists(sp):
                     sim_rows.append((sk, pr, None)); continue
-                sim = SimPortfolio(sk, pr); sim.load()
+                sim = SimPortfolio(sk, pr); await asyncio.to_thread(sim.load)
                 tl = sim.trade_log if isinstance(sim.trade_log, list) else []
                 pvs = [_safe_float(t.get("realized_pnl_dollars")) for t in tl if _safe_float(t.get("realized_pnl_dollars")) is not None]
                 tp = sum(pvs) if pvs else 0.0
@@ -181,7 +181,7 @@ async def handle_simcompare(ctx):
                 sp = _sim_path(sk)
                 if not os.path.exists(sp):
                     rows.append({"sim_id": sk, "no_data": True, "balance_start": pr.get("balance_start", 0.0)}); continue
-                sim = SimPortfolio(sk, pr); sim.load()
+                sim = SimPortfolio(sk, pr); await asyncio.to_thread(sim.load)
                 tl = sim.trade_log if isinstance(sim.trade_log, list) else []
                 tt = len(tl)
                 if tt == 0:
@@ -461,7 +461,7 @@ async def handle_simtrades(ctx, bot, sim_id, page):
                 try:
                     sp = _sim_path(sk)
                     if not os.path.exists(sp): continue
-                    sim = SimPortfolio(sk, pr); sim.load()
+                    sim = SimPortfolio(sk, pr); await asyncio.to_thread(sim.load)
                     tl = sim.trade_log if isinstance(sim.trade_log, list) else []
                     if not tl: continue
                     sb = _safe_float(pr.get("balance_start")) or 0.0; rb = sb
@@ -486,7 +486,7 @@ async def handle_simtrades(ctx, bot, sim_id, page):
             if profile is None: await _send_embed(ctx, "Unknown sim ID."); return
             sp = _sim_path(sim_key)
             if not os.path.exists(sp): await _send_embed(ctx, f"No data for {sim_key} yet."); return
-            sim = SimPortfolio(sim_key, profile); sim.load()
+            sim = SimPortfolio(sim_key, profile); await asyncio.to_thread(sim.load)
             trade_log = sim.trade_log if isinstance(sim.trade_log, list) else []
             if not trade_log: await _send_embed(ctx, "No trades recorded yet."); return
             sb = _safe_float(profile.get("balance_start")) or 0.0; rb = sb; balance_after = {}

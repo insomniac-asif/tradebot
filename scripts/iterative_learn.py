@@ -17,18 +17,20 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from analytics.predictor_optimizer import compute_weights, WEIGHTS_FILE, PRED_FILE
+from analytics.predictor_optimizer import compute_weights, WEIGHTS_FILE
+from core.analytics_db import init_db, read_df
 
 CHUNK_SIZE = 5000  # Update weights every N graded predictions
 
 
 def main():
-    if not os.path.exists(PRED_FILE):
-        print("No predictions.csv found")
+    init_db()
+
+    df = read_df("SELECT * FROM predictions WHERE checked = 1")
+    if df.empty:
+        print("No graded predictions found")
         return
 
-    df = pd.read_csv(PRED_FILE)
-    df = df[df["checked"] == True].copy()
     df["time"] = pd.to_datetime(df["time"], format="mixed")
     df = df.sort_values("time").reset_index(drop=True)
 

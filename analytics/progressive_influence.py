@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from core.paths import DATA_DIR
+from core.analytics_db import read_df, row_count
 from analytics.edge_momentum import calculate_edge_momentum
 
 FEATURE_FILE = os.path.join(DATA_DIR, "trade_features.csv")
@@ -10,14 +11,13 @@ def get_ml_weight(max_trades=200):
     Gradually increases ML influence as trade count grows.
     """
 
-    if not os.path.exists(FEATURE_FILE):
+    try:
+        trade_count = row_count("trade_features")
+    except Exception:
         return 0.0
 
-    try:
-        df = pd.read_csv(FEATURE_FILE)
-    except:
+    if trade_count == 0:
         return 0.0
-    trade_count = len(df)
 
     weight = min(trade_count / max_trades, 1.0)
     momentum_data = calculate_edge_momentum()

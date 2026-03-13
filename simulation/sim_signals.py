@@ -16,6 +16,7 @@ from simulation.sim_signal_funcs_smc import (
     _signal_opening_range_reclaim, _signal_vol_compression_breakout,
     _signal_vol_spike_fade,
 )
+from analytics.fair_value_gaps import detect_fvgs
 
 # ---------------------------------------------------------------------------
 # Signal mode registry
@@ -49,6 +50,7 @@ _KNOWN_SIGNAL_MODES = frozenset({
     "VOL_SPIKE_FADE",
     "STRUCTURE_FADE",
     "GEX_FLOW",
+    "FVG_FILL",
 })
 
 _SIGNAL_MODE_FAMILY = {
@@ -79,6 +81,7 @@ _SIGNAL_MODE_FAMILY = {
     "VOL_SPIKE_FADE":           "volatility",
     "STRUCTURE_FADE":           "structure",
     "GEX_FLOW":                 "flow",
+    "FVG_FILL":                 "reversal",
 }
 
 
@@ -279,6 +282,9 @@ def derive_sim_signal(
         elif mode == "GEX_FLOW":
             return _signal_gex_flow(df, structure_data, options_data)
 
+        elif mode == "FVG_FILL":
+            return _signal_fvg_fill(df, context, feature_snapshot)
+
         else:
             return None, None, {"reason": f"unknown_signal_mode:{signal_mode}"}
 
@@ -391,6 +397,69 @@ def _signal_gex_flow(df, structure_data, options_data) -> tuple:
         return None, None, {"reason": "no_gex_flow_setup"}
     except Exception:
         return None, None, {"reason": "gex_flow_error"}
+
+
+def _signal_fvg_fill(df, context, feature_snapshot) -> tuple:
+    """Trade into unmitigated FVG zones expecting price to fill the gap."""
+    try:
+        close_col = _find_col(df, ["close", "Close"])
+        if close_col is None or df is None or len(df) < 5:
+            return None, None, {"reason": "fvg_no_close"}
+
+        close = float(df.iloc[-1][close_col])
+
+        gaps = detect_fvgs(df, max_gaps=20)
+        if not gaps:
+            return None, None, {"reason": "fvg_no_active_gap"}
+
+        # Filter by age
+        fvg_max_age = int(_ctx_float(context, "fvg_max_age_bars", 50) or 50)
+        last_idx = len(df) - 1
+        gaps = [g for g in gaps if not g.get("mitigated") and (last_idx - g["bar_idx"]) <= fvg_max_age]
+
+        if not gaps:
+            return None, None, {"reason": "fvg_no_active_gap"}
+
+        # Optional RSI filter
+        rsi_col = _find_col(df, ["rsi", "RSI", "rsi14"])
+        rsi = None
+        if rsi_col is not None:
+            try:
+                rsi = float(df.iloc[-1][rsi_col])
+            except Exception:
+                rsi = None
+
+        # Check bull FVGs (close inside gap zone → expect fill upward)
+        for gap in gaps:
+            if gap["type"] != "bull":
+                continue
+            if gap["bottom"] <= close <= gap["top"]:
+                if rsi is not None and rsi > 70:
+                    continue
+                return "BULLISH", close, {
+                    "reason": "fvg_fill_long",
+                    "gap_top": gap["top"],
+                    "gap_bottom": gap["bottom"],
+                    "gap_age": last_idx - gap["bar_idx"],
+                }
+
+        # Check bear FVGs (close inside gap zone → expect fill downward)
+        for gap in gaps:
+            if gap["type"] != "bear":
+                continue
+            if gap["bottom"] <= close <= gap["top"]:
+                if rsi is not None and rsi < 30:
+                    continue
+                return "BEARISH", close, {
+                    "reason": "fvg_fill_short",
+                    "gap_top": gap["top"],
+                    "gap_bottom": gap["bottom"],
+                    "gap_age": last_idx - gap["bar_idx"],
+                }
+
+        return None, None, {"reason": "fvg_no_active_gap"}
+    except Exception:
+        return None, None, {"reason": "fvg_fill_error"}
 
 
 def derive_opportunity_signal(df, sim_states, regime, trader_signal=None):

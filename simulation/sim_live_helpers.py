@@ -124,6 +124,8 @@ def _build_live_trade_dict(
 # Exit-condition determination (extracted from manage_live_exit)
 # ---------------------------------------------------------------------------
 from core.md_state import is_md_enabled
+from analytics.structure_trailing_stop import compute_structure_stop
+from analytics.statistical_trailing_stop import compute_statistical_stop
 
 
 def _determine_exit_condition(sim, trade, current_price, gain_pct, elapsed_seconds, profile, now_et):
@@ -246,6 +248,64 @@ def _determine_exit_condition(sim, trade, current_price, gain_pct, elapsed_secon
                     exit_reason = "profit_target_2" if trade.get("tp2_activated") else "profit_target"
                     exit_context = f"gain_pct={gain_pct:.3%} >= {target_val:.3%}"
         except (TypeError, ValueError):
+            pass
+
+    # ── Structure-aware trailing stop ─────────────────
+    if not should_exit and profile.get("structure_trail_enabled"):
+        try:
+            _st_pivot = int(profile.get("structure_trail_pivot_len", 5))
+            _st_incr = float(profile.get("structure_trail_increment", 0.5))
+            _direction = trade.get("direction", "BULLISH")
+            _trade_symbol = (trade.get("symbol") or trade.get("underlying", "")).upper()
+            from core.data_service import get_symbol_dataframe
+            _st_df = get_symbol_dataframe(_trade_symbol)
+            _struct = compute_structure_stop(_st_df, _direction, pivot_lookback=_st_pivot, increment_factor=_st_incr)
+            _struct_stop = _struct.get("structure_stop")
+            if _struct_stop is not None and current_price is not None:
+                if _direction == "BULLISH" and current_price < _struct_stop:
+                    should_exit = True
+                    exit_reason = "structure_trail"
+                    exit_context = f"price={current_price:.2f} struct_stop={_struct_stop:.2f} trend={_struct.get('structure_trend')}"
+                elif _direction == "BEARISH" and current_price > _struct_stop:
+                    should_exit = True
+                    exit_reason = "structure_trail"
+                    exit_context = f"price={current_price:.2f} struct_stop={_struct_stop:.2f} trend={_struct.get('structure_trend')}"
+        except Exception:
+            pass
+
+    # ── Statistical trailing stop ─────────────────────
+    if not should_exit and profile.get("stat_trail_enabled"):
+        try:
+            _stat_level = int(profile.get("stat_trail_level", 1))
+            _stat_group = int(profile.get("stat_trail_group_size", 10))
+            _stat_dist = int(profile.get("stat_trail_dist_length", 100))
+            _direction = trade.get("direction", "BULLISH")
+            _trade_symbol = (trade.get("symbol") or trade.get("underlying", "")).upper()
+            from core.data_service import get_symbol_dataframe
+            _stat_df = get_symbol_dataframe(_trade_symbol)
+            _stat = compute_statistical_stop(_stat_df, _direction, group_size=_stat_group, distribution_length=_stat_dist, level=_stat_level)
+            _stat_stop = _stat.get("stat_stop")
+            if _stat_stop is not None and current_price is not None:
+                # Ratchet logic: only update if new stop is more favorable
+                _prev_stat_stop = trade.get("stat_trail_stop")
+                if _prev_stat_stop is None:
+                    trade["stat_trail_stop"] = _stat_stop
+                elif _direction == "BULLISH" and _stat_stop > _prev_stat_stop:
+                    trade["stat_trail_stop"] = _stat_stop
+                elif _direction == "BEARISH" and _stat_stop < _prev_stat_stop:
+                    trade["stat_trail_stop"] = _stat_stop
+
+                _effective_stop = trade.get("stat_trail_stop")
+                if _effective_stop is not None:
+                    if _direction == "BULLISH" and current_price < _effective_stop:
+                        should_exit = True
+                        exit_reason = "stat_trail"
+                        exit_context = f"price={current_price:.2f} stat_stop={_effective_stop:.2f} level={_stat_level} width={_stat.get('stat_width', 0):.4f}"
+                    elif _direction == "BEARISH" and current_price > _effective_stop:
+                        should_exit = True
+                        exit_reason = "stat_trail"
+                        exit_context = f"price={current_price:.2f} stat_stop={_effective_stop:.2f} level={_stat_level} width={_stat.get('stat_width', 0):.4f}"
+        except Exception:
             pass
 
     # Trailing stop

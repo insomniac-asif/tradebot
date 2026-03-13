@@ -76,11 +76,10 @@ async def opportunity_watcher(bot, alert_channel_id):
             _registry = _load_symbol_registry()
             _sym_names = [s.upper() for s in _registry]
         except Exception:
-            _sym_names = ["SPY"]
+            _sym_names = []
 
         _fetch_tasks = [
-            asyncio.to_thread(get_symbol_dataframe, s) if s != "SPY"
-            else asyncio.to_thread(get_market_dataframe)
+            asyncio.to_thread(get_symbol_dataframe, s)
             for s in _sym_names
         ]
         _fetched = await asyncio.gather(*_fetch_tasks, return_exceptions=True)
@@ -187,15 +186,13 @@ print("Prediction grader started")
 async def prediction_grader(bot, channel_id=None):
     await bot.wait_until_ready()
     channel = bot.get_channel(channel_id) if channel_id is not None else None
-    pred_file = f"{DATA_DIR}/predictions.csv"
 
     while not bot.is_closed():
         await asyncio.to_thread(check_predictions)
 
         try:
-            preds = await asyncio.to_thread(pd.read_csv, pred_file)
-        except (FileNotFoundError, EmptyDataError):
-            preds = None
+            from core.analytics_db import read_df
+            preds = await asyncio.to_thread(read_df, "SELECT * FROM predictions")
         except Exception:
             preds = None
 
@@ -397,10 +394,8 @@ async def backfill_watcher():
                             corrected_syms, earliest, existing,
                         )
                         if new_rows:
-                            import csv
-                            with open(PRED_FILE, "a", newline="") as f:
-                                writer = csv.DictWriter(f, fieldnames=PRED_HEADERS)
-                                writer.writerows(new_rows)
+                            from core.analytics_db import insert_many
+                            await asyncio.to_thread(insert_many, "predictions", new_rows)
                             logging.error("backfill_predictions_done: %d predictions for %s from %s",
                                           len(new_rows), corrected_syms, earliest)
                 except Exception as e:
@@ -452,9 +447,11 @@ async def preopen_check_loop(bot, channel_id: int):
             )
             profile = None
             try:
-                with open(profile_path, "r") as f:
-                    profiles = yaml.safe_load(f) or {}
-                    profile = profiles.get("SIM03") or profiles.get("SIM01")
+                def _load_yaml():
+                    with open(profile_path, "r") as f:
+                        _profs = yaml.safe_load(f) or {}
+                        return _profs, _profs.get("SIM03") or _profs.get("SIM01")
+                profiles, profile = await asyncio.to_thread(_load_yaml)
             except Exception:
                 profile = None
 
@@ -642,14 +639,11 @@ async def weight_reoptimizer_loop():
 
             last_run_date = now_et.date()
 
-            pred_file = os.path.join(DATA_DIR, "predictions.csv")
-            if not os.path.exists(pred_file):
-                continue
-
-            df = await asyncio.to_thread(
-                pd.read_csv, pred_file, usecols=["checked"],
+            from core.analytics_db import scalar as _db_scalar
+            total_graded = await asyncio.to_thread(
+                _db_scalar, "SELECT COUNT(*) FROM predictions WHERE checked = 1"
             )
-            total_graded = int((df["checked"] == True).sum())
+            total_graded = int(total_graded or 0)
 
             if total_graded > 0 and total_graded % 250 == 0 and total_graded != last_optimized_count:
                 from analytics.predictor_optimizer import update_predictor_weights

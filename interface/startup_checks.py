@@ -166,27 +166,12 @@ def run_startup_phase_gates():
     if not api_key or not secret_key:
         errors.append("alpaca_api_keys_missing")
 
-    conviction_file = os.path.join(DATA_DIR, "conviction_expectancy.csv")
-    pred_file = os.path.join(DATA_DIR, "predictions.csv")
-
-    conviction_headers = _read_csv_headers(conviction_file)
-    if conviction_headers not in (CONVICTION_HEADERS, LEGACY_CONVICTION_HEADERS):
-        errors.append("conviction_csv_header_invalid")
-
-    pred_headers = _read_csv_headers(pred_file)
-    if pred_headers is None:
-        errors.append("predictions_csv_header_missing")
-    else:
-        missing_pred = [h for h in PREDICTION_REQUIRED_HEADERS if h not in pred_headers]
-        if missing_pred:
-            errors.append(f"predictions_csv_header_missing_fields:{','.join(missing_pred)}")
-        if pred_headers != PRED_HEADERS:
-            try:
-                with open(pred_file, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(PRED_HEADERS)
-            except Exception:
-                errors.append("predictions_csv_header_reset_failed")
+    # Initialize SQLite analytics DB (create tables, migrate CSV data)
+    try:
+        from core.analytics_db import init_db
+        init_db()
+    except Exception as e:
+        errors.append(f"analytics_db_init_error:{e}")
 
     direction_model_path = os.path.join(DATA_DIR, "direction_model.pkl")
     edge_model_path = os.path.join(DATA_DIR, "edge_model.pkl")

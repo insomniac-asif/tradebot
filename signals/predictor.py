@@ -78,9 +78,11 @@ def _detect_volatility(df) -> str:
     try:
         recent = df.tail(30)
         vol = float(recent["high"].max()) - float(recent["low"].min())
-        if vol < 0.35:   return "DEAD"
-        if vol < 0.75:   return "LOW"
-        if vol < 1.50:   return "NORMAL"
+        mid = float(recent["close"].mean()) or 1.0
+        vol_pct = vol / mid
+        if vol_pct < 0.00053:   return "DEAD"     # ~0.35/666
+        if vol_pct < 0.00113:   return "LOW"      # ~0.75/666
+        if vol_pct < 0.00225:   return "NORMAL"   # ~1.50/666
         return "HIGH"
     except Exception:
         return "NORMAL"

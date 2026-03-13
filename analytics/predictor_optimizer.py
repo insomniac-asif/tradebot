@@ -36,7 +36,7 @@ import pandas as pd
 from core.paths import DATA_DIR
 
 WEIGHTS_FILE = os.path.join(DATA_DIR, "predictor_weights.json")
-PRED_FILE    = os.path.join(DATA_DIR, "predictions.csv")
+PRED_FILE    = os.path.join(DATA_DIR, "predictions.csv")  # legacy constant
 
 # ── tuning knobs ─────────────────────────────────────────────────────────────
 BASELINE        = 1 / 3          # random-chance win rate for 3-class problem
@@ -126,18 +126,19 @@ def compute_weights(df: pd.DataFrame) -> dict:
 
 def update_predictor_weights(dry_run: bool = False) -> dict:
     """
-    Load predictions.csv, recompute weights, optionally save to JSON.
+    Load predictions from SQLite, recompute weights, optionally save to JSON.
     Returns the weights dict (empty dict on failure).
     """
-    if not os.path.exists(PRED_FILE):
-        return {}
     try:
-        df = pd.read_csv(PRED_FILE)
+        from core.analytics_db import read_df
+        df = read_df("SELECT * FROM predictions WHERE checked = 1")
     except Exception:
         return {}
 
-    graded = df[df.get("checked", False) == True] if "checked" in df.columns else df
-    weights = compute_weights(graded)
+    if df.empty:
+        return {}
+
+    weights = compute_weights(df)
 
     if not weights:
         return {}

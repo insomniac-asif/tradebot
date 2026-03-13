@@ -76,7 +76,7 @@ def _handle_get_sim(sim_id: str) -> dict:
     data = _load_sim(sim_id)
     if data is None:
         bs = float(profile.get("balance_start", 25000))
-        _cfg_syms = profile.get("symbols") or ([profile.get("symbol")] if profile.get("symbol") else ["SPY"])
+        _cfg_syms = profile.get("symbols") or ([profile.get("symbol")] if profile.get("symbol") else [])
         stub_stats = {
             "sim_id": sim_id,
             "name": profile.get("name", sim_id),

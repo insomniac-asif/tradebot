@@ -20,8 +20,28 @@ def get_intraday_volatility(df=None):
 
 def volatility_state(df=None):
 
+    if df is None:
+        df = get_market_dataframe()
+
     vol = get_intraday_volatility(df)
 
+    # Use price-relative thresholds so classification works for any symbol
+    try:
+        mid_price = float(df.tail(30)["close"].mean()) if df is not None and len(df) >= 30 else 0
+    except Exception:
+        mid_price = 0
+
+    if mid_price > 0:
+        vol_pct = vol / mid_price
+        if vol_pct < 0.00053:    # ~0.35/666 for SPY
+            return "DEAD"
+        if vol_pct < 0.00113:    # ~0.75/666 for SPY
+            return "LOW"
+        if vol_pct < 0.00225:    # ~1.5/666 for SPY
+            return "NORMAL"
+        return "HIGH"
+
+    # Fallback to absolute thresholds if price unavailable
     if vol < 0.35:
         return "DEAD"
 

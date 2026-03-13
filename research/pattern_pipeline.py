@@ -67,7 +67,9 @@ def run_backtest_collect_trades(sim_id: str, profile: dict,
                                 start: str, end: str) -> list[dict]:
     """Run backtest, return full trade list with all metadata."""
     bt_profile = copy.deepcopy(profile)
-    bt_profile["symbols"] = ["SPY"]  # SPY-only for consistency
+    # Use the profile's own symbols so pattern learning applies to all configured symbols
+    if not bt_profile.get("symbols"):
+        bt_profile["symbols"] = list(profile.get("symbols", []))
 
     engine = BacktestEngine(
         profile_id=sim_id,
@@ -217,7 +219,7 @@ def tag_trade(trade: dict) -> dict:
         trade["tags"] = {}
         return trade
 
-    symbol = trade.get("symbol", "SPY")
+    symbol = trade.get("symbol", "")
     direction = trade.get("direction", "")
     pnl = trade.get("pnl") or trade.get("realized_pnl_dollars", 0)
 
@@ -850,11 +852,13 @@ def main():
 
     config = load_config()
 
-    # Pre-load VXX and SPY data for tagging
-    print("Pre-loading symbol data for tagging...", flush=True)
-    _load_symbol_df("SPY")
-    _load_symbol_df("VXX")
-    print("  Loaded SPY and VXX data", flush=True)
+    # Pre-load symbol data for tagging
+    from core.data_service import _load_symbol_registry
+    _tag_syms = list(_load_symbol_registry().keys()) or []
+    print(f"Pre-loading symbol data for tagging ({len(_tag_syms)} symbols)...", flush=True)
+    for _ts in _tag_syms:
+        _load_symbol_df(_ts)
+    print(f"  Loaded {len(_tag_syms)} symbols", flush=True)
 
     # Select sims
     mode_groups = {}

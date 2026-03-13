@@ -1,7 +1,7 @@
 import os
 import pandas as pd
-from pandas.errors import EmptyDataError
 from core.paths import DATA_DIR
+from core.analytics_db import read_df
 
 FILE = os.path.join(DATA_DIR, "trade_features.csv")
 
@@ -11,17 +11,12 @@ def ml_rolling_accuracy(lookback=30):
     Returns advanced rolling ML performance metrics.
     """
 
-    if not os.path.exists(FILE):
-        return None
-
-    if os.path.getsize(FILE) == 0:
-        return None
-
     try:
-        df = pd.read_csv(FILE)
-    except EmptyDataError:
-        return None
+        df = read_df("SELECT * FROM trade_features")
     except Exception:
+        return None
+
+    if df.empty:
         return None
 
     required_cols = ["won", "predicted_won"]

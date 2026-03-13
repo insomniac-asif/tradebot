@@ -220,7 +220,7 @@ def run_recorder():
         if sym not in symbols:
             symbols.append(sym)
     if not symbols:
-        symbols = ["SPY"]
+        symbols = []
     print(f"Recorder started for: {', '.join(sorted(symbols))}")
 
     # Dedupe all files at startup

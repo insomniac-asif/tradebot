@@ -115,7 +115,9 @@ def _format_contract_simple(
     expiry_text = ""
     if isinstance(expiry, str) and len(expiry) >= 10:
         expiry_text = expiry[:10]
-    label = "SPY"
+    import re as _re_und
+    _und_m = _re_und.match(r'^([A-Z]{1,6})', option_symbol or "")
+    label = _und_m.group(1) if _und_m else ""
     if cp:
         label = f"{label} {cp}"
     if expiry_text:

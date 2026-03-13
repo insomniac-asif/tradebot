@@ -1,12 +1,11 @@
 import os
-import csv
 import pandas as pd
-from pandas.errors import EmptyDataError
 from datetime import timedelta
 from core.paths import DATA_DIR
 from core.data_service import get_market_dataframe
+from core.analytics_db import insert, read_df, transaction, scalar
 
-FILE = os.path.join(DATA_DIR, "conviction_expectancy.csv") 
+FILE = os.path.join(DATA_DIR, "conviction_expectancy.csv")
 HEADERS = [
     "time",
     "direction",
@@ -25,66 +24,21 @@ HEADERS = [
 
 
 def ensure_conviction_file():
-    if os.path.exists(FILE) and os.path.getsize(FILE) > 0:
-        try:
-            with open(FILE, "r", newline="") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-            if not rows:
-                raise ValueError("empty_file")
-            header = rows[0]
-            if header != HEADERS:
-                padded = []
-                for row in rows[1:]:
-                    if not row:
-                        continue
-                    if row[0] == "time":
-                        continue
-                    new_row = row[:len(HEADERS)]
-                    if len(new_row) < len(HEADERS):
-                        new_row += [""] * (len(HEADERS) - len(new_row))
-                    padded.append(new_row)
-                with open(FILE, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(HEADERS)
-                    writer.writerows(padded)
-        except Exception:
-            pass
-        return
-
-    with open(FILE, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(HEADERS)
+    """No-op: schema is ensured at startup via analytics_db.init_db()."""
+    pass
 
 
 def get_last_logged_time():
-    if not os.path.exists(FILE) or os.path.getsize(FILE) == 0:
-        return None
-
-    last_row = None
-    with open(FILE, "r", newline="") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if not row:
-                continue
-            if row[0] == "time":
-                continue
-            last_row = row
-
-    if not last_row:
-        return None
-    return last_row[0]
+    return scalar("SELECT MAX(time) FROM conviction_expectancy")
 
 # ==================================
-# 1️⃣ LOG SIGNAL
+# 1. LOG SIGNAL
 # ==================================
 
 def log_conviction_signal(df, direction, impulse, follow):
     if df is None or df.empty:
         print("No data to log for conviction signal.")
         return
-
-    ensure_conviction_file()
 
     last = df.iloc[-1]  # Check for the last valid data row
     if pd.isna(last["close"]):
@@ -100,8 +54,7 @@ def log_conviction_signal(df, direction, impulse, follow):
 
     timestamp_iso = pd.to_datetime(timestamp).strftime("%Y-%m-%d %H:%M:%S")
     last_logged_time = get_last_logged_time()
-    # Normalize both to isoformat before comparing (pandas to_csv uses space separator,
-    # isoformat() uses T separator — without normalization the dedup check never fires)
+    # Normalize both to isoformat before comparing
     try:
         last_logged_normalized = pd.to_datetime(last_logged_time).isoformat() if last_logged_time else None
     except Exception:
@@ -109,30 +62,26 @@ def log_conviction_signal(df, direction, impulse, follow):
     if last_logged_normalized == timestamp_iso:
         return
 
-    with open(FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-
-        # Safely log the conviction signal (strftime format matches to_csv output)
-        writer.writerow([
-            timestamp_iso,
-            str(direction),
-            round(float(impulse), 3),
-            round(float(follow), 3),
-            float(last["close"]),
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-        ])
+    insert("conviction_expectancy", {
+        "time": timestamp_iso,
+        "direction": str(direction),
+        "impulse": round(float(impulse), 3),
+        "follow": round(float(follow), 3),
+        "price": float(last["close"]),
+        "fwd_5m": None,
+        "fwd_10m": None,
+        "fwd_5m_price": None,
+        "fwd_5m_time": None,
+        "fwd_5m_status": None,
+        "fwd_10m_price": None,
+        "fwd_10m_time": None,
+        "fwd_10m_status": None,
+    })
     print(f"Logged conviction signal at {timestamp}.")
 
 
 # ==================================
-# 2️⃣ UPDATE EXPECTANCY
+# 2. UPDATE EXPECTANCY
 # ==================================
 
 def update_expectancy(df=None):
@@ -143,39 +92,18 @@ def update_expectancy(df=None):
         print("No data available or file missing.")
         return
 
-    ensure_conviction_file()
+    signals = read_df(
+        "SELECT * FROM conviction_expectancy WHERE fwd_5m_status != 'filled' OR fwd_10m_status != 'filled' OR fwd_5m_status IS NULL OR fwd_10m_status IS NULL"
+    )
 
-    try:
-        signals = pd.read_csv(FILE, parse_dates=["time"])
-    except EmptyDataError:
-        ensure_conviction_file()
+    if signals.empty:
         return
-    except Exception:
-        ensure_conviction_file()
-        return
-
-    for col in HEADERS:
-        if col not in signals.columns:
-            if col in {"fwd_5m_time", "fwd_10m_time"}:
-                signals[col] = pd.NaT
-            elif col in {"fwd_5m_status", "fwd_10m_status"}:
-                signals[col] = pd.Series([None] * len(signals), dtype="object")
-            else:
-                signals[col] = None
 
     signals["time"] = pd.to_datetime(signals["time"], errors="coerce", format="mixed")
     signals = signals.dropna(subset=["time"])
 
     # Force numeric types safely
     signals["price"] = pd.to_numeric(signals["price"], errors="coerce")
-    signals["fwd_5m"] = pd.to_numeric(signals["fwd_5m"], errors="coerce")
-    signals["fwd_10m"] = pd.to_numeric(signals["fwd_10m"], errors="coerce")
-    signals["fwd_5m_price"] = pd.to_numeric(signals["fwd_5m_price"], errors="coerce")
-    signals["fwd_10m_price"] = pd.to_numeric(signals["fwd_10m_price"], errors="coerce")
-    signals["fwd_5m_time"] = pd.to_datetime(signals["fwd_5m_time"], errors="coerce")
-    signals["fwd_10m_time"] = pd.to_datetime(signals["fwd_10m_time"], errors="coerce")
-    signals["fwd_5m_status"] = signals["fwd_5m_status"].astype("object")
-    signals["fwd_10m_status"] = signals["fwd_10m_status"].astype("object")
 
     if signals.empty:
         print("No conviction signals available.")
@@ -252,65 +180,67 @@ def update_expectancy(df=None):
             return price, ts, "estimated_last"
         return price, ts, "estimated_gap"
 
-    for i, row in signals.iterrows():
-        if bool(pd.isna(row["time"])) or bool(pd.isna(row["price"])):
-            continue
+    with transaction() as conn:
+        for _, row in signals.iterrows():
+            if bool(pd.isna(row["time"])) or bool(pd.isna(row["price"])):
+                continue
 
-        base_price = row["price"]
-        if bool(pd.isna(base_price)):
-            continue
+            base_price = row["price"]
+            if bool(pd.isna(base_price)):
+                continue
 
-        future_5 = row["time"] + timedelta(minutes=5)
-        future_10 = row["time"] + timedelta(minutes=10)
+            row_id = int(row["id"])
+            updates = {}
 
-        fwd_5m_val = row.get("fwd_5m")
-        if fwd_5m_val is None or bool(pd.isna(fwd_5m_val)) or row.get("fwd_5m_status") != "filled":
-            price_5, ts_5, status_5 = _select_future(future_5)
-            if price_5 is not None:
-                signals.loc[i, "fwd_5m_price"] = price_5
-                if ts_5 is not None:
-                    signals.loc[i, "fwd_5m_time"] = pd.Timestamp(ts_5)
-                signals.loc[i, "fwd_5m"] = price_5 - base_price
-            signals.loc[i, "fwd_5m_status"] = status_5
+            future_5 = row["time"] + timedelta(minutes=5)
+            future_10 = row["time"] + timedelta(minutes=10)
 
-        fwd_10m_val = row.get("fwd_10m")
-        if fwd_10m_val is None or bool(pd.isna(fwd_10m_val)) or row.get("fwd_10m_status") != "filled":
-            price_10, ts_10, status_10 = _select_future(future_10)
-            if price_10 is not None:
-                signals.loc[i, "fwd_10m_price"] = price_10
-                if ts_10 is not None:
-                    signals.loc[i, "fwd_10m_time"] = pd.Timestamp(ts_10)
-                signals.loc[i, "fwd_10m"] = price_10 - base_price
-            signals.loc[i, "fwd_10m_status"] = status_10
+            fwd_5m_val = row.get("fwd_5m")
+            if fwd_5m_val is None or bool(pd.isna(fwd_5m_val)) or row.get("fwd_5m_status") != "filled":
+                price_5, ts_5, status_5 = _select_future(future_5)
+                if price_5 is not None:
+                    updates["fwd_5m_price"] = float(price_5)
+                    if ts_5 is not None:
+                        updates["fwd_5m_time"] = str(pd.Timestamp(ts_5))
+                    updates["fwd_5m"] = float(price_5 - base_price)
+                updates["fwd_5m_status"] = status_5
 
-    # Only save the data if valid
-    try:
-        signals.to_csv(FILE, index=False)
-        print("Conviction expectancy updated successfully.")
-    except Exception as e:
-        print(f"Error while saving conviction expectancy: {e}")
+            fwd_10m_val = row.get("fwd_10m")
+            if fwd_10m_val is None or bool(pd.isna(fwd_10m_val)) or row.get("fwd_10m_status") != "filled":
+                price_10, ts_10, status_10 = _select_future(future_10)
+                if price_10 is not None:
+                    updates["fwd_10m_price"] = float(price_10)
+                    if ts_10 is not None:
+                        updates["fwd_10m_time"] = str(pd.Timestamp(ts_10))
+                    updates["fwd_10m"] = float(price_10 - base_price)
+                updates["fwd_10m_status"] = status_10
+
+            if updates:
+                set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+                conn.execute(
+                    f"UPDATE conviction_expectancy SET {set_clause} WHERE id = ?",
+                    list(updates.values()) + [row_id],
+                )
+
+    print("Conviction expectancy updated successfully.")
 
 
 def get_conviction_expectancy_stats():
-    ensure_conviction_file()
 
     try:
-        df = pd.read_csv(FILE)
-    except EmptyDataError:
-        ensure_conviction_file()
+        df = read_df(
+            "SELECT * FROM conviction_expectancy WHERE fwd_5m_status = 'filled' AND fwd_10m_status = 'filled'"
+        )
+    except Exception:
         return None
+
     if not isinstance(df, pd.DataFrame) or df.empty:
-        print("No data available in conviction expectancy file.")
+        print("No data available in conviction expectancy.")
         return None
 
-    if "fwd_5m_status" in df.columns:
-        df = df[df["fwd_5m_status"] == "filled"]
-    if "fwd_10m_status" in df.columns:
-        df = df[df["fwd_10m_status"] == "filled"]
-
-    # Drop rows where 'fwd_5m' or 'fwd_10m' are NaN
-    if isinstance(df, pd.DataFrame):
-        df = df.dropna(subset=["fwd_5m", "fwd_10m"])
+    df["fwd_5m"] = pd.to_numeric(df["fwd_5m"], errors="coerce")
+    df["fwd_10m"] = pd.to_numeric(df["fwd_10m"], errors="coerce")
+    df = df.dropna(subset=["fwd_5m", "fwd_10m"])
 
     # Check if the remaining data is too sparse
     if len(df) < 5:

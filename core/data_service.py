@@ -37,15 +37,21 @@ def get_client():
     return _client
 
 
-def get_market_dataframe():
-    """Returns full SPY dataframe with indicators. Thin wrapper around get_symbol_dataframe."""
-    df = get_symbol_dataframe("SPY")
+def get_market_dataframe(symbol=None):
+    """Returns dataframe with indicators for the given symbol (default from registry or SPY)."""
+    if symbol is None:
+        try:
+            reg = _load_symbol_registry()
+            symbol = next(iter(reg)) if reg else "SPY"
+        except Exception:
+            symbol = "SPY"
+    df = get_symbol_dataframe(symbol)
     if df is None:
         return None
     if len(df) < 200:
         logging.warning(
-            "data_service_sparse_csv: only %d rows — run: python scripts/backfill_candles.py",
-            len(df),
+            "data_service_sparse_csv: only %d rows for %s — run: python scripts/backfill_candles.py",
+            len(df), symbol,
         )
     try:
         open_now = market_is_open()
@@ -55,22 +61,22 @@ def get_market_dataframe():
         pass
     return df
 
-def get_recent_candles(n=60):
-    df = get_market_dataframe()
+def get_recent_candles(n=60, symbol=None):
+    df = get_market_dataframe(symbol=symbol)
     if df is None:
         return None
     return df.tail(n)
 
 
-def get_latest_price():
-    df = get_market_dataframe()
+def get_latest_price(symbol=None):
+    df = get_market_dataframe(symbol=symbol)
     if df is None:
         return None
     return df.iloc[-1]["close"]
 
 
-def get_price_at(timestamp):
-    df = get_market_dataframe()
+def get_price_at(timestamp, symbol=None):
+    df = get_market_dataframe(symbol=symbol)
     if df is None:
         return None
 
@@ -164,7 +170,7 @@ def _prepare_dataframe(df):
     return df
 
 
-def _fetch_from_alpaca(symbol: str = "SPY"):
+def _fetch_from_alpaca(symbol: str):
     eastern = pytz.timezone("US/Eastern")
     now = datetime.now(eastern)
 
@@ -324,7 +330,7 @@ def _load_symbol_registry() -> dict:
             return _SYMBOL_REGISTRY
         with open(cfg_path) as f:
             cfg = yaml.safe_load(f) or {}
-        _SYMBOL_REGISTRY = cfg.get("symbols") or {}
+        _SYMBOL_REGISTRY = cfg.get("symbol_registry") or cfg.get("symbols") or {}
         _REGISTRY_MTIME  = mtime
         return _SYMBOL_REGISTRY
     except Exception as e:
