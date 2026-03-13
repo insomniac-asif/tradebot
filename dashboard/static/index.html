@@ -6,7 +6,7 @@
 <title>Trader Sim Classroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=20260313f">
+<link rel="stylesheet" href="/static/style.css?v=20260313g">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
 </head>
 <body>
@@ -31,13 +31,13 @@
 
 <!-- ══════════════════════════════════════ SUBNAV -->
 <nav class="subnav" id="subnav">
-  <button class="subnav-tab active" onclick="navTo('charts',this)">📊 Charts</button>
-  <button class="subnav-tab" onclick="navTo('trades',this)">📋 Trades</button>
-  <button class="subnav-tab" onclick="navTo('roster',this)">🎓 Roster</button>
-  <button class="subnav-tab" onclick="navTo('backtest',this)">🔬 Backtest</button>
-  <button class="subnav-tab" onclick="navTo('greeks',this)">⚡ Greeks</button>
-  <button class="subnav-tab" onclick="navTo('intel',this)">🧠 Intel</button>
-  <button class="subnav-tab" onclick="navTo('grade',this)">📝 Grade</button>
+  <button class="subnav-tab active" onclick="navTo('charts',this)">📊<span class="tab-label"> Charts</span></button>
+  <button class="subnav-tab" onclick="navTo('trades',this)">📋<span class="tab-label"> Trades</span></button>
+  <button class="subnav-tab" onclick="navTo('roster',this)">🎓<span class="tab-label"> Roster</span></button>
+  <button class="subnav-tab" onclick="navTo('backtest',this)">🔬<span class="tab-label"> Backtest</span></button>
+  <button class="subnav-tab" onclick="navTo('greeks',this)">⚡<span class="tab-label"> Greeks</span></button>
+  <button class="subnav-tab" onclick="navTo('intel',this)">🧠<span class="tab-label"> Intel</span></button>
+  <button class="subnav-tab" onclick="navTo('grade',this)">📝<span class="tab-label"> Grade</span></button>
 </nav>
 
 <!-- ══════════════════════════════════════ FRONT WALL: CHALKBOARD -->
@@ -492,6 +492,6 @@
 </div>
 <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
 
-<script src="/static/main.js?v=20260313f"></script>
+<script src="/static/main.js?v=20260313g"></script>
 </body>
 </html>

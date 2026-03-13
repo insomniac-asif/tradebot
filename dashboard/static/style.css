@@ -2715,17 +2715,23 @@ html, body {
     justify-content: space-around;
     border-bottom: none;
     border-top: 3px solid var(--wood-mid);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .subnav-tab {
-    flex: 1;
-    padding: 9px 4px 7px;
+    flex: 0 0 auto;
+    min-width: 0;
+    padding: 9px 6px 7px;
     font-size: 10px;
     border-bottom: none;
     border-top: 3px solid transparent;
     margin-bottom: 0;
     margin-top: -3px;
     text-align: center;
+    white-space: nowrap;
   }
+  /* Hide tab text labels on small screens — show emoji only */
+  .subnav-tab .tab-label { display: none; }
   .subnav-tab.active { border-top-color: var(--chalk-yellow); border-bottom-color: transparent; }
   body { padding-bottom: 56px; }
 }
