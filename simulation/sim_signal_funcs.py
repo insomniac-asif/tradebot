@@ -91,7 +91,7 @@ def _signal_breakout(df, context=None) -> tuple:
 
 
 def _signal_trend_pullback(df, context=None) -> tuple:
-    PULLBACK_TOLERANCE = _ctx_float(context, "pullback_tolerance", 0.001)
+    PULLBACK_TOLERANCE = _ctx_float(context, "pullback_tolerance", 0.004)
     MIN_BARS_REQUIRED = 2
     try:
         if df is None or len(df) < MIN_BARS_REQUIRED:
