@@ -96,3 +96,12 @@ research/backtest_results.json
 research/optimization_report.md
 research/full_optimization_report.md
 research/patterns/
+
+# ── Generated data / weights ─────────────────────────────────────
+data/predictor_weights.json
+
+# ── Scratch / debug scripts ──────────────────────────────────────
+test_*.py
+dump_threads.py
+run_test*.py
+trace.txt
