@@ -211,4 +211,38 @@ def check_exit_conditions(
         except Exception:
             pass
 
+    # ── BS repricing: IV crush detection + theta consumption ────────────────
+    if (isinstance(trade.get("expiry"), str) and gain_pct is not None
+            and trade.get("iv_at_entry") and trade.get("strike")):
+        try:
+            from core.black_scholes import bs_price, bs_theta
+            _iv = float(trade["iv_at_entry"])
+            _strike = float(trade["strike"])
+            _und = float(trade.get("underlying_price_at_entry", 0))
+            _entry_p = float(trade.get("entry_price", 0))
+            if _iv > 0 and _strike > 0 and _und > 0 and _entry_p > 0:
+                _expiry_date = datetime.fromisoformat(trade["expiry"]).date()
+                if isinstance(current_bar_ts, datetime):
+                    _today = (current_bar_ts.date() if current_bar_ts.tzinfo is None
+                              else current_bar_ts.astimezone(pytz.timezone("America/New_York")).date())
+                else:
+                    _today = current_bar_ts.date() if hasattr(current_bar_ts, "date") else datetime.now().date()
+                _T = max(0, (_expiry_date - _today).days) / 365.0
+                _opt_type = "call" if (trade.get("direction") or "BULLISH").upper() == "BULLISH" else "put"
+                _und_now = _und * (1 + gain_pct * 0.2)
+
+                theo = bs_price(_und_now, _strike, _T, 0.05, _iv, _opt_type)
+                if theo > 0 and current_price > 0 and theo / current_price < 0.7:
+                    tightened_sl = abs(float(profile.get("stop_loss_pct", 0.30))) * 0.5
+                    if gain_pct <= -tightened_sl:
+                        return True, "bs_iv_crush", current_price
+
+                if _T > 0:
+                    daily_theta = abs(bs_theta(_und_now, _strike, _T, 0.05, _iv, _opt_type))
+                    theta_consumed = daily_theta * max(1, elapsed_seconds / 86400)
+                    if theta_consumed / _entry_p > 0.5:
+                        return True, "theta_consumed", current_price
+        except Exception:
+            pass
+
     return False, "still_open", current_price

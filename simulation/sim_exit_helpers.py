@@ -411,4 +411,80 @@ def _evaluate_exit_conditions(trade, profile, sim, current_price, elapsed_second
             except (TypeError, ValueError):
                 pass
 
+    # 4. Continuous Greeks repricing via Black-Scholes
+    if not should_exit and gain_pct is not None:
+        iv_at_entry = trade.get("iv_at_entry")
+        entry_price_val = trade.get("entry_price")
+        strike = trade.get("strike")
+        underlying_price = trade.get("underlying_price_at_entry")
+        expiry_raw = trade.get("expiry")
+        direction = (trade.get("direction") or "BULLISH").upper()
+
+        if (isinstance(iv_at_entry, (int, float)) and float(iv_at_entry) > 0
+                and isinstance(entry_price_val, (int, float)) and float(entry_price_val) > 0
+                and isinstance(strike, (int, float)) and float(strike) > 0
+                and isinstance(underlying_price, (int, float))
+                and isinstance(expiry_raw, str)):
+            try:
+                from core.black_scholes import bs_price, bs_theta
+
+                _iv = float(iv_at_entry)
+                _entry_p = float(entry_price_val)
+                _strike = float(strike)
+                _und = float(underlying_price)
+                _expiry_date = datetime.fromisoformat(expiry_raw).date()
+                _days_left = max(0, (_expiry_date - now_et.date()).days)
+                _T = _days_left / 365.0
+                _opt_type = "call" if direction == "BULLISH" else "put"
+
+                # Estimate current underlying from option price ratio
+                _und_now = _und * (1 + gain_pct * 0.2)  # rough proxy
+
+                theo_price = bs_price(_und_now, _strike, _T, 0.05, _iv, _opt_type)
+
+                # IV crush detection: theoretical << quoted mid
+                if theo_price > 0 and current_price > 0:
+                    ratio = theo_price / current_price
+                    if ratio < 0.7:
+                        # Potential IV crush — tighten stop to 50% of normal
+                        tightened_sl = abs(float(profile.get("stop_loss_pct", 0.30))) * 0.5
+                        if gain_pct <= -tightened_sl:
+                            should_exit = True
+                            exit_reason = "bs_iv_crush"
+                            exit_context = (
+                                f"theo={theo_price:.4f} quoted={current_price:.4f} "
+                                f"ratio={ratio:.2f} gain={gain_pct:.3%}"
+                            )
+                            spread_guard_bypass = True
+                            logging.warning(
+                                "greeks_exit bs_iv_crush: trade_id=%s theo=%.4f quoted=%.4f",
+                                trade.get("trade_id"), theo_price, current_price,
+                            )
+
+                # Theta decay exit: if theta has eaten >50% of entry premium
+                if not should_exit and _T > 0:
+                    daily_theta = abs(bs_theta(_und_now, _strike, _T, 0.05, _iv, _opt_type))
+                    _entry_dt_raw = trade.get("entry_time")
+                    if isinstance(_entry_dt_raw, str):
+                        _entry_dt = datetime.fromisoformat(_entry_dt_raw)
+                        _days_held = max(0, (now_et.date() - _entry_dt.date()).days)
+                    else:
+                        _days_held = 0
+                    theta_consumed = daily_theta * max(_days_held, 1)
+                    if _entry_p > 0 and theta_consumed / _entry_p > 0.5:
+                        should_exit = True
+                        exit_reason = "theta_consumed"
+                        exit_context = (
+                            f"theta_daily={daily_theta:.4f} days_held={_days_held} "
+                            f"consumed={theta_consumed:.4f} entry_premium={_entry_p:.4f} "
+                            f"ratio={theta_consumed/_entry_p:.2f}"
+                        )
+                        spread_guard_bypass = True
+                        logging.warning(
+                            "greeks_exit theta_consumed: trade_id=%s ratio=%.2f",
+                            trade.get("trade_id"), theta_consumed / _entry_p,
+                        )
+            except Exception:
+                pass
+
     return should_exit, exit_reason, exit_context, spread_guard_bypass
