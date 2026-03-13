@@ -21,8 +21,8 @@ _global:
   cross_sim_guard_enabled: true
   max_family_concurrent: 2
   small_account_mode: true
-  default_balance_start: 500
-  death_threshold: 25
+  default_balance_start: 3000
+  death_threshold: 150
   max_position_pct: 0.15
   max_risk_pct: 0.03
   max_daily_drawdown_pct: 0.06
@@ -108,9 +108,9 @@ SIM01:
   hold_min_seconds: 60
   hold_max_seconds: 300
   cutoff_time_et: '13:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -150,9 +150,9 @@ SIM02:
   hold_min_seconds: 60
   hold_max_seconds: 600
   cutoff_time_et: '13:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -192,9 +192,9 @@ SIM03:
   hold_min_seconds: 600
   hold_max_seconds: 5400
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -238,9 +238,9 @@ SIM04:
   hold_min_seconds: 300
   hold_max_seconds: 2700
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -284,9 +284,9 @@ SIM05:
   hold_min_seconds: 1800
   hold_max_seconds: 10800
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -324,9 +324,9 @@ SIM06:
   hold_min_seconds: 3600
   hold_max_seconds: 259200
   cutoff_time_et: '15:45'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.2
   risk_per_trade_pct: 0.03
   daily_loss_limit_pct: 0.08
@@ -370,9 +370,9 @@ SIM07:
   hold_min_seconds: 86400
   hold_max_seconds: 604800
   cutoff_time_et: '15:45'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.2
   risk_per_trade_pct: 0.03
   daily_loss_limit_pct: 0.08
@@ -416,9 +416,9 @@ SIM08:
   hold_min_seconds: 1800
   hold_max_seconds: 10800
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -459,9 +459,9 @@ SIM09:
   hold_min_seconds: 300
   hold_max_seconds: 86400
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -502,9 +502,9 @@ SIM10:
   hold_min_seconds: 60
   hold_max_seconds: 900
   cutoff_time_et: '11:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -543,9 +543,9 @@ SIM11:
   hold_min_seconds: 300
   hold_max_seconds: 7200
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -590,9 +590,9 @@ SIM12:
   hold_min_seconds: 300
   hold_max_seconds: 3600
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -632,9 +632,9 @@ SIM13:
   hold_min_seconds: 300
   hold_max_seconds: 5400
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -675,9 +675,9 @@ SIM14:
   hold_min_seconds: 600
   hold_max_seconds: 10800
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -719,9 +719,9 @@ SIM15:
   hold_min_seconds: 120
   hold_max_seconds: 2700
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -763,9 +763,9 @@ SIM16:
   hold_min_seconds: 60
   hold_max_seconds: 1800
   cutoff_time_et: '10:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -806,9 +806,9 @@ SIM17:
   hold_min_seconds: 120
   hold_max_seconds: 3600
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -851,9 +851,9 @@ SIM18:
   hold_min_seconds: 300
   hold_max_seconds: 5400
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -894,9 +894,9 @@ SIM19:
   hold_min_seconds: 300
   hold_max_seconds: 5400
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -937,9 +937,9 @@ SIM20:
   hold_min_seconds: 120
   hold_max_seconds: 2700
   cutoff_time_et: '10:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -978,9 +978,9 @@ SIM21:
   hold_min_seconds: 300
   hold_max_seconds: 5400
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1023,9 +1023,9 @@ SIM22:
   hold_min_seconds: 300
   hold_max_seconds: 5400
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1069,9 +1069,9 @@ SIM23:
   hold_min_seconds: 120
   hold_max_seconds: 3600
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1111,9 +1111,9 @@ SIM24:
   hold_min_seconds: 1800
   hold_max_seconds: 14400
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1151,9 +1151,9 @@ SIM25:
   hold_min_seconds: 60
   hold_max_seconds: 900
   cutoff_time_et: '15:45'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1189,9 +1189,9 @@ SIM26:
   hold_min_seconds: 300
   hold_max_seconds: 2700
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1229,9 +1229,9 @@ SIM27:
   hold_min_seconds: 300
   hold_max_seconds: 3600
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1269,9 +1269,9 @@ SIM28:
   hold_min_seconds: 900
   hold_max_seconds: 7200
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1311,9 +1311,9 @@ SIM29:
   hold_min_seconds: 300
   hold_max_seconds: 7200
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1353,9 +1353,9 @@ SIM30:
   hold_min_seconds: 300
   hold_max_seconds: 5400
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1393,9 +1393,9 @@ SIM31:
   hold_min_seconds: 300
   hold_max_seconds: 3600
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1435,9 +1435,9 @@ SIM32:
   hold_min_seconds: 120
   hold_max_seconds: 2700
   cutoff_time_et: '10:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1474,9 +1474,9 @@ SIM33:
   hold_min_seconds: 300
   hold_max_seconds: 14400
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1516,9 +1516,9 @@ SIM34:
   hold_min_seconds: 300
   hold_max_seconds: 21600
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1557,9 +1557,9 @@ SIM35:
   hold_min_seconds: 120
   hold_max_seconds: 7200
   cutoff_time_et: '15:00'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.25
   risk_per_trade_pct: 0.04
   daily_loss_limit_pct: 0.08
@@ -1593,9 +1593,9 @@ SIM36:
   hold_min_seconds: 300
   hold_max_seconds: 2700
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.15
   risk_per_trade_pct: 0.02
   daily_loss_limit_pct: 0.05
@@ -1622,9 +1622,9 @@ SIM37:
   hold_min_seconds: 300
   hold_max_seconds: 3600
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.15
   risk_per_trade_pct: 0.02
   daily_loss_limit_pct: 0.05
@@ -1655,9 +1655,9 @@ SIM38:
   hold_min_seconds: 120
   hold_max_seconds: 3600
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.15
   risk_per_trade_pct: 0.0075
   daily_loss_limit_pct: 0.03
@@ -1689,9 +1689,9 @@ SIM39:
   hold_min_seconds: 120
   hold_max_seconds: 2700
   cutoff_time_et: '15:30'
-  balance_start: 500
+  balance_start: 3000
   small_account_mode: true
-  death_threshold: 25
+  death_threshold: 150
   max_position_pct: 0.15
   risk_per_trade_pct: 0.0075
   daily_loss_limit_pct: 0.03

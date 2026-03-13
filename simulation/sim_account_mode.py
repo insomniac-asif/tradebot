@@ -38,8 +38,8 @@ _PHASE_BOUNDS = [
 ]
 
 # ── Sizing defaults (overridable per-sim via profile keys) ───────────────────
-DEFAULT_BALANCE_START    = 500.0
-DEFAULT_DEATH_THRESHOLD  = 25.0
+DEFAULT_BALANCE_START    = 3000.0
+DEFAULT_DEATH_THRESHOLD  = 150.0
 DEFAULT_RISK_PCT         = 0.02    # 2 % of current balance per trade
 DEFAULT_MAX_POSITION_PCT = 0.15    # 15 % of balance max per single trade
 DEFAULT_MAX_DAILY_DD_PCT = 0.06    # 6 % daily drawdown cap
