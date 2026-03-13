@@ -6,7 +6,7 @@
 <title>Trader Sim Classroom</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=20260311c">
+<link rel="stylesheet" href="/static/style.css?v=20260313d">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
 </head>
 <body>
@@ -36,6 +36,7 @@
   <button class="subnav-tab" onclick="navTo('roster',this)">🎓 Roster</button>
   <button class="subnav-tab" onclick="navTo('backtest',this)">🔬 Backtest</button>
   <button class="subnav-tab" onclick="navTo('greeks',this)">⚡ Greeks</button>
+  <button class="subnav-tab" onclick="navTo('intel',this)">🧠 Intel</button>
 </nav>
 
 <!-- ══════════════════════════════════════ FRONT WALL: CHALKBOARD -->
@@ -65,7 +66,7 @@
           <span class="chalk-stat small" id="pred-checked"></span>
         </div>
         <div class="symbol-charts-grid" id="symbol-charts-grid">
-          <div class="sym-chart-loading">Loading market data…</div>
+          <div class="skeleton skeleton-chart" style="grid-column:1/-1"></div>
         </div>
       </div>
 
@@ -184,8 +185,18 @@
     <span class="roster-label">CLASS ROSTER</span>
     <span class="roster-count" id="sim-count"></span>
   </div>
+  <!-- Search & filter bar for roster -->
+  <div class="search-filter-bar" id="roster-filter-bar">
+    <input type="text" class="search-input" id="roster-search" placeholder="Search sims... (name, signal, symbol)" oninput="filterRoster()">
+    <button class="filter-chip" data-filter="alive" onclick="toggleFilterChip(this)">Alive</button>
+    <button class="filter-chip" data-filter="dead" onclick="toggleFilterChip(this)">Dead</button>
+    <button class="filter-chip" data-filter="profitable" onclick="toggleFilterChip(this)">Profitable</button>
+    <button class="filter-chip" data-filter="losing" onclick="toggleFilterChip(this)">Losing</button>
+  </div>
   <div class="seating-area" id="desks-grid">
-    <div class="loading-msg">Loading students…</div>
+    <div class="skeleton skeleton-card" style="height:120px"></div>
+    <div class="skeleton skeleton-card" style="height:120px"></div>
+    <div class="skeleton skeleton-card" style="height:120px"></div>
   </div>
 </div>
 
@@ -197,23 +208,34 @@
     <span style="font-size:11px;color:#888;margin-left:8px">Run: <code>python -m backtest.runner --start YYYY-MM-DD --end YYYY-MM-DD</code></span>
   </div>
   <div id="backtest-table-wrap" style="padding:8px 12px">
-    <div class="loading-msg" id="backtest-loading">Loading backtest data…</div>
+    <!-- Summary cards -->
+    <div class="bt-summary-row hidden" id="bt-summary-row"></div>
+    <div class="loading-msg" id="backtest-loading">
+      <div class="skeleton skeleton-line" style="width:60%"></div>
+      <div class="skeleton skeleton-line" style="width:40%"></div>
+    </div>
+    <!-- Search for backtest -->
+    <div class="search-filter-bar hidden" id="bt-search-bar">
+      <input type="text" class="search-input" id="bt-search" placeholder="Search sims..." oninput="filterBacktestTable()">
+    </div>
+    <div class="table-scroll-wrap">
     <table class="backtest-table hidden" id="backtest-table">
       <thead>
         <tr>
-          <th>Sim</th>
-          <th>Signal Mode</th>
-          <th>Runs</th>
-          <th>Blown</th>
-          <th>Target Hits</th>
-          <th>Avg Win Rate</th>
-          <th>Avg Max DD</th>
-          <th>Avg Trades/Run</th>
+          <th data-col="sim" data-tip="Simulation ID">Sim</th>
+          <th data-col="signal" data-tip="Signal mode / strategy type">Signal Mode</th>
+          <th data-col="runs" data-tip="Number of backtest runs">Runs</th>
+          <th data-col="blown" data-tip="Number of runs that blew the account">Blown</th>
+          <th data-col="targets" data-tip="Runs that hit the profit target">Targets</th>
+          <th data-col="wr" data-tip="Average win rate across all runs">Win Rate</th>
+          <th data-col="dd" data-tip="Average maximum drawdown from peak">Max DD</th>
+          <th data-col="trades" data-tip="Average number of trades per run">Trades/Run</th>
           <th></th>
         </tr>
       </thead>
       <tbody id="backtest-tbody"></tbody>
     </table>
+    </div>
   </div>
 </div>
 
@@ -224,7 +246,10 @@
     <span class="roster-count" id="greeks-count"></span>
   </div>
   <div id="greeks-content" style="padding:8px 12px">
-    <div class="loading-msg" id="greeks-loading">Loading Greeks data...</div>
+    <div class="loading-msg" id="greeks-loading">
+      <div class="skeleton skeleton-line" style="width:50%"></div>
+      <div class="skeleton skeleton-line" style="width:30%"></div>
+    </div>
 
     <!-- Overview Cards -->
     <div class="greeks-cards-row hidden" id="greeks-cards">
@@ -254,18 +279,18 @@
     <!-- Per-sim heatmap -->
     <div class="greeks-section hidden" id="greeks-heatmap-section">
       <div class="greeks-section-title">Per-Sim Greeks Heatmap</div>
-      <div style="overflow-x:auto">
+      <div class="table-scroll-wrap">
         <table class="greeks-heatmap-table" id="greeks-heatmap-table">
           <thead>
             <tr>
-              <th>SIM</th>
-              <th>Theta</th>
-              <th>IV Crush</th>
-              <th>Delta</th>
-              <th>Total</th>
-              <th>Save %</th>
-              <th>Score</th>
-              <th>Trades</th>
+              <th data-tip="Simulation ID">SIM</th>
+              <th data-tip="Theta burn exit count">Theta</th>
+              <th data-tip="IV crush exit count">IV Crush</th>
+              <th data-tip="Delta erosion exit count">Delta</th>
+              <th data-tip="Total Greeks-triggered exits">Total</th>
+              <th data-tip="% of Greeks exits that saved money (exited losing positions)">Save %</th>
+              <th data-tip="Composite Greeks management score (higher = better)">Score</th>
+              <th data-tip="Total closed trades for this sim">Trades</th>
             </tr>
           </thead>
           <tbody id="greeks-heatmap-tbody"></tbody>
@@ -278,6 +303,128 @@
       <div class="greeks-section-title">Adaptive Tuning Log</div>
       <div id="greeks-tuning-log" style="max-height:300px;overflow-y:auto;"></div>
     </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ INTELLIGENCE PANEL -->
+<div class="classroom-floor hidden" id="section-intel">
+  <div class="floor-header">
+    <span class="roster-label">ANALYTICS INTELLIGENCE</span>
+    <span class="roster-count" id="intel-count"></span>
+  </div>
+  <div id="intel-content" style="padding:8px 12px">
+    <div class="loading-msg" id="intel-loading">
+      <div class="skeleton skeleton-line" style="width:50%"></div>
+      <div class="skeleton skeleton-line" style="width:35%"></div>
+    </div>
+
+    <!-- Status Cards -->
+    <div class="greeks-cards-row hidden" id="intel-cards">
+      <div class="greeks-card">
+        <div class="greeks-card-label">ML Predictor</div>
+        <div class="greeks-card-value" id="ic-ml-acc">—</div>
+        <div class="greeks-card-sub" id="ic-ml-sub">accuracy on recent trades</div>
+      </div>
+      <div class="greeks-card">
+        <div class="greeks-card-label">Feature Drift</div>
+        <div class="greeks-card-value" id="ic-drift-sev">None</div>
+        <div class="greeks-card-sub" id="ic-drift-sub">no drift detected</div>
+      </div>
+      <div class="greeks-card">
+        <div class="greeks-card-label">Active Adjustments</div>
+        <div class="greeks-card-value" id="ic-adj-count">0</div>
+        <div class="greeks-card-sub" id="ic-adj-sub">auto-adjustments in effect</div>
+      </div>
+    </div>
+
+    <!-- Decision Gates -->
+    <div class="greeks-section hidden" id="intel-gates-section">
+      <div class="greeks-section-title">Decision Gate Adjustments</div>
+      <div id="intel-gates-list" style="max-height:300px;overflow-y:auto;"></div>
+    </div>
+
+    <!-- Blocked Signals -->
+    <div class="greeks-section hidden" id="intel-blocked-section">
+      <div class="greeks-section-title">Blocked Signal Analysis</div>
+      <div class="table-scroll-wrap">
+        <table class="greeks-heatmap-table intel-blocked-table" id="intel-blocked-table">
+          <thead>
+            <tr>
+              <th data-tip="Reason the signal was blocked">Block Reason</th>
+              <th data-tip="Number of blocked signals">Count</th>
+              <th data-tip="% of blocked trades that would have been winners">Would-Win %</th>
+              <th data-tip="Average 5-minute forward price return">Avg Fwd 5m</th>
+              <th data-tip="Average 15-minute forward price return">Avg Fwd 15m</th>
+              <th data-tip="How many outcomes have been measured">Status</th>
+            </tr>
+          </thead>
+          <tbody id="intel-blocked-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ML Detail -->
+    <div class="greeks-section hidden" id="intel-ml-section">
+      <div class="greeks-section-title">ML Predictor Health</div>
+      <div id="intel-ml-detail"></div>
+    </div>
+
+    <!-- Feature Drift Detail -->
+    <div class="greeks-section hidden" id="intel-drift-section">
+      <div class="greeks-section-title">Feature Drift Report</div>
+      <div id="intel-drift-detail"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ TRADE GRADING -->
+<div class="classroom-floor hidden" id="section-grade">
+  <div class="floor-header">
+    <span class="roster-label">📝 GRADE MY TRADE</span>
+  </div>
+  <div style="padding:8px 12px">
+    <div class="grade-form-wrap">
+      <div class="grade-form-title">📋 Submit a Trade for Analysis</div>
+      <div class="grade-form-grid">
+        <div class="grade-field">
+          <label>Symbol</label>
+          <input type="text" id="grade-symbol" placeholder="SPY" value="SPY">
+        </div>
+        <div class="grade-field">
+          <label>Direction</label>
+          <select id="grade-direction">
+            <option value="call">Call (Bullish)</option>
+            <option value="put">Put (Bearish)</option>
+          </select>
+        </div>
+        <div class="grade-field">
+          <label>Strike</label>
+          <input type="number" id="grade-strike" placeholder="670" step="0.5">
+        </div>
+        <div class="grade-field">
+          <label>Expiry</label>
+          <input type="date" id="grade-expiry">
+        </div>
+        <div class="grade-field">
+          <label>Entry Price</label>
+          <input type="number" id="grade-entry-price" placeholder="3.50" step="0.01">
+        </div>
+        <div class="grade-field">
+          <label>Exit Price</label>
+          <input type="number" id="grade-exit-price" placeholder="4.20" step="0.01">
+        </div>
+        <div class="grade-field">
+          <label>Entry Time</label>
+          <input type="datetime-local" id="grade-entry-time">
+        </div>
+        <div class="grade-field">
+          <label>Exit Time</label>
+          <input type="datetime-local" id="grade-exit-time">
+        </div>
+      </div>
+      <button class="grade-submit-btn" onclick="submitTradeGrade()">📝 Grade This Trade</button>
+    </div>
+    <div id="grade-result"></div>
   </div>
 </div>
 
@@ -308,6 +455,6 @@
 </div>
 <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
 
-<script src="/static/main.js?v=20260311s"></script>
+<script src="/static/main.js?v=20260313d"></script>
 </body>
 </html>

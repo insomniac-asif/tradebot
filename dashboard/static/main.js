@@ -250,8 +250,10 @@ function navTo(section, btn) {
     roster: '#section-roster',
     backtest: '#section-backtest',
     greeks: '#section-greeks',
+    intel: '#section-intel',
+    grade: '#section-grade',
   };
-  const hiddenPanels = ['section-backtest', 'section-greeks'];
+  const hiddenPanels = ['section-backtest', 'section-greeks', 'section-intel', 'section-grade'];
   const mainSections = ['section-charts', 'section-trades', 'section-roster'];
 
   // Handle hidden panel tabs (backtest, greeks)
@@ -271,6 +273,7 @@ function navTo(section, btn) {
     if (btn) btn.classList.add('active');
     if (section === 'backtest') renderBacktestTab();
     if (section === 'greeks') fetchGreeksData();
+    if (section === 'intel') fetchIntelData();
     return;
   } else {
     hiddenPanels.forEach(id => {
@@ -957,9 +960,11 @@ function buildSeat(sim) {
   // Sims disabled via blocked_sessions (all sessions blocked) show as sleeping/grayed.
   // New sims with 0 trades but not disabled show as normal (idle, awake).
   const sleeping = !!sim.is_disabled;
+  const isDead = sim.is_dead || (sim.balance != null && sim.balance <= 150);
+  const isProfitable = sim.pnl_dollars > 0;
   const seat = document.createElement('div');
   const wasSelected = currentSimId === sim.sim_id;
-  seat.className = 'seat' + (active ? ' active' : '') + (sleeping ? ' sleeping' : '') + (wasSelected ? ' selected' : '');
+  seat.className = 'seat' + (active ? ' active' : '') + (sleeping ? ' sleeping' : '') + (wasSelected ? ' selected' : '') + (isDead ? ' sim-dead' : '') + (isProfitable ? ' sim-profitable' : '');
   seat.dataset.simId = sim.sim_id;
   seat.dataset.archetype = archetype;
   seat.onclick = () => openDrawer(sim.sim_id);
@@ -3617,6 +3622,32 @@ async function renderBacktestTab() {
 
   if (countEl) countEl.textContent = `${simIds.length} sim${simIds.length !== 1 ? 's' : ''}`;
 
+  // Populate summary cards
+  const summaryRow = document.getElementById('bt-summary-row');
+  if (summaryRow && simIds.length) {
+    let totalRuns = 0, totalBlown = 0, totalTargets = 0, wrSum = 0, wrCount = 0;
+    simIds.forEach(sid => {
+      const s = (data[sid]?.summary) || {};
+      totalRuns += s.total_runs || 0;
+      totalBlown += s.blown_count || 0;
+      totalTargets += s.target_hit_count || 0;
+      if (s.avg_win_rate != null) { wrSum += s.avg_win_rate; wrCount++; }
+    });
+    const avgWr = wrCount ? ((wrSum / wrCount) * 100).toFixed(1) : '—';
+    summaryRow.innerHTML = `
+      <div class="bt-summary-card"><div class="bt-sc-value">${simIds.length}</div><div class="bt-sc-label">Sims Tested</div></div>
+      <div class="bt-summary-card"><div class="bt-sc-value">${totalRuns}</div><div class="bt-sc-label">Total Runs</div></div>
+      <div class="bt-summary-card"><div class="bt-sc-value" style="color:var(--loss-text)">${totalBlown}</div><div class="bt-sc-label">Blown</div></div>
+      <div class="bt-summary-card"><div class="bt-sc-value" style="color:var(--win-text)">${totalTargets}</div><div class="bt-sc-label">Target Hits</div></div>
+      <div class="bt-summary-card"><div class="bt-sc-value">${avgWr}%</div><div class="bt-sc-label">Avg Win Rate</div></div>
+    `;
+    summaryRow.classList.remove('hidden');
+  }
+
+  // Show search bar
+  const searchBar = document.getElementById('bt-search-bar');
+  if (searchBar) searchBar.classList.remove('hidden');
+
   tbody.innerHTML = '';
   simIds.forEach(simId => {
     const entry = data[simId];
@@ -3898,6 +3929,7 @@ async function loadParamOptimizerSection(simId) {
   } catch (e) {
     el.innerHTML = `<span style="color:var(--loss-text)">Failed: ${e.message}</span>`;
   }
+}
 
 function renderBtWinRateChart(winRateChart) {
   if (_btWinRateChart) { _btWinRateChart.destroy(); _btWinRateChart = null; }
@@ -4445,7 +4477,7 @@ function renderGreeksHeatmap(rows) {
       <td class="${hmClass(r.delta_count)}">${r.delta_count || '-'}</td>
       <td style="font-weight:600">${r.total_greeks}</td>
       <td class="${r.total_greeks > 0 ? saveClass(r.saved_pct) : 'hm-none'}">${r.total_greeks > 0 ? r.saved_pct + '%' : '-'}</td>
-      <td>${r.composite_score != null ? r.composite_score.toFixed(1) : '-'}</td>
+      <td>${r.composite_score != null ? `<span class="score-badge ${r.composite_score >= 7 ? 'score-good' : r.composite_score >= 4 ? 'score-mid' : 'score-bad'}">${r.composite_score.toFixed(1)}</span>` : '-'}</td>
       <td>${r.total_trades}</td>
     </tr>
   `).join('');
@@ -4473,4 +4505,302 @@ function renderGreeksTuningLog(log) {
       <span class="gte-reason">${e.reason || ''}</span>
     </div>
   `).join('');
+}
+
+
+// ═══════════════════════════════════════════════ INTELLIGENCE TAB
+
+async function fetchIntelData() {
+  const loading = document.getElementById('intel-loading');
+  if (loading) loading.style.display = '';
+
+  try {
+    const [gates, blocked, ml, drift] = await Promise.all([
+      fetch('/api/intelligence/decision-gates').then(r => r.json()),
+      fetch('/api/intelligence/blocked-signals').then(r => r.json()),
+      fetch('/api/intelligence/ml-accuracy').then(r => r.json()),
+      fetch('/api/intelligence/feature-drift').then(r => r.json()),
+    ]);
+
+    if (loading) loading.style.display = 'none';
+    renderIntelCards(ml, drift, gates);
+    renderIntelGates(gates);
+    renderIntelBlocked(blocked);
+    renderIntelML(ml);
+    renderIntelDrift(drift);
+  } catch (e) {
+    console.error('Intel fetch error:', e);
+    if (loading) loading.textContent = 'Failed to load intelligence data.';
+  }
+}
+
+function renderIntelCards(ml, drift, gates) {
+  const cards = document.getElementById('intel-cards');
+  if (!cards) return;
+  cards.classList.remove('hidden');
+
+  // ML accuracy card
+  const accEl = document.getElementById('ic-ml-acc');
+  const accSub = document.getElementById('ic-ml-sub');
+  if (ml.accuracy != null) {
+    accEl.textContent = ml.accuracy.toFixed(1) + '%';
+    accEl.style.color = ml.status === 'healthy' ? '#2a7a2a' : (ml.status === 'warning' ? '#b8860b' : '#aa2222');
+    accSub.textContent = `${ml.samples} samples — ${ml.status}`;
+  } else {
+    accEl.textContent = '—';
+    accEl.style.color = '#888';
+    accSub.textContent = ml.status === 'insufficient_data' ? 'not enough trade data' : (ml.error || 'unavailable');
+  }
+
+  // Drift card
+  const driftEl = document.getElementById('ic-drift-sev');
+  const driftSub = document.getElementById('ic-drift-sub');
+  if (drift.detected) {
+    const sev = drift.severity;
+    driftEl.textContent = sev.toFixed(3);
+    driftEl.style.color = sev > 0.7 ? '#aa2222' : (sev > 0.4 ? '#b8860b' : '#2a7a2a');
+    driftSub.textContent = `${drift.features.length} drifted features`;
+  } else {
+    driftEl.textContent = 'None';
+    driftEl.style.color = '#2a7a2a';
+    driftSub.textContent = 'no drift detected';
+  }
+
+  // Adjustments card
+  const adjEl = document.getElementById('ic-adj-count');
+  const adjSub = document.getElementById('ic-adj-sub');
+  const total = gates.total_adjustments || 0;
+  adjEl.textContent = total;
+  adjEl.style.color = total > 0 ? '#b8860b' : '#2a7a2a';
+  adjSub.textContent = total > 0 ? `across ${gates.sims?.length || 0} sims` : 'no auto-adjustments active';
+
+  document.getElementById('intel-count').textContent =
+    total > 0 ? `${total} adjustments` : 'all clear';
+}
+
+function renderIntelGates(gates) {
+  const section = document.getElementById('intel-gates-section');
+  const container = document.getElementById('intel-gates-list');
+  if (!section || !container) return;
+
+  const sims = gates.sims || [];
+  if (!sims.length) {
+    section.classList.remove('hidden');
+    container.innerHTML = '<div class="greeks-empty-state">No active decision gate adjustments. All filters and predictors operating normally.</div>';
+    return;
+  }
+  section.classList.remove('hidden');
+
+  container.innerHTML = sims.map(s => {
+    const badges = [];
+    if (s.predictor_override === 'disabled') badges.push('<span class="intel-badge intel-badge-red">Predictor Disabled</span>');
+    if (s.size_multiplier < 1.0) badges.push(`<span class="intel-badge intel-badge-yellow">Size ${(s.size_multiplier * 100).toFixed(0)}%</span>`);
+    for (const [filter, mult] of Object.entries(s.loosen_filters || {})) {
+      badges.push(`<span class="intel-badge intel-badge-blue">${filter} +${((mult - 1) * 100).toFixed(0)}%</span>`);
+    }
+    return `
+      <div class="greeks-tuning-entry">
+        <span class="gte-sim" style="min-width:60px">${s.sim_id}</span>
+        <span>${badges.join(' ')}</span>
+        <span class="gte-reason">${(s.reasons || []).join(' | ')}</span>
+      </div>`;
+  }).join('');
+}
+
+function renderIntelBlocked(data) {
+  const section = document.getElementById('intel-blocked-section');
+  const tbody = document.getElementById('intel-blocked-tbody');
+  if (!section || !tbody) return;
+
+  const reasons = data.reasons || [];
+  if (!reasons.length) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+
+  tbody.innerHTML = reasons.map(r => {
+    const winClass = r.would_win_pct != null
+      ? (r.would_win_pct > 60 ? 'hm-high' : (r.would_win_pct > 40 ? 'hm-mid' : 'hm-low'))
+      : 'hm-none';
+    const fwd5 = r.avg_fwd_5m != null ? (r.avg_fwd_5m >= 0 ? '+' : '') + r.avg_fwd_5m.toFixed(4) : '—';
+    const fwd15 = r.avg_fwd_15m != null ? (r.avg_fwd_15m >= 0 ? '+' : '') + r.avg_fwd_15m.toFixed(4) : '—';
+    return `
+      <tr>
+        <td style="font-weight:600;text-align:left">${r.reason}</td>
+        <td>${r.count}</td>
+        <td class="${winClass}">${r.would_win_pct != null ? r.would_win_pct + '%' : '—'}</td>
+        <td style="color:${r.avg_fwd_5m >= 0 ? '#2a7a2a' : '#aa2222'}">${fwd5}</td>
+        <td style="color:${r.avg_fwd_15m >= 0 ? '#2a7a2a' : '#aa2222'}">${fwd15}</td>
+        <td>${r.filled_count}/${r.count} filled</td>
+      </tr>`;
+  }).join('');
+}
+
+function renderIntelML(ml) {
+  const section = document.getElementById('intel-ml-section');
+  const container = document.getElementById('intel-ml-detail');
+  if (!section || !container) return;
+  section.classList.remove('hidden');
+
+  if (ml.accuracy == null) {
+    container.innerHTML = `<div class="greeks-empty-state">${ml.status === 'insufficient_data' ? 'Not enough trade data with ML predictions to compute accuracy. Need at least 200 trades with won/predicted_won fields.' : (ml.error || 'ML accuracy unavailable.')}</div>`;
+    return;
+  }
+
+  const statusColor = ml.status === 'healthy' ? '#2a7a2a' : (ml.status === 'warning' ? '#b8860b' : '#aa2222');
+  const confHtml = ml.confident_accuracy != null
+    ? `<div class="intel-ml-row"><span>High-confidence accuracy (>65% prob):</span> <strong>${ml.confident_accuracy}%</strong></div>`
+    : '';
+
+  container.innerHTML = `
+    <div class="intel-ml-card">
+      <div class="intel-ml-row"><span>Rolling accuracy (${ml.samples} trades):</span> <strong style="color:${statusColor}">${ml.accuracy}%</strong></div>
+      ${confHtml}
+      <div class="intel-ml-row"><span>Status:</span> <strong style="color:${statusColor}">${ml.status.toUpperCase()}</strong></div>
+      <div class="intel-ml-note">
+        ${ml.status === 'critical' ? 'Predictor accuracy below 28% — auto-disabled by decision gates for affected sims.' : ''}
+        ${ml.status === 'warning' ? 'Predictor accuracy below 40% — monitor closely. Auto-disable triggers at 28%.' : ''}
+        ${ml.status === 'healthy' ? 'Predictor performing within acceptable range.' : ''}
+      </div>
+    </div>`;
+}
+
+function renderIntelDrift(drift) {
+  const section = document.getElementById('intel-drift-section');
+  const container = document.getElementById('intel-drift-detail');
+  if (!section || !container) return;
+  section.classList.remove('hidden');
+
+  if (!drift.detected) {
+    container.innerHTML = '<div class="greeks-empty-state">No feature drift detected. Baseline and recent feature distributions are aligned (Z-score < 2.0 on all features).</div>';
+    return;
+  }
+
+  const sevColor = drift.severity > 0.7 ? '#aa2222' : (drift.severity > 0.4 ? '#b8860b' : '#2a7a2a');
+  container.innerHTML = `
+    <div class="intel-ml-card">
+      <div class="intel-ml-row"><span>Severity:</span> <strong style="color:${sevColor}">${drift.severity.toFixed(3)}</strong></div>
+      <div class="intel-ml-row"><span>Drifted features:</span></div>
+      <div class="intel-drift-features">
+        ${drift.features.map(f => `<span class="intel-badge intel-badge-yellow">${f}</span>`).join(' ')}
+      </div>
+      <div class="intel-ml-note">
+        ${drift.severity > 0.7 ? 'Severity > 0.7 — decision gates auto-reduce position size to 50% for affected sims.' : 'Drift detected but below auto-adjustment threshold (0.7).'}
+      </div>
+    </div>`;
+}
+
+// ─────────────────────────────────────────────── ROSTER SEARCH & FILTER
+function filterRoster() {
+  const query = (document.getElementById('roster-search')?.value || '').toLowerCase();
+  const activeChips = Array.from(document.querySelectorAll('#roster-filter-bar .filter-chip.active'))
+    .map(c => c.dataset.filter);
+  const seats = document.querySelectorAll('#desks-grid .seat');
+  const labels = document.querySelectorAll('#desks-grid .strategy-label');
+
+  seats.forEach(seat => {
+    const simId = (seat.dataset.simId || '').toLowerCase();
+    const text = seat.textContent.toLowerCase();
+    let show = true;
+
+    // Text search
+    if (query && !simId.includes(query) && !text.includes(query)) show = false;
+
+    // Filter chips
+    if (show && activeChips.length) {
+      const isDead = seat.classList.contains('sim-dead');
+      const isProfitable = seat.classList.contains('sim-profitable');
+      let chipMatch = false;
+      activeChips.forEach(f => {
+        if (f === 'alive' && !isDead) chipMatch = true;
+        if (f === 'dead' && isDead) chipMatch = true;
+        if (f === 'profitable' && isProfitable) chipMatch = true;
+        if (f === 'losing' && !isProfitable && !isDead) chipMatch = true;
+      });
+      if (!chipMatch) show = false;
+    }
+
+    seat.style.display = show ? '' : 'none';
+  });
+
+  // Hide strategy-label rows that have no visible seats after them
+  labels.forEach(label => {
+    const row = label.nextElementSibling;
+    if (!row) return;
+    const visible = row.querySelectorAll('.seat:not([style*="display: none"])');
+    label.style.display = visible.length ? '' : 'none';
+    row.style.display = visible.length ? '' : 'none';
+  });
+}
+
+function toggleFilterChip(btn) {
+  btn.classList.toggle('active');
+  filterRoster();
+}
+
+// ─────────────────────────────────────────────── BACKTEST TABLE SEARCH
+function filterBacktestTable() {
+  const query = (document.getElementById('bt-search')?.value || '').toLowerCase();
+  const rows = document.querySelectorAll('#backtest-tbody tr');
+  rows.forEach(tr => {
+    const text = tr.textContent.toLowerCase();
+    tr.style.display = (!query || text.includes(query)) ? '' : 'none';
+  });
+}
+
+// ─────────────────────────────────────────────── TRADE GRADING
+async function submitTradeGrade() {
+  const symbol = document.getElementById('grade-symbol')?.value?.trim();
+  const direction = document.getElementById('grade-direction')?.value;
+  const strike = parseFloat(document.getElementById('grade-strike')?.value);
+  const expiry = document.getElementById('grade-expiry')?.value;
+  const entryPrice = parseFloat(document.getElementById('grade-entry-price')?.value);
+  const exitPrice = parseFloat(document.getElementById('grade-exit-price')?.value);
+  const entryTime = document.getElementById('grade-entry-time')?.value;
+  const exitTime = document.getElementById('grade-exit-time')?.value;
+  const resultDiv = document.getElementById('grade-result');
+
+  if (!symbol || !entryPrice || !exitPrice) {
+    resultDiv.innerHTML = '<div class="grade-report" style="border-color:var(--loss-text)"><strong>Missing fields.</strong> Symbol, entry price, and exit price are required.</div>';
+    return;
+  }
+
+  resultDiv.innerHTML = '<div class="grade-report">Grading trade…</div>';
+
+  try {
+    const resp = await fetch('/api/grade-trade', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ symbol, direction, strike, expiry, entry_price: entryPrice, exit_price: exitPrice, entry_time: entryTime, exit_time: exitTime }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      resultDiv.innerHTML = `<div class="grade-report" style="border-color:var(--loss-text)">Error: ${data.error}</div>`;
+      return;
+    }
+
+    const pnlPct = ((exitPrice - entryPrice) / entryPrice * 100).toFixed(1);
+    const pnlDir = direction === 'put' ? -1 : 1;
+    const adjustedPnl = (pnlDir * (exitPrice - entryPrice) / entryPrice * 100).toFixed(1);
+    const isWin = parseFloat(adjustedPnl) > 0;
+
+    const grade = data.grade || (isWin ? (parseFloat(adjustedPnl) > 20 ? 'A' : 'B') : (parseFloat(adjustedPnl) < -20 ? 'F' : 'D'));
+    const gradeColor = {'A':'grade-A','B':'grade-A','C':'grade-C','D':'grade-F','F':'grade-F'}[grade] || '';
+
+    resultDiv.innerHTML = `
+      <div class="grade-report">
+        <div class="grade-letter ${gradeColor}">${grade}</div>
+        <div class="grade-details">
+          <div><strong>${symbol.toUpperCase()}</strong> ${direction.toUpperCase()} ${strike || ''} ${expiry || ''}</div>
+          <div>Entry: $${entryPrice.toFixed(2)} → Exit: $${exitPrice.toFixed(2)}</div>
+          <div style="color:${isWin ? 'var(--win-text)' : 'var(--loss-text)'}; font-weight:700">
+            P&L: ${isWin ? '+' : ''}${adjustedPnl}%
+          </div>
+          ${data.feedback ? `<div style="margin-top:8px;color:#ccc">${data.feedback}</div>` : ''}
+        </div>
+      </div>`;
+  } catch (e) {
+    resultDiv.innerHTML = `<div class="grade-report" style="border-color:var(--loss-text)">Network error: ${e.message}</div>`;
+  }
 }

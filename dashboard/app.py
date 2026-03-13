@@ -204,14 +204,34 @@ async def get_predictions(symbol: str = None):
         from core.analytics_db import read_df as _db_read_df
         import asyncio
 
+        # Only load today's predictions (or last available day) — never the full 160K+ table
+        _et_tz = pytz.timezone("America/New_York")
+        _today_str = datetime.now(_et_tz).strftime("%Y-%m-%d")
+
         if symbol:
             df = await asyncio.to_thread(
                 _db_read_df,
-                "SELECT * FROM predictions WHERE UPPER(symbol) = ?",
-                [symbol.upper()],
+                "SELECT * FROM predictions WHERE UPPER(symbol) = ? AND time >= ?",
+                [symbol.upper(), _today_str],
             )
+            # Fall back to last available day if no predictions today
+            if df.empty:
+                df = await asyncio.to_thread(
+                    _db_read_df,
+                    "SELECT * FROM predictions WHERE UPPER(symbol) = ? ORDER BY time DESC LIMIT 200",
+                    [symbol.upper()],
+                )
         else:
-            df = await asyncio.to_thread(_db_read_df, "SELECT * FROM predictions")
+            df = await asyncio.to_thread(
+                _db_read_df,
+                "SELECT * FROM predictions WHERE time >= ?",
+                [_today_str],
+            )
+            if df.empty:
+                df = await asyncio.to_thread(
+                    _db_read_df,
+                    "SELECT * FROM predictions ORDER BY time DESC LIMIT 500",
+                )
 
         if df.empty:
             return {"predictions": [], "latest": None}
@@ -858,6 +878,152 @@ async def greeks_heatmap():
             continue
 
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Intelligence endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/intelligence/decision-gates")
+async def intel_decision_gates():
+    """Return current decision gate adjustments for all sims."""
+    try:
+        cfg = _load_config()
+        profiles = {k: v for k, v in cfg.items() if str(k).upper().startswith("SIM") and isinstance(v, dict)}
+    except Exception:
+        return {"sims": [], "total_adjustments": 0}
+
+    results = []
+    total_adj = 0
+    for sim_id, profile in sorted(profiles.items()):
+        try:
+            from analytics.decision_gates import get_analytics_adjustments
+            adj = get_analytics_adjustments(sim_id, profile)
+            reasons = adj.get("reasons", [])
+            if reasons:
+                total_adj += len(reasons)
+                results.append({
+                    "sim_id": sim_id,
+                    "loosen_filters": adj.get("loosen_filters", {}),
+                    "predictor_override": adj.get("predictor_override"),
+                    "size_multiplier": adj.get("size_multiplier", 1.0),
+                    "reasons": reasons,
+                })
+        except Exception:
+            continue
+
+    return {"sims": results, "total_adjustments": total_adj}
+
+
+@app.get("/api/intelligence/blocked-signals")
+async def intel_blocked_signals():
+    """Return blocked signal stats grouped by block reason."""
+    try:
+        from core.analytics_db import read_df as _db_read_df
+        df = await asyncio.to_thread(
+            _db_read_df,
+            "SELECT block_reason, fwd_5m, fwd_15m, fwd_5m_status FROM blocked_signals ORDER BY id DESC LIMIT 500"
+        )
+        if df.empty:
+            return {"reasons": [], "total": 0}
+
+        reasons = []
+        for reason, group in df.groupby("block_reason"):
+            if reason is None or str(reason).strip() == "":
+                continue
+            count = len(group)
+            filled = group[group["fwd_5m_status"] == "filled"]
+            fwd_5m_vals = pd.to_numeric(filled["fwd_5m"], errors="coerce").dropna()
+            fwd_15m_vals = pd.to_numeric(filled["fwd_15m"], errors="coerce").dropna()
+            would_win = len(fwd_5m_vals[fwd_5m_vals > 0]) if len(fwd_5m_vals) > 0 else 0
+            win_pct = round(would_win / len(fwd_5m_vals) * 100, 1) if len(fwd_5m_vals) > 0 else None
+            reasons.append({
+                "reason": str(reason),
+                "count": count,
+                "would_win_pct": win_pct,
+                "avg_fwd_5m": round(float(fwd_5m_vals.mean()), 4) if len(fwd_5m_vals) > 0 else None,
+                "avg_fwd_15m": round(float(fwd_15m_vals.mean()), 4) if len(fwd_15m_vals) > 0 else None,
+                "filled_count": len(filled),
+                "pending_count": count - len(filled),
+            })
+
+        reasons.sort(key=lambda x: x["count"], reverse=True)
+        return {"reasons": reasons, "total": len(df)}
+    except Exception as e:
+        return {"reasons": [], "total": 0, "error": str(e)}
+
+
+@app.get("/api/intelligence/ml-accuracy")
+async def intel_ml_accuracy():
+    """Return ML predictor rolling accuracy."""
+    try:
+        from analytics.ml_accuracy import ml_rolling_accuracy
+        result = await asyncio.to_thread(ml_rolling_accuracy, 200)
+        if result is None:
+            return {"status": "insufficient_data", "accuracy": None, "samples": 0}
+        health = "healthy" if result["accuracy"] >= 40 else ("warning" if result["accuracy"] >= 28 else "critical")
+        return {
+            "status": health,
+            "accuracy": result["accuracy"],
+            "samples": result["samples"],
+            "confident_accuracy": result.get("confident_accuracy"),
+        }
+    except Exception as e:
+        return {"status": "error", "accuracy": None, "samples": 0, "error": str(e)}
+
+
+@app.get("/api/intelligence/feature-drift")
+async def intel_feature_drift():
+    """Return feature drift detection results."""
+    try:
+        from analytics.feature_drift import detect_feature_drift
+        result = await asyncio.to_thread(detect_feature_drift)
+        if result is None:
+            return {"detected": False, "severity": 0, "features": []}
+        return {
+            "detected": True,
+            "severity": result.get("severity", 0),
+            "features": result.get("features", []),
+        }
+    except Exception as e:
+        return {"detected": False, "severity": 0, "features": [], "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Trade Grading
+# ---------------------------------------------------------------------------
+
+@app.post("/api/grade-trade")
+async def grade_trade(body: dict):
+    """Grade a user-submitted trade."""
+    try:
+        symbol = (body.get("symbol") or "").upper()
+        direction = body.get("direction", "call")
+        entry_price = body.get("entry_price")
+        exit_price = body.get("exit_price")
+        if not symbol or entry_price is None or exit_price is None:
+            return {"error": "symbol, entry_price, and exit_price are required"}
+
+        entry_price = float(entry_price)
+        exit_price = float(exit_price)
+        multiplier = 1 if direction == "call" else -1
+        pnl_pct = multiplier * (exit_price - entry_price) / entry_price * 100
+
+        # Simple grading logic
+        if pnl_pct >= 30:
+            grade, feedback = "A", "Excellent trade — strong profit capture."
+        elif pnl_pct >= 10:
+            grade, feedback = "B", "Good trade — solid execution."
+        elif pnl_pct >= 0:
+            grade, feedback = "C", "Break-even or marginal gain. Consider tighter entries."
+        elif pnl_pct >= -15:
+            grade, feedback = "D", "Small loss. Review entry timing and stop placement."
+        else:
+            grade, feedback = "F", "Significant loss. Re-evaluate thesis and risk management."
+
+        return {"grade": grade, "feedback": feedback, "pnl_pct": round(pnl_pct, 2)}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------

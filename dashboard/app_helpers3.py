@@ -24,12 +24,52 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NARRATIVES_DIR = os.path.join(BASE_DIR, "data", "trade_narratives")
 
 
-async def _handle_get_chart(symbol: str, bars: int) -> dict:
-    """Body of GET /api/chart — returns candle dict."""
+def _load_symbol_csv_only(symbol: str):
+    """Load symbol data from CSV only — no Alpaca calls. Safe for dashboard use.
+
+    Only loads the last ~2000 rows (about 5 trading days) to keep chart
+    generation fast on resource-constrained hardware.
+    """
     sym = symbol.upper()
     try:
-        from core.data_service import get_symbol_dataframe
-        df = await asyncio.to_thread(get_symbol_dataframe, sym)
+        from core.data_service import get_symbol_csv_path, _prepare_dataframe
+        csv_path = get_symbol_csv_path(sym)
+        if not csv_path or not os.path.exists(csv_path):
+            return None
+
+        # Count total lines and only read the tail — avoids loading 200K+ rows
+        # when the chart only needs today/last session
+        TAIL_ROWS = 2000  # ~5 trading days of 1-min bars
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["wc", "-l", csv_path], capture_output=True, text=True, timeout=5
+            )
+            total_lines = int(result.stdout.strip().split()[0])
+            skip = max(0, total_lines - TAIL_ROWS - 1)  # -1 for header
+            if skip > 0:
+                df = pd.read_csv(csv_path, skiprows=range(1, skip + 1))
+            else:
+                df = pd.read_csv(csv_path)
+        except Exception:
+            df = pd.read_csv(csv_path)
+
+        if df is None or df.empty:
+            return None
+        return _prepare_dataframe(df)
+    except Exception:
+        return None
+
+
+async def _handle_get_chart(symbol: str, bars: int) -> dict:
+    """Body of GET /api/chart — returns candle dict.
+
+    Uses CSV-only loading to avoid blocking on Alpaca API calls.
+    The live bot keeps CSVs updated; the dashboard just reads them.
+    """
+    sym = symbol.upper()
+    try:
+        df = await asyncio.to_thread(_load_symbol_csv_only, sym)
 
         if df is None or df.empty:
             return {"candles": [], "symbol": sym, "error": f"no_data_{sym}"}

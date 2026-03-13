@@ -197,9 +197,13 @@ def _fetch_from_alpaca(symbol: str):
         feed=DataFeed.IEX
     )
 
-    # Rate-limit Alpaca calls
-    rate_limit_sleep("alpaca_stock_bars", ALPACA_MIN_CALL_INTERVAL_SEC)
-    bars = client.get_stock_bars(request)
+    try:
+        # Rate-limit Alpaca calls
+        rate_limit_sleep("alpaca_stock_bars", ALPACA_MIN_CALL_INTERVAL_SEC)
+        bars = client.get_stock_bars(request)
+    except Exception as e:
+        logging.warning("alpaca_fetch_error symbol=%s: %s", symbol, e)
+        return None
 
     # Broker responded without exception — mark health even if bars are empty.
     # (Empty bars during volatile/post-market periods still means broker is reachable.)
@@ -254,10 +258,13 @@ def get_symbol_dataframe(symbol: str):
             df = None
 
     if df is None or df.empty:
-        fresh = _fetch_from_alpaca(symbol)
-        if fresh is not None:
-            fresh.attrs["source"] = "alpaca"
-            df = fresh
+        try:
+            fresh = _fetch_from_alpaca(symbol)
+            if fresh is not None and not fresh.empty:
+                fresh.attrs["source"] = "alpaca"
+                df = fresh
+        except Exception:
+            pass
     else:
         try:
             temp = df.copy()

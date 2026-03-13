@@ -2982,3 +2982,438 @@ html, body {
 @media (max-width: 640px) {
   .greeks-cards-row { grid-template-columns: 1fr; }
 }
+
+/* ═══════════════════════════════════════ INTELLIGENCE TAB */
+.intel-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  margin: 1px 2px;
+}
+.intel-badge-red    { background: rgba(170,34,34,0.15); color: #aa2222; border: 1px solid rgba(170,34,34,0.3); }
+.intel-badge-yellow { background: rgba(184,134,11,0.15); color: #b8860b; border: 1px solid rgba(184,134,11,0.3); }
+.intel-badge-blue   { background: rgba(52,152,219,0.15); color: #2980b9; border: 1px solid rgba(52,152,219,0.3); }
+.intel-badge-green  { background: rgba(42,122,42,0.15);  color: #2a7a2a; border: 1px solid rgba(42,122,42,0.3); }
+
+.intel-ml-card {
+  background: rgba(0,0,0,0.08);
+  border-radius: 8px;
+  padding: 16px 20px;
+  max-width: 600px;
+}
+.intel-ml-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.intel-ml-row:last-of-type { border-bottom: none; }
+.intel-ml-note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.intel-drift-features {
+  padding: 8px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ═══════════════════════════════════════ SHARED TABLE IMPROVEMENTS */
+
+/* -- Backtest table styling (was unstyled) -- */
+.backtest-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.backtest-table th {
+  background: #d4c4a0;
+  color: var(--text);
+  padding: 8px 10px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.backtest-table th:first-child,
+.greeks-heatmap-table th:first-child,
+.intel-blocked-table th:first-child { text-align: left; }
+.backtest-table th:hover { background: #c8b890; }
+.backtest-table th .sort-arrow { font-size: 9px; margin-left: 3px; opacity: 0.4; }
+.backtest-table th.sort-active .sort-arrow { opacity: 1; }
+.backtest-table td {
+  padding: 7px 10px;
+  text-align: center;
+  border-bottom: 1px solid #e8e0d0;
+}
+.backtest-table td:first-child { text-align: left; }
+
+/* -- Alternating row shading for all data tables -- */
+.backtest-table tbody tr:nth-child(even),
+.greeks-heatmap-table tbody tr:nth-child(even),
+.intel-blocked-table tbody tr:nth-child(even) { background: rgba(0,0,0,0.02); }
+
+/* -- Hover highlight for all data tables -- */
+.backtest-table tbody tr:hover,
+.greeks-heatmap-table tbody tr:hover,
+.intel-blocked-table tbody tr:hover { background: rgba(122,184,56,0.08); }
+
+/* -- Horizontal scroll wrapper for mobile tables -- */
+.table-scroll-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+/* -- Column header tooltips -- */
+th[data-tip] { position: relative; }
+th[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--notice-bg);
+  color: var(--notice-text);
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+th[data-tip]:hover::after { opacity: 1; }
+
+/* -- Backtest summary cards above table -- */
+.bt-summary-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.bt-summary-card {
+  background: #f8f4ec;
+  border: 1px solid #d4c4a0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  text-align: center;
+}
+.bt-summary-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  margin-bottom: 3px;
+}
+.bt-summary-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+}
+.bt-summary-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* -- P&L visual bar in trade history -- */
+.pnl-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pnl-bar {
+  height: 6px;
+  border-radius: 3px;
+  min-width: 2px;
+  max-width: 60px;
+}
+.pnl-bar.win  { background: var(--profit); }
+.pnl-bar.loss { background: var(--loss); }
+
+/* -- Score badge for Greeks heatmap -- */
+.score-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.score-badge.score-good   { background: rgba(46,204,113,0.18); color: #27ae60; }
+.score-badge.score-mid    { background: rgba(241,196,15,0.18); color: #b8860b; }
+.score-badge.score-bad    { background: rgba(231,76,60,0.18); color: #c0392b; }
+
+/* ═══════════════════════════════════════ SEARCH & FILTER BAR */
+.search-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  flex-wrap: wrap;
+}
+.search-input {
+  background: #f8f4ec;
+  border: 1px solid #d4c4a0;
+  border-radius: 6px;
+  padding: 6px 12px 6px 32px;
+  font-size: 12px;
+  font-family: var(--font-main);
+  color: var(--text);
+  outline: none;
+  width: 220px;
+  max-width: 100%;
+  transition: border-color 0.2s;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238a7050' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 10px center;
+}
+.search-input:focus { border-color: var(--active-glow); }
+.search-input::placeholder { color: var(--text-muted); }
+
+.filter-chip {
+  background: transparent;
+  border: 1.5px solid #c8b890;
+  border-radius: 14px;
+  padding: 3px 12px;
+  font-size: 11px;
+  font-family: var(--font-main);
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.filter-chip:hover { background: rgba(0,0,0,0.04); border-color: var(--text-mid); }
+.filter-chip.active {
+  background: var(--wood-mid);
+  color: #fff;
+  border-color: var(--wood-mid);
+}
+
+/* ═══════════════════════════════════════ SKELETON LOADERS */
+.skeleton {
+  background: linear-gradient(90deg, rgba(0,0,0,0.04) 25%, rgba(0,0,0,0.08) 50%, rgba(0,0,0,0.04) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skeleton-line { height: 14px; margin-bottom: 8px; }
+.skeleton-card { height: 80px; border-radius: 8px; }
+.skeleton-chart { height: 200px; border-radius: 8px; }
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ═══════════════════════════════════════ ROSTER IMPROVEMENTS */
+.seat.sim-dead .desk-card { opacity: 0.5; border-color: var(--loss) !important; }
+.seat.sim-dead .desk-name-tag { background: rgba(231,76,60,0.15); color: #c0392b; }
+.seat.sim-dead::after {
+  content: '💀';
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 16px;
+  z-index: 2;
+}
+.seat.sim-profitable .desk-card { border-left: 3px solid var(--profit); }
+.seat.sim-losing .desk-card { border-left: 3px solid var(--loss); }
+
+.sparkline-wrap {
+  height: 20px;
+  width: 100%;
+  margin-top: 2px;
+}
+.sparkline-wrap svg { width: 100%; height: 100%; }
+
+/* ═══════════════════════════════════════ MOBILE NAV & LAYOUT */
+.mobile-menu-btn {
+  display: none;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.2);
+  color: var(--notice-text);
+  font-size: 18px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1;
+}
+.mobile-menu-btn:hover { background: rgba(255,255,255,0.1); }
+
+@media (max-width: 640px) {
+  .subnav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 99;
+    background: var(--notice-bg);
+    border-top: 2px solid var(--wood-mid);
+    padding: 0;
+    gap: 0;
+    justify-content: space-around;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+  }
+  .subnav-tab {
+    font-size: 10px !important;
+    padding: 8px 4px !important;
+    flex: 1;
+    text-align: center;
+    border-radius: 0 !important;
+  }
+  body { padding-bottom: 50px; }
+
+  /* Sticky compact top bar on mobile */
+  .notice-bar { padding: 6px 12px; }
+  .notice-center { display: none; }
+  .notice-right .notice-text.small { display: none; }
+
+  /* Search bar expand on mobile */
+  .search-input { width: 100%; }
+  .search-filter-bar { padding: 6px 8px; }
+  .filter-chip { font-size: 10px; padding: 2px 8px; }
+
+  /* Tables scroll horizontally */
+  .table-scroll-wrap { margin: 0 -8px; padding: 0 8px; }
+
+  /* Sim drawer takes full screen on mobile */
+  .sim-drawer {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+}
+
+/* ═══════════════════════════════════════ TRADE GRADE FORM */
+.grade-form-wrap {
+  background: #f8f4ec;
+  border: 2px solid #d4c4a0;
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.grade-form-title {
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.grade-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.grade-field label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.3px;
+  margin-bottom: 2px;
+}
+.grade-field input,
+.grade-field select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #d4c4a0;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--font-main);
+  color: var(--text);
+  background: #fff;
+}
+.grade-field input:focus,
+.grade-field select:focus {
+  outline: none;
+  border-color: var(--active-glow);
+}
+.grade-submit-btn {
+  background: var(--wood-mid);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.grade-submit-btn:hover { background: var(--wood-dark); }
+
+/* Grade report card output */
+.grade-report {
+  background: var(--rc-bg);
+  border: 2px solid var(--rc-border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-top: 12px;
+}
+.grade-report-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--rc-border);
+}
+.grade-letter {
+  font-size: 42px;
+  font-weight: 800;
+  font-family: var(--font-chalk);
+  line-height: 1;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 2px solid;
+}
+.grade-A, .grade-B { background: rgba(46,204,113,0.15); color: #27ae60; border-color: #27ae60; }
+.grade-C { background: rgba(241,196,15,0.15); color: #b8860b; border-color: #b8860b; }
+.grade-D, .grade-F { background: rgba(231,76,60,0.15); color: #c0392b; border-color: #c0392b; }
+.grade-report-meta { flex: 1; }
+.grade-report-meta h3 { font-size: 14px; margin-bottom: 2px; }
+.grade-report-meta p { font-size: 11px; color: var(--text-muted); }
+.grade-breakdown {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.grade-breakdown-item {
+  background: rgba(0,0,0,0.03);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.grade-breakdown-item strong { display: block; font-size: 13px; margin-bottom: 2px; }
+
+/* ═══════════════════════════════════════ EQUITY CURVE CHART */
+.equity-curve-wrap {
+  height: 180px;
+  margin-bottom: 12px;
+  background: rgba(0,0,0,0.02);
+  border-radius: 8px;
+}
