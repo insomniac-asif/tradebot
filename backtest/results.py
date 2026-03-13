@@ -30,6 +30,9 @@ class BacktestTrade:
     day_of_week_name: str = ""
     confidence: float = 0.0
     holding_seconds: int = 0
+    mfe_pct: float = 0.0       # max favorable excursion (option price % from entry)
+    mae_pct: float = 0.0       # max adverse excursion (option price % from entry, positive)
+    mfe_estimated: bool = False # True if any bar used synthetic price proxy
 
 
 @dataclass

@@ -100,7 +100,7 @@ def extract_metrics(summary) -> dict:
 
 
 def run_single_backtest(sim_id: str, profile: dict, start: str, end: str,
-                        verbose: bool = False, single_symbol: str = "SPY") -> dict:
+                        verbose: bool = False, single_symbol: str = None) -> dict:
     """Run a single backtest and return metrics dict.
     Uses single_symbol only to keep memory low (~1.5GB vs 4GB for 3 symbols).
     """
@@ -162,17 +162,18 @@ def replay_exits(trades: list[dict], sl: float, tp: float,
         orig_pnl_pct = t.get("pnl_pct", 0)
         exit_reason = t.get("exit_reason", "")
 
-        # Estimate max favorable/adverse excursion from exit info
-        # If original exit was profit_target: MFE >= original TP
-        # If stop_loss: MAE >= original SL
-        # If trailing_stop: MFE >= trail activation, then gave back trail_pct
-        # For simplicity: estimate MFE and MAE
-        if orig_pnl_pct > 0:
-            mfe = max(orig_pnl_pct * 1.1, orig_pnl_pct)  # at least hit exit price
-            mae = min(0.02, abs(orig_pnl_pct) * 0.3)  # small dip before winning
-        else:
-            mfe = max(0, orig_pnl_pct + abs(orig_pnl_pct) * 0.3)  # small bounce before losing
-            mae = abs(orig_pnl_pct)
+        # Use real MFE/MAE from backtest engine (bar-by-bar tracked).
+        # Fall back to pnl_pct bounds if not available (legacy trades).
+        mfe = t.get("mfe_pct")
+        mae = t.get("mae_pct")
+        if mfe is None or mae is None:
+            # Fallback: MFE is at least the exit pnl (if positive), MAE is at least abs(exit pnl) if negative
+            if orig_pnl_pct > 0:
+                mfe = orig_pnl_pct
+                mae = 0.0
+            else:
+                mfe = 0.0
+                mae = abs(orig_pnl_pct)
 
         # Apply new exit rules
         if mae >= sl:
@@ -314,7 +315,9 @@ def run_sim_walkforward(sim_id: str, profile: dict, sweep: bool = False,
     # Re-run once to capture trades (uses cached stock/option data, fast)
     def _extract_trades(start, end):
         bt_profile = copy.deepcopy(profile)
-        bt_profile["symbols"] = ["SPY"]
+        # Use profile's own symbols
+        if not bt_profile.get("symbols"):
+            bt_profile["symbols"] = list(profile.get("symbols", []))
         eng = BacktestEngine(
             profile_id=sim_id, profile=bt_profile,
             start_date=start, end_date=end,
@@ -406,11 +409,11 @@ def run_sim_walkforward(sim_id: str, profile: dict, sweep: bool = False,
     print(f"  Running FULL validate backtest with optimized params...", flush=True)
     opt_profile = copy.deepcopy(profile)
     opt_profile.update(best_params)
-    full_val = run_single_backtest(sim_id, opt_profile, VAL_START, VAL_END, verbose=False, single_symbol="SPY")
+    full_val = run_single_backtest(sim_id, opt_profile, VAL_START, VAL_END, verbose=False)
     print(f"    Val (full): WR={full_val['win_rate']:.1%}, E=${full_val['expectancy']:.2f}, "
           f"PnL=${full_val['total_pnl']:.0f}", flush=True)
 
-    full_test = run_single_backtest(sim_id, opt_profile, TEST_START, TEST_END, verbose=False, single_symbol="SPY")
+    full_test = run_single_backtest(sim_id, opt_profile, TEST_START, TEST_END, verbose=False)
     print(f"    Test (full): WR={full_test['win_rate']:.1%}, E=${full_test['expectancy']:.2f}, "
           f"PnL=${full_test['total_pnl']:.0f}", flush=True)
 

@@ -400,6 +400,10 @@ class _OpenTrade:
     trailing_stop_high: float = 0.0
     tp2_activated: bool = False
     tp2_target_pct: float = 0.0
+    # MFE/MAE tracking (bar-by-bar)
+    mfe_pct: float = 0.0   # max favorable excursion (option price pct from entry)
+    mae_pct: float = 0.0   # max adverse excursion (option price pct from entry, stored positive)
+    mfe_estimated: bool = False  # True if any bar used synthetic price proxy
     # Context for optimizer
     regime: str = ""
     confidence: float = 0.0
@@ -449,7 +453,7 @@ class BacktestEngine:
         elif profile.get("underlying_symbol"):
             self.symbols = [str(profile["underlying_symbol"]).upper()]
         else:
-            self.symbols = ["SPY"]
+            self.symbols = list(profile.get("symbols", []))
 
         # Filter to tradeable symbols (have options)
         self._tradeable = [
@@ -457,7 +461,7 @@ class BacktestEngine:
             if s in {"SPY", "QQQ", "IWM", "VXX", "TSLA", "AAPL", "NVDA", "MSFT"}
         ]
         if not self._tradeable:
-            self._tradeable = self.symbols[:1] if self.symbols else ["SPY"]
+            self._tradeable = self.symbols[:1] if self.symbols else []
 
         # Cache: {(contract, date_str): pd.DataFrame}
         self._option_cache: dict = {}
@@ -611,8 +615,10 @@ class BacktestEngine:
                     str(current_date) if current_date else "",
                     ts,
                 )
+                _price_is_estimated = False
                 if opt_price is None or opt_price <= 0:
                     # Synthetic price proxy from underlying move
+                    _price_is_estimated = True
                     sym_row = sym_bar_lookup.get(trade_sym, {}).get(ts)
                     if sym_row is not None:
                         sym_close = float(sym_row.get("close", 0) or 0)
@@ -623,6 +629,16 @@ class BacktestEngine:
                             opt_price = open_trade.entry_price * 0.95
                     else:
                         opt_price = open_trade.entry_price * max(0.05, (1 + (close_price / float(row.get("open", close_price)) - 1) * 5))
+
+                # ── Bar-by-bar MFE/MAE tracking ──────────────────────
+                if open_trade.entry_price > 0:
+                    bar_excursion = (opt_price - open_trade.entry_price) / open_trade.entry_price
+                    if bar_excursion > open_trade.mfe_pct:
+                        open_trade.mfe_pct = bar_excursion
+                    if bar_excursion < 0 and abs(bar_excursion) > open_trade.mae_pct:
+                        open_trade.mae_pct = abs(bar_excursion)
+                    if _price_is_estimated:
+                        open_trade.mfe_estimated = True
 
                 trade_dict = {
                     "trade_id": open_trade.trade_id,
@@ -691,6 +707,9 @@ class BacktestEngine:
                         day_of_week_name=_entry_dt.strftime("%A"),
                         confidence=open_trade.confidence,
                         holding_seconds=int(elapsed_seconds),
+                        mfe_pct=round(open_trade.mfe_pct, 6),
+                        mae_pct=round(open_trade.mae_pct, 6),
+                        mfe_estimated=open_trade.mfe_estimated,
                     )
                     run_trades.append(bt_trade)
                     equity_curve.append({
@@ -1036,6 +1055,9 @@ class BacktestEngine:
                 "day_of_week_name": t.day_of_week_name,
                 "confidence": t.confidence,
                 "holding_seconds": t.holding_seconds,
+                "mfe_pct": t.mfe_pct,
+                "mae_pct": t.mae_pct,
+                "mfe_estimated": t.mfe_estimated,
             }
             for t in trades
         ]
