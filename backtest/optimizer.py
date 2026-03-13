@@ -10,9 +10,17 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import os
+import sys
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime as _dt, timedelta
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -150,7 +158,7 @@ def analyze_sim(sim_id: str) -> OptimizationResult | None:
         return None
 
     signal_mode = summary.get("signal_mode", "")
-    symbol = summary.get("symbol", "SPY")
+    symbol = summary.get("symbol", "")
     total = len(trades)
     wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
     a_trades = sum(1 for t in trades if grade_trade(t.get("pnl_pct", 0), t.get("exit_reason", ""))[1] == "A")
@@ -546,3 +554,313 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Parameter Grid-Search Optimizer with Walk-Forward Validation
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Sweep ranges
+_TP_VALUES = [0.03, 0.05, 0.08, 0.12, 0.15, 0.20]
+_SL_VALUES = [0.02, 0.03, 0.05, 0.08, 0.10]
+_HOLD_MAX_MINUTES = [15, 30, 60, 120, 240]
+_HOLD_MAX_SECONDS = [m * 60 for m in _HOLD_MAX_MINUTES]
+
+
+def _wf_get_trade_pnl(t) -> float:
+    if isinstance(t, dict):
+        return float(t.get("realized_pnl_dollars") or t.get("pnl") or 0)
+    return float(getattr(t, "pnl", 0))
+
+
+def _wf_run_attr(r, key, default=0):
+    """Get attribute from a run (dict or dataclass)."""
+    if isinstance(r, dict):
+        return r.get(key, default)
+    return getattr(r, key, default)
+
+
+def _wf_total_trades(summary) -> int:
+    return sum(_wf_run_attr(r, "total_trades", 0)
+               for r in summary.runs) if summary.runs else 0
+
+
+def _wf_profit_factor(summary) -> float:
+    gp, gl = 0.0, 0.0
+    for r in summary.runs:
+        for t in _wf_run_attr(r, "trades", []):
+            pnl = _wf_get_trade_pnl(t)
+            if pnl > 0:
+                gp += pnl
+            else:
+                gl += abs(pnl)
+    return gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+
+
+def _wf_daily_sharpe(summary) -> float:
+    daily_pnl: dict = {}
+    for r in summary.runs:
+        for t in _wf_run_attr(r, "trades", []):
+            d = t.get("date", "") if isinstance(t, dict) else getattr(t, "date", "")
+            daily_pnl[d] = daily_pnl.get(d, 0.0) + _wf_get_trade_pnl(t)
+    vals = list(daily_pnl.values())
+    if len(vals) < 2:
+        return 0.0
+    avg = sum(vals) / len(vals)
+    var = sum((v - avg) ** 2 for v in vals) / len(vals)
+    std = math.sqrt(var)
+    return (avg / std) * math.sqrt(252) if std > 0 else 0.0
+
+
+def _wf_score(summary, objective: str) -> float:
+    """Score a BacktestSummary for optimizer ranking."""
+    if not summary.runs:
+        return 0.0
+    total = _wf_total_trades(summary)
+    if total == 0:
+        return 0.0
+    if objective == "growth":
+        end_bal = _wf_run_attr(summary.runs[-1], "final_balance", 500)
+        max_dd = summary.avg_max_drawdown
+        return end_bal / max(max_dd, 0.01)
+    elif objective == "winrate":
+        pf = _wf_profit_factor(summary)
+        if pf < 1.0:
+            return 0.0
+        return summary.avg_win_rate * min(pf, 99.0)
+    elif objective == "balanced":
+        if total < 30:
+            return 0.0
+        return _wf_daily_sharpe(summary)
+    return 0.0
+
+
+def _wf_run_fold(work_unit: dict) -> dict:
+    """Worker: run train + test for one (combo, fold). Module-level for pickling."""
+    proj_root = work_unit["project_root"]
+    if proj_root not in sys.path:
+        sys.path.insert(0, proj_root)
+
+    import logging
+    logging.disable(logging.WARNING)
+
+    from backtest.engine import BacktestEngine
+
+    profile = dict(work_unit["profile"])
+    params = work_unit["params"]
+    profile["profit_target_pct"] = params["profit_target_pct"]
+    profile["stop_loss_pct"] = params["stop_loss_pct"]
+    profile["hold_max_seconds"] = params["hold_max_seconds"]
+
+    sid = work_unit["sim_id"]
+    obj = work_unit["objective"]
+
+    # Train
+    te = BacktestEngine(sid, profile, work_unit["train_start"],
+                        work_unit["train_end"], max_runs=0, verbose=False)
+    ts = te.run()
+    train_score = _wf_score(ts, obj)
+    train_trades = _wf_total_trades(ts)
+
+    # Test
+    te2 = BacktestEngine(sid, profile, work_unit["test_start"],
+                         work_unit["test_end"], max_runs=0, verbose=False)
+    ts2 = te2.run()
+    test_score = _wf_score(ts2, obj)
+    test_trades = _wf_total_trades(ts2)
+    test_pnl = sum(_wf_run_attr(r, "total_pnl", 0) for r in ts2.runs) if ts2.runs else 0
+
+    return {
+        "combo_idx": work_unit["combo_idx"],
+        "fold_num": work_unit["fold_num"],
+        "params": params,
+        "train_score": train_score,
+        "test_score": test_score,
+        "train_trades": train_trades,
+        "test_trades": test_trades,
+        "test_profitable": test_pnl > 0,
+    }
+
+
+class SimOptimizer:
+    """Grid-search parameter optimizer with 3-fold walk-forward validation."""
+
+    def __init__(self, sim_id: str, start_date: str, end_date: str,
+                 objective: str = "growth"):
+        self.sim_id = sim_id
+        self.start_date = start_date
+        self.end_date = end_date
+        self.objective = objective
+
+    def _load_profile(self) -> dict:
+        import yaml
+        cfg_path = os.path.join(_PROJECT_ROOT, "simulation", "sim_config.yaml")
+        with open(cfg_path, "r") as f:
+            cfg = yaml.safe_load(f) or {}
+        key = self.sim_id.upper()
+        for k, v in cfg.items():
+            if str(k).upper() == key and isinstance(v, dict):
+                return v
+        raise ValueError(f"Profile {self.sim_id} not found in sim_config.yaml")
+
+    def _build_folds(self) -> list[dict]:
+        start = _dt.strptime(self.start_date, "%Y-%m-%d")
+        end = _dt.strptime(self.end_date, "%Y-%m-%d")
+        total_days = (end - start).days
+        chunk = timedelta(days=total_days // 6)
+
+        return [
+            {
+                "train_start": (start).strftime("%Y-%m-%d"),
+                "train_end": (start + 4 * chunk).strftime("%Y-%m-%d"),
+                "test_start": (start + 4 * chunk).strftime("%Y-%m-%d"),
+                "test_end": (start + 6 * chunk).strftime("%Y-%m-%d"),
+            },
+            {
+                "train_start": (start + chunk).strftime("%Y-%m-%d"),
+                "train_end": (start + 5 * chunk).strftime("%Y-%m-%d"),
+                "test_start": (start + 5 * chunk).strftime("%Y-%m-%d"),
+                "test_end": end.strftime("%Y-%m-%d"),
+            },
+            {
+                "train_start": (start + 2 * chunk).strftime("%Y-%m-%d"),
+                "train_end": (end - chunk).strftime("%Y-%m-%d"),
+                "test_start": (end - chunk).strftime("%Y-%m-%d"),
+                "test_end": end.strftime("%Y-%m-%d"),
+            },
+        ]
+
+    def run(self) -> dict:
+        profile = self._load_profile()
+        folds = self._build_folds()
+
+        baseline = {
+            "tp": profile.get("profit_target_pct", 0.2),
+            "sl": profile.get("stop_loss_pct", 0.1),
+            "hold_max": int(profile.get("hold_max_seconds", 3600)) // 60,
+        }
+
+        # Build combos
+        combos = []
+        for tp in _TP_VALUES:
+            for sl in _SL_VALUES:
+                for hm in _HOLD_MAX_SECONDS:
+                    combos.append({
+                        "profit_target_pct": tp,
+                        "stop_loss_pct": sl,
+                        "hold_max_seconds": hm,
+                    })
+
+        total_units = len(combos) * len(folds)
+        max_workers = min(max(1, (os.cpu_count() or 2) - 1), 4)
+
+        print(f"\n  Optimizer: {self.sim_id} | objective={self.objective}")
+        print(f"  Baseline: TP={baseline['tp']} SL={baseline['sl']} "
+              f"HoldMax={baseline['hold_max']}min")
+        print(f"  Grid: {len(combos)} combos x {len(folds)} folds "
+              f"= {total_units} engine runs")
+        for i, f in enumerate(folds, 1):
+            print(f"    Fold {i}: train [{f['train_start']} -> {f['train_end']}] "
+                  f"test [{f['test_start']} -> {f['test_end']}]")
+        print(f"  Workers: {max_workers}")
+
+        # Build work units
+        work_units = []
+        for ci, params in enumerate(combos):
+            for fi, fold in enumerate(folds, 1):
+                work_units.append({
+                    "sim_id": self.sim_id,
+                    "profile": profile,
+                    "params": params,
+                    "objective": self.objective,
+                    "combo_idx": ci,
+                    "fold_num": fi,
+                    "train_start": fold["train_start"],
+                    "train_end": fold["train_end"],
+                    "test_start": fold["test_start"],
+                    "test_end": fold["test_end"],
+                    "project_root": _PROJECT_ROOT,
+                })
+
+        # Execute in parallel
+        results = []
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_wf_run_fold, wu): wu for wu in work_units}
+            done = 0
+            for future in as_completed(futures):
+                done += 1
+                if done % 10 == 0 or done == total_units:
+                    print(f"  Progress: {done}/{total_units} runs complete...",
+                          flush=True)
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    wu = futures[future]
+                    print(f"  ERROR combo {wu['combo_idx']} "
+                          f"fold {wu['fold_num']}: {e}")
+
+        # Aggregate by combo
+        by_combo: dict[int, list] = {}
+        for r in results:
+            by_combo.setdefault(r["combo_idx"], []).append(r)
+
+        ranked = []
+        for ci, fold_results in by_combo.items():
+            if len(fold_results) < len(folds):
+                continue
+            p = fold_results[0]["params"]
+            train_scores = [r["train_score"] for r in fold_results]
+            test_scores = [r["test_score"] for r in fold_results]
+            avg_train = sum(train_scores) / len(train_scores)
+            avg_test = sum(test_scores) / len(test_scores)
+            consistency = sum(
+                1 for r in fold_results if r["test_profitable"]
+            ) / len(fold_results)
+            overfit = avg_test < avg_train * 0.6 if avg_train > 0 else False
+
+            ranked.append({
+                "params": {
+                    "tp": p["profit_target_pct"],
+                    "sl": p["stop_loss_pct"],
+                    "hold_max": p["hold_max_seconds"] // 60,
+                },
+                "avg_train_score": round(avg_train, 4),
+                "avg_test_score": round(avg_test, 4),
+                "consistency": round(consistency, 2),
+                "overfit_flag": overfit,
+                "fold_details": sorted(
+                    [
+                        {
+                            "fold": r["fold_num"],
+                            "train_score": round(r["train_score"], 4),
+                            "test_score": round(r["test_score"], 4),
+                            "train_trades": r["train_trades"],
+                            "test_trades": r["test_trades"],
+                            "test_profitable": r["test_profitable"],
+                        }
+                        for r in fold_results
+                    ],
+                    key=lambda x: x["fold"],
+                ),
+            })
+
+        ranked.sort(key=lambda x: x["avg_test_score"], reverse=True)
+        top_10 = ranked[:10]
+        for i, entry in enumerate(top_10, 1):
+            entry["rank"] = i
+
+        output = {
+            "sim_id": self.sim_id,
+            "objective": self.objective,
+            "date_range": [self.start_date, self.end_date],
+            "baseline_params": baseline,
+            "total_combos": len(combos),
+            "total_runs": total_units,
+            "top_10": top_10,
+        }
+
+        path = os.path.join(RESULTS_DIR, f"optimizer_{self.sim_id}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(output, f, indent=2, default=str)
+
+        return output
