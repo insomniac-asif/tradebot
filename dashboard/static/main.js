@@ -56,6 +56,8 @@ const STRATEGY_DESCRIPTIONS = {
   STRUCTURE_FADE: `Mean-reversion trade off confirmed market structure levels — support and resistance zones derived from the market structure analytics module. Bullish entry fires when price is within 0.2% of the nearest support level AND RSI is below 40, indicating oversold conditions at a structural floor. Bearish entry fires when price is within 0.2% of the nearest resistance level AND RSI is above 60, indicating overbought conditions at a structural ceiling. Requires live structure_data from the market structure computation (pivot points, volume-weighted levels). An optional VXX fear filter can suppress entries when volatility is spiking — structure levels tend to break during panic selling rather than hold. The edge: institutional algorithms cluster orders around key structure levels, creating predictable bounce zones. Entry right at the level provides a tight stop (a clean break through invalidates the thesis) and high reward-to-risk. Works best in range-bound sessions where structure is respected; avoid in breakout/trend days when levels get swept.`,
 
   GEX_FLOW: `Trades in the direction of mechanical dealer gamma exposure (GEX) hedging flows. Uses real-time options positioning data to determine whether overall market gamma is positive or negative, and where key gamma levels sit (GEX flip strike, max pain, call/put walls). Bullish entry fires when: gamma is positive (dealers are long gamma), price is above the GEX flip strike, and price sits between max pain and the nearest call wall — this configuration means dealer delta hedging mechanically pushes price toward the call wall. Bearish entry fires in the mirror setup: negative gamma, price below the flip strike, between the put wall and max pain — dealers are short gamma and their hedging amplifies downward moves. The edge: dealer hedging flows are non-discretionary and predictable — when gamma is positive, dealers buy dips and sell rips (stabilizing); when negative, they sell into dips and buy into rips (amplifying). Trading with these mechanical flows rather than against them provides a structural directional edge that is independent of traditional technical signals.`,
+
+  FVG_FILL: `Trades into unmitigated Fair Value Gap zones expecting price to fill the gap. Uses detect_fvgs() to find recent unmitigated FVGs within a configurable age window (default 50 bars). Entry fires when the current close sits inside an FVG zone — between gap bottom and gap top. Bullish entry when price is inside a bull FVG (gap created by a strong upward move that left an imbalance below), with an RSI filter blocking entries when RSI > 70 (overbought — the fill has likely already happened). Bearish entry when price is inside a bear FVG with RSI < 30 filter. The edge: FVGs represent institutional order flow imbalances — price moved so fast that a gap was left between non-adjacent candles. These gaps act as magnets because unfilled orders from the gap zone attract price back to complete the auction. SIM39 runs this signal only in ranging markets (RANGE_ONLY regime filter) where gap fills are more predictable, while SIM38 runs in all regimes for comparison. Works best in mean-reverting conditions; in strong trends, gaps may take much longer to fill or become mitigated by continuation rather than reversion.`,
 };
 
 const POLL_INTERVAL = 30000; // 30s
@@ -685,7 +687,7 @@ const COLS = 6; // desks per row (6×N layout)
 
 function getPersonality(signalMode) {
   const m = (signalMode || '').toUpperCase();
-  if (['MEAN_REVERSION','VWAP_REVERSION','ZSCORE_BOUNCE','FAILED_BREAKOUT_REVERSAL','EXTREME_EXTENSION_FADE'].includes(m)) return 'scholar';
+  if (['MEAN_REVERSION','VWAP_REVERSION','ZSCORE_BOUNCE','FAILED_BREAKOUT_REVERSAL','EXTREME_EXTENSION_FADE','FVG_FILL'].includes(m)) return 'scholar';
   if (['BREAKOUT','ORB_BREAKOUT','AFTERNOON_BREAKOUT','OPENING_DRIVE'].includes(m)) return 'athlete';
   if (['TREND_PULLBACK','SWING_TREND','VWAP_CONTINUATION','TREND_RECLAIM'].includes(m)) return 'trend';
   return 'casual';
@@ -794,6 +796,9 @@ const SIM_PERSONALITIES = {
   OPENING_RANGE_RECLAIM:    '"Flush, reclaim, profit. Every time."',
   VOL_COMPRESSION_BREAKOUT: '"Quiet markets are loaded springs."',
   VOL_SPIKE_FADE:           '"Panic is my entry signal."',
+  STRUCTURE_FADE:           '"Levels don\'t lie. Price respects them."',
+  GEX_FLOW:                 '"Dealers hedge. I ride the flow."',
+  FVG_FILL:                 '"Gaps always get filled. Always."',
 };
 
 let _simTT = null;
@@ -1015,14 +1020,15 @@ const HAIR_COLORS = ['#181008','#4a2810','#b08028','#a83818','#585858','#0e0e0e'
 // Desk item variation per student: determines what items appear on their desk
 const DESK_ITEMS = ['papers_mug', 'books_pencil', 'papers_apple', 'notebook_mug', 'books_mug', 'papers_pencil'];
 
-// ─────────────────────────────────────────────── STYLE ARCHETYPES (v2 — 14 styles)
+// ─────────────────────────────────────────────── STYLE ARCHETYPES (v3 — 14 styles, 40 sims)
 const SIM_STYLES = [
   'formal','punk','nerd','pastel','grunge','street',       // SIM00–05
   'emo','cottagecore','jock','artsy','gangster','techy',   // SIM06–11
-  'preppy','punk','casual','pastel','formal','emo',        // SIM12–17
-  'grunge','street','artsy','nerd','cottagecore','jock',   // SIM18–23
-  'gangster','techy','preppy','punk','casual','emo',       // SIM24–29
-  'artsy','formal','grunge','street','nerd','cottagecore', // SIM30–35
+  'preppy','punk','street','pastel','formal','emo',        // SIM12–17
+  'grunge','jock','artsy','nerd','cottagecore','techy',    // SIM18–23
+  'gangster','punk','preppy','grunge','formal','emo',      // SIM24–29
+  'artsy','cottagecore','jock','street','nerd','pastel',   // SIM30–35
+  'techy','gangster','preppy','punk',                      // SIM36–39
 ];
 const ARCHETYPE_SHIRTS = {
   punk:        ['#1a1a1a','#141414','#222222'],
@@ -1457,6 +1463,104 @@ function studentSVG(simId, mood, idx, personality = 'casual', active = false) {
       <rect x="27" y="30" width="4"  height="8"  fill="${shirt}" opacity="0.9"/>
       <rect x="18" y="30" width="12" height="3"  fill="#e8e8e8"/>
       <rect x="19" y="30" width="10" height="2"  fill="#f4f4f4"/>`;
+  }
+
+  // ── Sleeve variation: not everyone wears full sleeves
+  // 'full' = default (shirt covers arm x=3..10 and x=37..44 down to y=42)
+  // 'short' = shirt ends at y=36, skin from y=36 to y=45
+  // 'tank'  = shirt ends at y=33, skin from y=33 to y=45 (shoulders only)
+  const SLEEVE_MAP = {
+    punk: 'short', grunge: 'short', street: 'full', formal: 'full',
+    casual: 'short', gangster: 'tank', nerd: 'full', jock: 'tank',
+    emo: 'full', pastel: 'short', artsy: 'short', techy: 'full',
+    cottagecore: 'full', preppy: 'full',
+  };
+  // Per-sim override: some indices flip sleeve regardless of archetype
+  const SLEEVE_OVERRIDE = { 2: 'short', 7: 'short', 10: 'tank', 15: 'short', 22: 'short', 31: 'tank', 38: 'short' };
+  const sleeveType = SLEEVE_OVERRIDE[idx] || SLEEVE_MAP[archetype] || 'full';
+
+  let sleeveOverride = '';
+  if (sleeveType === 'short') {
+    // Overwrite lower arm area with skin (shirt stops at y=36)
+    sleeveOverride = `
+      <rect x="3" y="36" width="8" height="6" fill="${skin}"/>
+      <rect x="37" y="36" width="8" height="6" fill="${skin}"/>
+      <rect x="3" y="36" width="8" height="1" fill="${shirtDark}" opacity="0.25"/>
+      <rect x="37" y="36" width="8" height="1" fill="${shirtDark}" opacity="0.25"/>`;
+  } else if (sleeveType === 'tank') {
+    // Overwrite most of arm area with skin (shirt only at shoulder y=31-33)
+    sleeveOverride = `
+      <rect x="3" y="33" width="8" height="9" fill="${skin}"/>
+      <rect x="37" y="33" width="8" height="9" fill="${skin}"/>
+      <rect x="3" y="33" width="8" height="1" fill="${shirtDark}" opacity="0.2"/>
+      <rect x="37" y="33" width="8" height="1" fill="${shirtDark}" opacity="0.2"/>`;
+  }
+
+  // ── Tattoos (~44% of sims — 17 out of 40)
+  // Tattoos appear on exposed arm skin. More visible on short/tank sleeves.
+  const TATTOO_SIMS = new Set([1, 4, 5, 7, 9, 10, 14, 15, 19, 22, 24, 25, 27, 31, 33, 37, 38]);
+  let tattooSVG = '';
+  if (TATTOO_SIMS.has(idx)) {
+    const tattooC1 = shadeHex(skin, -40);  // dark ink on skin
+    const tattooC2 = shadeHex(skin, -55);  // darker for detail
+    const tattooVariant = idx % 7;
+
+    if (tattooVariant === 0) {
+      // Left arm: small star + dots
+      tattooSVG = `
+        <rect x="5" y="37" width="2" height="1" fill="${tattooC1}" opacity="0.6"/>
+        <rect x="4" y="38" width="4" height="1" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="5" y="39" width="2" height="1" fill="${tattooC1}" opacity="0.6"/>
+        <rect x="6" y="38" width="1" height="1" fill="${tattooC2}" opacity="0.4"/>`;
+    } else if (tattooVariant === 1) {
+      // Right arm: band/bracelet lines
+      tattooSVG = `
+        <rect x="38" y="37" width="6" height="1" fill="${tattooC1}" opacity="0.55"/>
+        <rect x="38" y="39" width="6" height="1" fill="${tattooC1}" opacity="0.55"/>
+        <rect x="39" y="38" width="4" height="1" fill="${tattooC2}" opacity="0.3"/>`;
+    } else if (tattooVariant === 2) {
+      // Both arms: matching small marks
+      tattooSVG = `
+        <rect x="5" y="38" width="3" height="1" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="5" y="40" width="2" height="1" fill="${tattooC1}" opacity="0.4"/>
+        <rect x="39" y="38" width="3" height="1" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="39" y="40" width="2" height="1" fill="${tattooC1}" opacity="0.4"/>`;
+    } else if (tattooVariant === 3) {
+      // Left arm: tribal/geometric pattern
+      tattooSVG = `
+        <rect x="4" y="35" width="1" height="5" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="5" y="36" width="1" height="3" fill="${tattooC2}" opacity="0.45"/>
+        <rect x="6" y="35" width="1" height="5" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="7" y="37" width="1" height="1" fill="${tattooC2}" opacity="0.4"/>
+        <rect x="3" y="37" width="1" height="1" fill="${tattooC2}" opacity="0.4"/>`;
+    } else if (tattooVariant === 4) {
+      // Right arm: snake/vine crawling
+      tattooSVG = `
+        <rect x="39" y="34" width="1" height="2" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="40" y="36" width="1" height="2" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="41" y="38" width="1" height="2" fill="${tattooC1}" opacity="0.45"/>
+        <rect x="42" y="40" width="1" height="2" fill="${tattooC1}" opacity="0.4"/>
+        <rect x="40" y="35" width="2" height="1" fill="${tattooC2}" opacity="0.35"/>`;
+    } else if (tattooVariant === 5) {
+      // Both arms: heavy sleeve tattoos (multiple marks)
+      tattooSVG = `
+        <rect x="4" y="34" width="5" height="1" fill="${tattooC1}" opacity="0.45"/>
+        <rect x="4" y="36" width="4" height="1" fill="${tattooC2}" opacity="0.4"/>
+        <rect x="5" y="38" width="3" height="1" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="4" y="40" width="5" height="1" fill="${tattooC1}" opacity="0.45"/>
+        <rect x="39" y="34" width="5" height="1" fill="${tattooC1}" opacity="0.45"/>
+        <rect x="39" y="36" width="4" height="1" fill="${tattooC2}" opacity="0.4"/>
+        <rect x="40" y="38" width="3" height="1" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="39" y="40" width="5" height="1" fill="${tattooC1}" opacity="0.45"/>`;
+    } else {
+      // Left arm: small heart/diamond shape
+      tattooSVG = `
+        <rect x="5" y="37" width="1" height="1" fill="${tattooC1}" opacity="0.55"/>
+        <rect x="7" y="37" width="1" height="1" fill="${tattooC1}" opacity="0.55"/>
+        <rect x="4" y="38" width="5" height="1" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="5" y="39" width="3" height="1" fill="${tattooC1}" opacity="0.5"/>
+        <rect x="6" y="40" width="1" height="1" fill="${tattooC2}" opacity="0.45"/>`;
+    }
   }
 
   // ── Archetype hat / hair accessory (rendered over hair in head section)
@@ -1953,6 +2057,12 @@ function studentSVG(simId, mood, idx, personality = 'casual', active = false) {
 
   <!-- Archetype clothing overlay -->
   ${clothingOverlay}
+
+  <!-- Sleeve variation -->
+  ${sleeveOverride}
+
+  <!-- Tattoos -->
+  ${tattooSVG}
 
   <!-- ── DESK ── -->
   <!-- Desk surface with wood grain -->
@@ -3620,6 +3730,15 @@ async function renderDrawerBacktestTab(simId) {
       <div id="bt-optimizer" style="font-size:11px;color:#aaa;padding:4px 0">
         <button class="bt-run-pill" style="border-color:#f7d94f;color:#f7d94f" onclick="loadOptimizer('${simId}')">Analyze Trades</button>
       </div>
+
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:24px;color:#66bb6a">GROWTH PATH</div>
+      <div id="bt-growth" style="font-size:11px;color:#aaa;padding:4px 0">Loading...</div>
+
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:24px;color:#42a5f5">DISCOVERED PATTERNS</div>
+      <div id="bt-patterns" style="font-size:11px;color:#aaa;padding:4px 0">Loading...</div>
+
+      <div class="session-label" style="padding:0 0 6px 2px;margin-top:24px;color:#ab47bc">PARAMETER OPTIMIZER</div>
+      <div id="bt-param-optimizer" style="font-size:11px;color:#aaa;padding:4px 0">Loading...</div>
     </div>
   `;
 
@@ -3628,7 +3747,157 @@ async function renderDrawerBacktestTab(simId) {
     renderBtWinRateChart(entry.win_rate_chart || { runs: [] });
     renderEquityCurveChart(entry.equity_curves || [], 'bt-equity-chart');
   }, 60);
+
+  // Load new sections
+  loadGrowthSection(simId);
+  loadPatternsSection(simId);
+  loadParamOptimizerSection(simId);
 }
+
+/* ── Growth Path Section ── */
+async function loadGrowthSection(simId) {
+  const el = document.getElementById('bt-growth');
+  if (!el) return;
+  try {
+    const res = await fetch(`/api/backtest/growth/${simId}`);
+    const g = await res.json();
+    if (!g || !g.sim_id) {
+      el.innerHTML = '<span style="color:#888">No growth data. Run with <code>--growth</code> flag.</span>';
+      return;
+    }
+    const endColor = g.end_capital >= g.start_capital ? 'var(--win-text)' : 'var(--loss-text)';
+    const retColor = g.total_return_pct >= 0 ? 'var(--win-text)' : 'var(--loss-text)';
+    const milestones = Object.entries(g.milestones || {}).map(([amt, days]) => {
+      if (days !== null) return `<span style="display:inline-block;padding:2px 8px;margin:2px;border-radius:10px;background:rgba(76,175,80,0.15);color:#66bb6a;font-size:10px;font-weight:600">$${Number(amt).toLocaleString()} &#10003; (${days}d)</span>`;
+      return `<span style="display:inline-block;padding:2px 8px;margin:2px;border-radius:10px;background:rgba(211,47,47,0.1);color:#e57373;font-size:10px">$${Number(amt).toLocaleString()} &#10007;</span>`;
+    }).join('');
+
+    const bestDay = g.best_day || {};
+    const worstDay = g.worst_day || {};
+
+    el.innerHTML = `
+      <div style="padding:8px 0">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:13px;font-weight:700;color:#ccc">$${g.start_capital.toLocaleString()}</span>
+          <span style="color:#888">&rarr;</span>
+          <span style="font-size:13px;font-weight:700;color:${endColor}">$${g.end_capital.toLocaleString()}</span>
+          <span style="font-size:11px;color:${retColor}">(${g.total_return_pct >= 0 ? '+' : ''}${g.total_return_pct.toFixed(1)}%)</span>
+        </div>
+        <div style="margin-bottom:8px">${milestones}</div>
+        <div class="stat-grid" style="margin:8px 0">
+          <div class="stat-item"><div class="stat-label">Deaths</div><div class="stat-value" style="color:${g.deaths > 0 ? 'var(--loss-text)' : 'var(--win-text)'}">${g.deaths}</div></div>
+          <div class="stat-item"><div class="stat-label">PDT Violations</div><div class="stat-value" style="color:${g.pdt_violations > 0 ? '#ffa726' : 'var(--win-text)'}">${g.pdt_violations}</div></div>
+          <div class="stat-item"><div class="stat-label">Trades</div><div class="stat-value">${g.total_trades}</div></div>
+          <div class="stat-item"><div class="stat-label">Win Rate</div><div class="stat-value" style="color:${g.win_rate >= 0.5 ? 'var(--win-text)' : 'var(--loss-text)'}">${(g.win_rate * 100).toFixed(1)}%</div></div>
+          <div class="stat-item"><div class="stat-label">Daily Sharpe</div><div class="stat-value" style="color:${g.daily_sharpe >= 0 ? 'var(--win-text)' : 'var(--loss-text)'}">${g.daily_sharpe.toFixed(2)}</div></div>
+          <div class="stat-item"><div class="stat-label">Max Drawdown</div><div class="stat-value" style="color:var(--loss-text)">${(g.max_drawdown_pct * 100).toFixed(1)}%</div></div>
+          <div class="stat-item"><div class="stat-label">Best Streak</div><div class="stat-value" style="color:var(--win-text)">${g.best_win_streak}W</div></div>
+          <div class="stat-item"><div class="stat-label">Worst Streak</div><div class="stat-value" style="color:var(--loss-text)">${g.worst_loss_streak}L</div></div>
+        </div>
+        <div style="display:flex;gap:12px;font-size:10px;margin-top:4px">
+          <span>Best day: <b style="color:var(--win-text)">+$${bestDay.pnl ? bestDay.pnl.toFixed(0) : '—'}</b> <span style="color:#888">${bestDay.date || ''}</span></span>
+          <span>Worst day: <b style="color:var(--loss-text)">-$${worstDay.pnl ? Math.abs(worstDay.pnl).toFixed(0) : '—'}</b> <span style="color:#888">${worstDay.date || ''}</span></span>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<span style="color:var(--loss-text)">Failed: ${e.message}</span>`;
+  }
+}
+
+/* ── Discovered Patterns Section ── */
+async function loadPatternsSection(simId) {
+  const el = document.getElementById('bt-patterns');
+  if (!el) return;
+  try {
+    const res = await fetch(`/api/backtest/patterns/${simId}`);
+    const patterns = await res.json();
+    if (!patterns || !patterns.length) {
+      el.innerHTML = '<span style="color:#888">No patterns found. Run with <code>--patterns</code> flag.</span>';
+      return;
+    }
+    const sorted = patterns.sort((a, b) => b.win_rate - a.win_rate);
+    const rows = sorted.map(p => {
+      const wr = (p.win_rate * 100).toFixed(0);
+      const wrColor = p.win_rate >= 0.70 ? '#66bb6a' : p.win_rate >= 0.62 ? '#ffa726' : '#aaa';
+      const rec = p.recurrence_analysis || {};
+      const interval = rec.primary_interval || '—';
+      return `<tr>
+        <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.description || p.pattern_id}">${p.description || p.pattern_id}</td>
+        <td style="color:${wrColor};text-align:right;font-weight:600">${wr}%</td>
+        <td style="text-align:right">${(p.profit_factor || 0).toFixed(2)}</td>
+        <td style="text-align:right">${p.total_trades || 0}</td>
+        <td style="text-align:right;color:${(p.avg_pnl || 0) >= 0 ? 'var(--win-text)' : 'var(--loss-text)'}">$${(p.avg_pnl || 0).toFixed(2)}</td>
+        <td style="text-align:center;font-size:9px">${interval}</td>
+      </tr>`;
+    }).join('');
+    el.innerHTML = `
+      <table class="bt-trades-table">
+        <thead><tr><th>Pattern</th><th style="text-align:right">WR%</th><th style="text-align:right">PF</th><th style="text-align:right">Trades</th><th style="text-align:right">Avg PnL</th><th style="text-align:center">Recurrence</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  } catch (e) {
+    el.innerHTML = `<span style="color:var(--loss-text)">Failed: ${e.message}</span>`;
+  }
+}
+
+/* ── Parameter Optimizer Results Section ── */
+async function loadParamOptimizerSection(simId) {
+  const el = document.getElementById('bt-param-optimizer');
+  if (!el) return;
+  try {
+    const res = await fetch(`/api/backtest/optimizer/${simId}`);
+    const data = await res.json();
+    if (!data || !data.sim_id) {
+      el.innerHTML = '<span style="color:#888">No optimizer data. Run with <code>--optimize</code> flag.</span>';
+      return;
+    }
+    const top10 = data.top_10 || [];
+    const bl = data.baseline_params || {};
+
+    const baselineRow = `<tr style="background:rgba(255,255,255,0.03)">
+      <td style="color:#888">base</td>
+      <td>${bl.tp || '—'}</td>
+      <td>${bl.sl || '—'}</td>
+      <td>${bl.hold_max || '—'}m</td>
+      <td colspan="3" style="color:#888;text-align:center">baseline params</td>
+    </tr>`;
+
+    const rows = top10.map((r, i) => {
+      const p = r.params || {};
+      const isTop = i === 0;
+      const rowBg = isTop ? 'background:rgba(76,175,80,0.08)' : '';
+      const rankColor = isTop ? 'color:#66bb6a;font-weight:700' : '';
+      const ofColor = r.overfit_flag ? 'color:#ef5350' : 'color:#66bb6a';
+      const ofText = r.overfit_flag ? 'YES' : 'no';
+      const consColor = r.consistency >= 0.67 ? '#66bb6a' : r.consistency >= 0.33 ? '#ffa726' : '#ef5350';
+      return `<tr style="${rowBg}">
+        <td style="${rankColor}">#${r.rank}</td>
+        <td>${p.tp}</td>
+        <td>${p.sl}</td>
+        <td>${p.hold_max}m</td>
+        <td style="text-align:right">${r.avg_test_score.toFixed(1)}</td>
+        <td style="text-align:right;color:${consColor}">${(r.consistency * 100).toFixed(0)}%</td>
+        <td style="text-align:center;color:${ofColor};font-weight:600">${ofText}</td>
+      </tr>`;
+    }).join('');
+
+    const noData = !top10.length ? '<div style="color:#888;padding:8px 0">Optimizer running or no results yet.</div>' : '';
+
+    el.innerHTML = `
+      <div style="padding:4px 0">
+        <div style="font-size:10px;color:#888;margin-bottom:6px">${data.total_combos || 0} combos | ${data.total_runs || 0} engine runs | objective: ${data.objective || '—'}</div>
+        ${noData}
+        ${top10.length ? `<table class="bt-trades-table">
+          <thead><tr><th>Rank</th><th>TP</th><th>SL</th><th>Hold</th><th style="text-align:right">OOS Score</th><th style="text-align:right">Consist.</th><th style="text-align:center">Overfit?</th></tr></thead>
+          <tbody>${baselineRow}${rows}</tbody>
+        </table>` : ''}
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<span style="color:var(--loss-text)">Failed: ${e.message}</span>`;
+  }
 
 function renderBtWinRateChart(winRateChart) {
   if (_btWinRateChart) { _btWinRateChart.destroy(); _btWinRateChart = null; }
