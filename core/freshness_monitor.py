@@ -8,10 +8,13 @@ Escalation:
 
 Recovery:
   bars < 150s AND state is DEGRADED → TRADING_ENABLED
+  broker heartbeat succeeds in PANIC_LOCKDOWN → RECONCILING → READY
 """
 
 import asyncio
 import logging
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,27 @@ _BAR_DEGRADE_SEC   = 300   # 5 min — genuine outage, not just a slow bar
 _BAR_EXIT_ONLY_SEC = 600   # 10 min — extended outage
 _BROKER_PANIC_SEC  = 300
 _BAR_RECOVER_SEC   = 150   # recover once data is < 2.5 min old
+_HEARTBEAT_INTERVAL = 30   # broker ping every 30s
+
+_cached_trading_client = None
+
+
+def _broker_heartbeat_sync() -> bool:
+    """Lightweight broker ping — calls get_clock() which is fast and free."""
+    global _cached_trading_client
+    try:
+        if _cached_trading_client is None:
+            from alpaca.trading.client import TradingClient
+            api_key = os.getenv("APCA_API_KEY_ID")
+            secret_key = os.getenv("APCA_API_SECRET_KEY")
+            if not api_key or not secret_key:
+                return False
+            _cached_trading_client = TradingClient(api_key, secret_key, paper=True)
+        _cached_trading_client.get_clock()
+        return True
+    except Exception:
+        _cached_trading_client = None  # force re-create on next attempt
+        return False
 
 
 class FreshnessMonitor:
@@ -31,6 +55,18 @@ class FreshnessMonitor:
         self.runtime = runtime
         self.supervisor = risk_supervisor
         self._alerted: dict[str, bool] = {}
+        self._last_heartbeat: float = 0.0
+
+    async def _ping_broker(self) -> bool:
+        """Async broker heartbeat. Stamps health on success."""
+        now = time.time()
+        if now - self._last_heartbeat < _HEARTBEAT_INTERVAL:
+            return True  # too soon, skip
+        self._last_heartbeat = now
+        ok = await asyncio.to_thread(_broker_heartbeat_sync)
+        if ok:
+            self.supervisor.update_broker_health(time.time())
+        return ok
 
     async def run(self, send_alert_fn) -> None:
         """
@@ -44,11 +80,33 @@ class FreshnessMonitor:
                 if not market_is_open():
                     continue
 
+                # ── Broker heartbeat ──────────────────────────────────────
+                await self._ping_broker()
+
                 status = self.supervisor.get_status()
                 bar_age    = status.get("bar_age_seconds")    or float("inf")
                 broker_age = status.get("broker_age_seconds") or float("inf")
 
                 current = self.runtime.state
+
+                # ── Recovery from PANIC_LOCKDOWN ──────────────────────────
+                if current == SystemState.PANIC_LOCKDOWN and broker_age < _BROKER_PANIC_SEC:
+                    self.runtime.force_transition(
+                        SystemState.RECONCILING,
+                        "broker reachable, auto-recovering",
+                    )
+                    self.runtime.force_transition(
+                        SystemState.READY,
+                        "broker recovered",
+                    )
+                    self._alerted.pop("panic", None)
+                    try:
+                        await send_alert_fn(
+                            "✅ **PANIC RECOVERED** — broker reachable again. State → READY."
+                        )
+                    except Exception:
+                        pass
+                    continue
 
                 # ── Broker panic ──────────────────────────────────────────
                 if (broker_age > _BROKER_PANIC_SEC

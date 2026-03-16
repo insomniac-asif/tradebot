@@ -57,7 +57,7 @@ def _select_option_contract(direction, underlying_price, symbol=None):
     if client is None or underlying_price is None:
         return None, None
 
-    underlying_sym = symbol.upper()
+    underlying_sym = (symbol or "SPY").upper()
     eastern = pytz.timezone("US/Eastern")
     today = datetime.now(eastern).date()
     contract_type = ContractType.CALL if direction == "bullish" else ContractType.PUT

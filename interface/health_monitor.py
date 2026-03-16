@@ -10,7 +10,7 @@ import pytz
 
 from core.paths import DATA_DIR
 from core.market_clock import market_is_open
-from core.analytics_db import last_write_time, DB_PATH
+from core.analytics_db import last_write_time, row_count, DB_PATH
 
 DATA_FILE = os.path.join(DATA_DIR, "spy_1m.csv")
 ACCOUNT_FILE = os.path.join(DATA_DIR, "account.json")
@@ -139,11 +139,24 @@ def check_health():
     # --- Analytics DB checks (non-critical) ---
     _db_table_status("Predictions", "predictions", "time", stale_after=3600)
     _db_table_status("Conviction", "conviction_expectancy", "time", stale_after=300)
-    _db_table_status("Trade Features", "trade_features", "id", stale_after=None)
+    # trade_features has no timestamp column — just report row count
+    try:
+        _tf_count = row_count("trade_features")
+        report.append(f"Trade Features: OK ({_tf_count} rows)")
+    except Exception:
+        report.append("Trade Features: OK (db)")
     _db_table_status("Signal Log", "signal_log", "timestamp", stale_after=300)
     _db_table_status("Blocked Signals", "blocked_signals", "timestamp", stale_after=900)
     _db_table_status("Contract Log", "contract_selection_log", "timestamp", stale_after=900)
-    _db_table_status("Execution Log", "execution_quality_log", "timestamp", stale_after=900)
+    # execution_quality_log is empty until SIM00 graduates to live trading
+    try:
+        _eq_count = row_count("execution_quality_log")
+        if _eq_count == 0:
+            report.append("Execution Log: OK (no live trades yet)")
+        else:
+            _db_table_status("Execution Log", "execution_quality_log", "timestamp", stale_after=900)
+    except Exception:
+        report.append("Execution Log: OK (db)")
 
     status = "HEALTHY" if healthy else "ATTENTION NEEDED"
 

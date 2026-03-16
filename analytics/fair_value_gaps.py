@@ -17,6 +17,12 @@ def _col(df, *candidates):
     return None
 
 
+def _mark_mitigated(gap: dict) -> bool:
+    """Mark gap as mitigated and return True (for use in list comprehension filter)."""
+    gap["mitigated"] = True
+    return True
+
+
 def detect_fvgs(df, max_gaps: int = 20) -> list[dict]:
     """
     Detect unmitigated Fair Value Gaps in a price DataFrame.
@@ -57,21 +63,32 @@ def detect_fvgs(df, max_gaps: int = 20) -> list[dict]:
                     "mitigated": False,
                 })
 
-        # Check mitigation
-        for gap in gaps:
-            idx = gap["bar_idx"]
-            if idx + 1 >= n:
-                continue
-            if gap["type"] == "bull":
-                for j in range(idx + 1, n):
-                    if lows[j] <= gap["top"]:
-                        gap["mitigated"] = True
-                        break
-            else:
-                for j in range(idx + 1, n):
-                    if highs[j] >= gap["bottom"]:
-                        gap["mitigated"] = True
-                        break
+        # Check mitigation — single forward pass instead of per-gap scan.
+        # Gaps created at bar_idx are mitigatable starting at bar_idx+1.
+        active_bull = []
+        active_bear = []
+        gaps.sort(key=lambda g: g["bar_idx"])
+        gap_iter = iter(gaps)
+        next_gap = next(gap_iter, None)
+        for j in range(2, n):
+            # Add gaps whose bar_idx < j (so mitigation starts at j = bar_idx+1)
+            while next_gap is not None and next_gap["bar_idx"] < j:
+                if next_gap["type"] == "bull":
+                    active_bull.append(next_gap)
+                else:
+                    active_bear.append(next_gap)
+                next_gap = next(gap_iter, None)
+            # Check mitigation for active gaps
+            if active_bull:
+                active_bull = [
+                    g for g in active_bull
+                    if not (lows[j] <= g["top"] and _mark_mitigated(g))
+                ]
+            if active_bear:
+                active_bear = [
+                    g for g in active_bear
+                    if not (highs[j] >= g["bottom"] and _mark_mitigated(g))
+                ]
 
         unmitigated = [g for g in gaps if not g["mitigated"]]
         return unmitigated[-max_gaps:]
