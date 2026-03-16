@@ -1,0 +1,28 @@
+{
+  "sim_id": "SIM27",
+  "start_capital": 3000.0,
+  "end_capital": 3000.0,
+  "target_reached": false,
+  "milestones": {
+    "1000": null,
+    "2500": null,
+    "5000": null
+  },
+  "deaths": 0,
+  "pdt_violations": 0,
+  "total_trades": 0,
+  "win_rate": 0.0,
+  "best_win_streak": 0,
+  "worst_loss_streak": 0,
+  "best_day": {
+    "date": null,
+    "pnl": 0.0
+  },
+  "worst_day": {
+    "date": null,
+    "pnl": 0.0
+  },
+  "max_drawdown_pct": 0.0,
+  "daily_sharpe": 0.0,
+  "total_return_pct": 0.0
+}
