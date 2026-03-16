@@ -125,6 +125,8 @@ async def run_sim_entries(
         except Exception:
             pass
 
+    _fvg_cache: dict[str, dict] = {}  # per-symbol FVG cache (computed once, not per-sim)
+
     for sim_id in _ordered_ids:
         profile = _PROFILES[sim_id]
         _sim_lock = get_sim_lock(sim_id)
@@ -135,7 +137,15 @@ async def run_sim_entries(
 
             signal_mode = sim.profile.get("signal_mode", "TREND_PULLBACK")
 
-            # ── 0. Blocked-session gate (sim-level, checked once) ─────────
+            # ── 0. Enabled gate — skip sims explicitly disabled ───────────
+            if profile.get("enabled") is False:
+                results.append({
+                    "sim_id": sim_id, "status": "skipped",
+                    "reason": "disabled", "signal_mode": signal_mode,
+                })
+                continue
+
+            # ── 0a. Blocked-session gate (sim-level, checked once) ────────
             blocked_sessions = profile.get("blocked_sessions")
             if blocked_sessions and time_of_day_bucket:
                 if isinstance(blocked_sessions, list) and time_of_day_bucket in blocked_sessions:
@@ -473,10 +483,14 @@ async def run_sim_entries(
                         for _ok, _ov in options_data.items():
                             if isinstance(_ov, (int, float, bool)):
                                 feature_snapshot[f"opts_{_ok}"] = _ov
-                    # FVG features
+                    # FVG features (cached per symbol, computed in thread)
                     try:
-                        from analytics.fair_value_gaps import compute_fvg_features
-                        _fvg = compute_fvg_features(sim_df)
+                        if _trade_symbol not in _fvg_cache:
+                            from analytics.fair_value_gaps import compute_fvg_features
+                            _fvg_cache[_trade_symbol] = await asyncio.to_thread(
+                                compute_fvg_features, sim_df
+                            )
+                        _fvg = _fvg_cache[_trade_symbol]
                         for _fk, _fv in _fvg.items():
                             if isinstance(_fv, (int, float, bool)):
                                 feature_snapshot[_fk] = _fv

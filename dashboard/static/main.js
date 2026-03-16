@@ -327,8 +327,9 @@ function renderLeaderboard(sims) {
 function updateWallPoster(sims) {
   const el = document.getElementById('poster-text');
   if (!el) return;
-  const totalPnl    = sims.reduce((s, x) => s + (x.pnl_dollars || 0), 0);
-  const activeCount = sims.filter(x => x.open_count > 0).length;
+  const enabled     = sims.filter(x => !x.is_disabled && x.sim_id !== 'SIM00');
+  const totalPnl    = enabled.reduce((s, x) => s + (x.pnl_dollars || 0), 0);
+  const activeCount = enabled.filter(x => x.open_count > 0).length;
   const sign = totalPnl >= 0 ? '+' : '';
   const pnlColor = totalPnl > 0 ? '#22c55e' : totalPnl < 0 ? '#ef4444' : '#6b4226';
   el.style.color = pnlColor;

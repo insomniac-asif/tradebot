@@ -119,13 +119,17 @@ def backfill_missed_predictions() -> dict:
         if not sym_dfs:
             return {"total_slots": 0, "predictions_generated": 0, "reason": "no_dataframes"}
 
-        # Generate predictions for missing slots
+        # Generate predictions for missing slots.
+        # Skip slots where the sliced dataframe hasn't changed (same last bar
+        # as previous slot) — this happens when the bot was down and no new
+        # bars were recorded, producing identical duplicate predictions.
         from signals.predictor import make_prediction
         from signals.regime import get_regime
         from signals.volatility import volatility_state
         from analytics.prediction_stats import log_prediction
 
         total_predictions = 0
+        _last_bar_idx: dict[str, int] = {}  # track last bar count per symbol
 
         for slot_time in slots:
             for sym, sym_df in sym_dfs.items():
@@ -153,6 +157,14 @@ def backfill_missed_predictions() -> dict:
 
                     if sliced is None or len(sliced) < 30:
                         continue
+
+                    # Skip if sliced df hasn't grown since last slot (no new bars
+                    # means bot was down — prediction would be identical)
+                    bar_count = len(sliced)
+                    prev_count = _last_bar_idx.get(sym, -1)
+                    if bar_count == prev_count:
+                        continue
+                    _last_bar_idx[sym] = bar_count
 
                     pred = make_prediction(10, sliced)
                     if pred is None:

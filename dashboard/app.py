@@ -1082,6 +1082,8 @@ async def equity_curve():
             continue
         if not re.match(r'^SIM\d+$', str(sid).upper()):
             continue
+        if str(sid).upper() == "SIM00" or _is_sim_disabled(profile):
+            continue
         data = _load_sim(sid)
         if not data:
             continue
@@ -1102,14 +1104,15 @@ async def equity_curve():
             running += float(pnl)
             points[day] = points.get(day, 0) + float(pnl)
 
-    # Compute current total balance across alive sims (always, even with no trades)
-    # Sims without JSON files yet count as alive at their starting balance.
+    # Compute current total balance across enabled, alive sims (excludes disabled + SIM00)
     total_balance = 0
     alive_count = 0
     for sid, profile in config.items():
         if str(sid).startswith("_") or not isinstance(profile, dict):
             continue
         if not re.match(r'^SIM\d+$', str(sid).upper()):
+            continue
+        if str(sid).upper() == "SIM00" or _is_sim_disabled(profile):
             continue
         data = _load_sim(sid)
         if data:
