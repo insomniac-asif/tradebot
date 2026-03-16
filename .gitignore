@@ -41,6 +41,9 @@ data/adaptive_tuning_log.json
 data/analytics.db
 data/analytics.db-wal
 data/analytics.db-shm
+data/projects.db
+data/projects.db-wal
+data/projects.db-shm
 
 # ── Generated chart images ────────────────────────────────────────
 charts/*.png
