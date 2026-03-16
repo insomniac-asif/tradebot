@@ -51,6 +51,7 @@ from dashboard.app_helpers import (
 )
 from dashboard.app_helpers2 import _handle_get_sim
 from dashboard.api_intelligence import router as intelligence_router
+from dashboard.api_projects import router as projects_router
 
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -64,13 +65,16 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 @asynccontextmanager
 async def lifespan(app):
+    from core.projects_db import init_projects_db
+    init_projects_db()
     task = asyncio.create_task(_cleanup_trade_files())
     yield
     task.cancel()
 
 app = FastAPI(title="SpyBot Dashboard", docs_url=None, redoc_url=None, lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
 app.include_router(intelligence_router)
+app.include_router(projects_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 

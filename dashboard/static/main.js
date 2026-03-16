@@ -252,8 +252,9 @@ function navTo(section, btn) {
     greeks: '#section-greeks',
     intel: '#section-intel',
     grade: '#section-grade',
+    projects: '#section-projects',
   };
-  const hiddenPanels = ['section-backtest', 'section-greeks', 'section-intel', 'section-grade'];
+  const hiddenPanels = ['section-backtest', 'section-greeks', 'section-intel', 'section-grade', 'section-projects'];
   const mainSections = ['section-charts', 'section-trades', 'section-roster'];
 
   // Handle hidden panel tabs (backtest, greeks)
@@ -274,6 +275,7 @@ function navTo(section, btn) {
     if (section === 'backtest') renderBacktestTab();
     if (section === 'greeks') fetchGreeksData();
     if (section === 'intel') fetchIntelData();
+    if (section === 'projects') fetchProjectsData();
     return;
   } else {
     hiddenPanels.forEach(id => {
@@ -5559,6 +5561,170 @@ async function fetchPredictorChart() {
     }
   } catch (e) {
     console.warn('Predictor chart error:', e);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// PROJECTS HUB TAB
+// ═══════════════════════════════════════════════════════════════════
+
+let _projectsData = null;
+let _projectsPnlChart = null;
+
+const PROJECT_LABELS = { qqq: 'QQQbot', crypto: 'Crypto', futures: 'Futures' };
+const PROJECT_COLORS = { qqq: '#4fc3f7', crypto: '#ffd54f', futures: '#81c784' };
+
+async function fetchProjectsData() {
+  try {
+    const [health, status, trades, signals, snapshots] = await Promise.all([
+      fetch('/api/projects/health').then(r => r.json()),
+      fetch('/api/projects/status').then(r => r.json()),
+      fetch('/api/projects/trades?limit=100').then(r => r.json()),
+      fetch('/api/projects/signals?limit=50').then(r => r.json()),
+      fetch('/api/projects/snapshots?limit=300').then(r => r.json()),
+    ]);
+    _projectsData = { health, status, trades, signals, snapshots };
+    renderProjectCards(health, status);
+    renderProjectTrades();
+    renderProjectSignals(signals);
+    renderProjectsPnlChart(snapshots);
+    const alive = Object.values(health).filter(h => h.alive).length;
+    const badge = document.getElementById('projects-status-badge');
+    if (badge) badge.textContent = `${alive}/${Object.keys(health).length} online`;
+  } catch (e) {
+    console.warn('Projects fetch error:', e);
+  }
+}
+
+function renderProjectCards(health, status) {
+  const el = document.getElementById('projects-cards');
+  if (!el) return;
+  let html = '';
+  for (const proj of ['qqq', 'crypto', 'futures']) {
+    const h = health[proj] || {};
+    const s = (status[proj] || {}).snapshot || {};
+    const alive = h.alive;
+    const statusClass = alive ? 'proj-online' : 'proj-offline';
+    const statusDot = alive ? '🟢' : '🔴';
+    const lastSeen = h.last_seen ? new Date(h.last_seen).toLocaleString() : 'Never';
+    const dailyPnl = s.daily_pnl != null ? `$${s.daily_pnl >= 0 ? '+' : ''}${Number(s.daily_pnl).toFixed(2)}` : '--';
+    const cumPnl = s.cumulative_pnl != null ? `$${s.cumulative_pnl >= 0 ? '+' : ''}${Number(s.cumulative_pnl).toFixed(2)}` : '--';
+    const wr = s.win_rate != null ? `${Number(s.win_rate).toFixed(1)}%` : '--';
+    const openPos = s.open_positions != null ? s.open_positions : '--';
+    const totalTrades = s.total_trades != null ? s.total_trades : '--';
+    const color = PROJECT_COLORS[proj];
+    html += `
+      <div class="proj-card ${statusClass}" style="border-left:3px solid ${color}">
+        <div class="proj-card-header">
+          <span class="proj-card-name" style="color:${color}">${statusDot} ${PROJECT_LABELS[proj]}</span>
+          <span class="proj-card-status">${alive ? 'Online' : 'Offline'}</span>
+        </div>
+        <div class="proj-card-metrics">
+          <div class="proj-metric"><span class="proj-metric-label">Daily P&L</span><span class="proj-metric-val ${s.daily_pnl >= 0 ? 'val-pos' : 'val-neg'}">${dailyPnl}</span></div>
+          <div class="proj-metric"><span class="proj-metric-label">Total P&L</span><span class="proj-metric-val ${s.cumulative_pnl >= 0 ? 'val-pos' : 'val-neg'}">${cumPnl}</span></div>
+          <div class="proj-metric"><span class="proj-metric-label">Win Rate</span><span class="proj-metric-val">${wr}</span></div>
+          <div class="proj-metric"><span class="proj-metric-label">Open</span><span class="proj-metric-val">${openPos}</span></div>
+          <div class="proj-metric"><span class="proj-metric-label">Trades</span><span class="proj-metric-val">${totalTrades}</span></div>
+        </div>
+        <div class="proj-card-footer">Last seen: ${lastSeen}</div>
+      </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderProjectTrades() {
+  if (!_projectsData) return;
+  const filter = document.getElementById('projects-trade-filter')?.value || '';
+  const tbody = document.getElementById('projects-trades-tbody');
+  if (!tbody) return;
+  let trades = _projectsData.trades || [];
+  if (filter) trades = trades.filter(t => t.project === filter);
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:0.5">No trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.slice(0, 50).map(t => {
+    const pnl = t.pnl != null ? Number(t.pnl).toFixed(2) : '--';
+    const cls = t.pnl >= 0 ? 'val-pos' : 'val-neg';
+    const ts = t.timestamp ? new Date(t.timestamp).toLocaleString() : '--';
+    const color = PROJECT_COLORS[t.project] || '#999';
+    return `<tr>
+      <td>${ts}</td>
+      <td style="color:${color}">${PROJECT_LABELS[t.project] || t.project}</td>
+      <td>${t.instrument || '--'}</td>
+      <td>${t.direction || '--'}</td>
+      <td class="${cls}">$${pnl}</td>
+      <td>${t.strategy || '--'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderProjectSignals(signals) {
+  const el = document.getElementById('projects-signals-list');
+  if (!el) return;
+  if (!signals || !signals.length) {
+    el.innerHTML = '<div style="text-align:center;opacity:0.5;padding:20px">No signals yet</div>';
+    return;
+  }
+  el.innerHTML = signals.slice(0, 30).map(s => {
+    const ts = s.timestamp ? new Date(s.timestamp).toLocaleString() : '--';
+    const color = PROJECT_COLORS[s.project] || '#999';
+    const conf = s.confidence != null ? `${(Number(s.confidence) * 100).toFixed(0)}%` : '';
+    const dirCls = s.direction === 'BULLISH' ? 'val-pos' : s.direction === 'BEARISH' ? 'val-neg' : '';
+    return `<div class="proj-signal-row">
+      <span class="proj-signal-time">${ts}</span>
+      <span style="color:${color}">${PROJECT_LABELS[s.project] || s.project}</span>
+      <span>${s.signal_type || 'signal'}</span>
+      <span>${s.instrument || '--'}</span>
+      <span class="${dirCls}">${s.direction || '--'}</span>
+      <span>${conf}</span>
+      <span style="opacity:0.6">${s.source || ''}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderProjectsPnlChart(snapshots) {
+  const el = document.getElementById('projects-pnl-chart');
+  if (!el || typeof ApexCharts === 'undefined') return;
+  // Group snapshots by project, build cumulative P&L series
+  const series = [];
+  for (const proj of ['qqq', 'crypto', 'futures']) {
+    const projSnaps = (snapshots || [])
+      .filter(s => s.project === proj)
+      .sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    if (!projSnaps.length) continue;
+    series.push({
+      name: PROJECT_LABELS[proj],
+      color: PROJECT_COLORS[proj],
+      data: projSnaps.map(s => ({
+        x: new Date(s.timestamp).getTime(),
+        y: Number(s.cumulative_pnl || 0),
+      })),
+    });
+  }
+  if (!series.length) {
+    el.innerHTML = '<div style="text-align:center;opacity:0.5;padding:40px">No P&L data yet</div>';
+    return;
+  }
+  const opts = {
+    chart: { type: 'line', height: 280, background: 'transparent', toolbar: { show: false },
+      zoom: { enabled: true } },
+    series,
+    colors: series.map(s => s.color),
+    stroke: { width: 2, curve: 'smooth' },
+    xaxis: { type: 'datetime', labels: { style: { colors: '#999', fontSize: '10px' } } },
+    yaxis: { labels: { style: { colors: '#999', fontSize: '10px' },
+      formatter: v => '$' + v.toFixed(0) } },
+    tooltip: { theme: 'dark', x: { format: 'MMM dd HH:mm' } },
+    legend: { labels: { colors: '#ccc' }, position: 'top' },
+    grid: { borderColor: '#333' },
+    theme: { mode: 'dark' },
+  };
+  if (_projectsPnlChart) {
+    _projectsPnlChart.updateOptions(opts);
+  } else {
+    _projectsPnlChart = new ApexCharts(el, opts);
+    _projectsPnlChart.render();
   }
 }
 

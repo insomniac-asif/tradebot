@@ -681,3 +681,15 @@ async def weight_reoptimizer_loop():
         except Exception:
             logging.exception("weight_reoptimizer_error")
         await asyncio.sleep(30)
+
+
+async def project_reporter_loop():
+    """Sync QQQbot data to projects.db every 2 minutes."""
+    await asyncio.sleep(60)  # initial delay
+    while True:
+        try:
+            from core.project_reporter import full_sync
+            await asyncio.to_thread(full_sync)
+        except Exception:
+            logging.exception("project_reporter_loop_error")
+        await asyncio.sleep(120)

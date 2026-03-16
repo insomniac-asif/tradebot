@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=20260313s">
+<link rel="stylesheet" href="/static/style.css?v=20260315p">
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
 </head>
 <body>
@@ -39,6 +39,7 @@
   <button class="subnav-tab" onclick="navTo('greeks',this)">⚡<span class="tab-label"> Greeks</span></button>
   <button class="subnav-tab" onclick="navTo('intel',this)">🧠<span class="tab-label"> Intel</span></button>
   <button class="subnav-tab" onclick="navTo('grade',this)">📝<span class="tab-label"> Grade</span></button>
+  <button class="subnav-tab" onclick="navTo('projects',this)">🌐<span class="tab-label"> Projects</span></button>
 </nav>
 
 <!-- ══════════════════════════════════════ FRONT WALL: CHALKBOARD -->
@@ -524,6 +525,59 @@
   </div>
 </div>
 
+<!-- ══════════════════════════════════════ PROJECTS HUB -->
+<div class="classroom-floor hidden" id="section-projects">
+  <div class="floor-header">
+    <span class="roster-label">🌐 PROJECTS HUB</span>
+    <span class="roster-count" id="projects-status-badge">Loading...</span>
+  </div>
+  <div style="padding:8px 12px">
+    <!-- Health Cards -->
+    <div class="projects-cards" id="projects-cards"></div>
+
+    <!-- Combined P&L Chart -->
+    <div class="greeks-section" id="projects-pnl-section">
+      <div class="greeks-section-title" style="cursor:pointer" onclick="toggleSection('projects-pnl-body')">
+        📈 Combined P&L
+      </div>
+      <div id="projects-pnl-body">
+        <div id="projects-pnl-chart" style="min-height:280px"></div>
+      </div>
+    </div>
+
+    <!-- Recent Trades -->
+    <div class="greeks-section" id="projects-trades-section">
+      <div class="greeks-section-title" style="cursor:pointer" onclick="toggleSection('projects-trades-body')">
+        📋 Recent Trades
+        <select id="projects-trade-filter" onchange="renderProjectTrades()" style="margin-left:12px;font-size:11px;padding:2px 6px;background:#2a2a3a;color:#e8e8f0;border:1px solid #555;border-radius:4px">
+          <option value="">All Projects</option>
+          <option value="qqq">QQQbot</option>
+          <option value="crypto">Crypto</option>
+          <option value="futures">Futures</option>
+        </select>
+      </div>
+      <div id="projects-trades-body">
+        <table class="greeks-table" id="projects-trades-table">
+          <thead><tr>
+            <th>Time</th><th>Project</th><th>Instrument</th><th>Direction</th><th>P&L</th><th>Strategy</th>
+          </tr></thead>
+          <tbody id="projects-trades-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Signal Feed -->
+    <div class="greeks-section" id="projects-signals-section">
+      <div class="greeks-section-title" style="cursor:pointer" onclick="toggleSection('projects-signals-body')">
+        ⚡ Signal Feed
+      </div>
+      <div id="projects-signals-body">
+        <div id="projects-signals-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════════════════════════════ SIM INSPECTOR DRAWER -->
 <div class="sim-drawer" id="sim-drawer">
   <div class="drawer-header">
@@ -551,6 +605,6 @@
 </div>
 <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
 
-<script src="/static/main.js?v=20260313s"></script>
+<script src="/static/main.js?v=20260315p"></script>
 </body>
 </html>
