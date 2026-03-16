@@ -450,11 +450,12 @@ function renderTeacherDesk(sims) {
   const panel = document.getElementById('teacher-panel');
   if (!panel || !sims.length) return;
 
-  const totalPnl    = sims.reduce((s, x) => s + (x.pnl_dollars || 0), 0);
-  const totalBal    = sims.reduce((s, x) => s + (x.balance || 0), 0);
-  const totalTrades = sims.reduce((s, x) => s + (x.total_trades || 0), 0);
-  const activeCount = sims.filter(x => x.open_count > 0).length;
-  const wrs         = sims.map(x => x.win_rate).filter(v => v != null && v !== '' && !isNaN(v));
+  const enabled     = sims.filter(x => !x.is_disabled && x.sim_id !== 'SIM00');
+  const totalPnl    = enabled.reduce((s, x) => s + (x.pnl_dollars || 0), 0);
+  const totalBal    = enabled.reduce((s, x) => s + (x.balance || 0), 0);
+  const totalTrades = enabled.reduce((s, x) => s + (x.total_trades || 0), 0);
+  const activeCount = enabled.filter(x => x.open_count > 0).length;
+  const wrs         = enabled.map(x => x.win_rate).filter(v => v != null && v !== '' && !isNaN(v));
   const avgWr       = wrs.length ? (wrs.reduce((a, b) => a + parseFloat(b), 0) / wrs.length) : null;
 
   const pnlSign  = totalPnl >= 0 ? '+' : '';
@@ -465,13 +466,13 @@ function renderTeacherDesk(sims) {
       <div class="teacher-desk-top">
         <div class="teacher-nameplate">INSTRUCTOR DESK · ACCOUNT SUMMARY</div>
         <div class="teacher-stats-row">
-          ${tdStat('Active Trades', activeCount + ' / ' + sims.length)}
+          ${tdStat('Active Traders', activeCount + ' / ' + enabled.length)}
           ${tdStat('Total Trades', totalTrades)}
           ${tdStat('Avg Win Rate', avgWr != null ? avgWr.toFixed(1) + '%' : '—')}
         </div>
         <div class="att-banner" style="margin-top:6px;display:flex;gap:6px">
-          <span class="att-pill active-pill">${activeCount} active</span>
-          <span class="att-pill">${sims.length - activeCount} idle</span>
+          <span class="att-pill active-pill">${activeCount} trading</span>
+          <span class="att-pill">${enabled.length - activeCount} idle</span>
         </div>
       </div>
     </div>
@@ -729,9 +730,9 @@ function renderDesks(sims) {
     return;
   }
 
-  const enabledSims = sims.filter(s => !s.is_disabled);
-  const activeCount = sims.filter(s => s.open_count > 0).length;
-  if (countEl) countEl.textContent = `${enabledSims.length} students · ${activeCount} active`;
+  const enabledSims = sims.filter(s => !s.is_disabled && s.sim_id !== 'SIM00');
+  const activeTraders = enabledSims.filter(s => s.open_count > 0).length;
+  if (countEl) countEl.textContent = `Active Traders ${activeTraders} / ${enabledSims.length}`;
 
   grid.innerHTML = '';
 
@@ -751,10 +752,10 @@ function renderDesks(sims) {
     if (groups[k]) groups[k].sort((a, b) => (b.win_rate ?? -1) - (a.win_rate ?? -1));
   });
 
-  function appendRow(label, group, extraClass) {
+  function appendRow(label, count, group, extraClass) {
     const labelEl = document.createElement('div');
     labelEl.className = 'strategy-label' + (extraClass ? ' ' + extraClass : '');
-    labelEl.textContent = label;
+    labelEl.textContent = `${label} (${count})`;
     grid.appendChild(labelEl);
 
     const rowEl = document.createElement('div');
@@ -764,17 +765,17 @@ function renderDesks(sims) {
   }
 
   // Live sim first — right next to teacher's desk
-  if (liveSim) appendRow('LIVE', [liveSim], 'strategy-label-live');
+  if (liveSim) appendRow('LIVE', 1, [liveSim], 'strategy-label-live');
 
   STRATEGY_ORDER.forEach(key => {
     const group = groups[key];
     if (!group || !group.length) return;
-    appendRow(STRATEGY_LABEL[key] || key.toUpperCase(), group, '');
+    appendRow(STRATEGY_LABEL[key] || key.toUpperCase(), group.length, group, '');
   });
 
   // Disabled sims at the bottom — on the bench / asleep
   if (sleepSims.length) {
-    appendRow('💤 ON THE BENCH', sleepSims, 'strategy-label-bench');
+    appendRow('ON THE BENCH', sleepSims.length, sleepSims, 'strategy-label-bench');
   }
 }
 
