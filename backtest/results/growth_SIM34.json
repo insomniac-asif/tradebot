@@ -1,0 +1,36 @@
+{
+  "sim_id": "SIM34",
+  "start_capital": 3000.0,
+  "end_capital": 2993.57,
+  "target_reached": false,
+  "milestones": {
+    "1000": {
+      "date": "2025-11-28",
+      "trades": 1,
+      "days": 0
+    },
+    "2500": {
+      "date": "2025-11-28",
+      "trades": 1,
+      "days": 0
+    },
+    "5000": null
+  },
+  "deaths": 0,
+  "pdt_violations": 0,
+  "total_trades": 1,
+  "win_rate": 0.0,
+  "best_win_streak": 0,
+  "worst_loss_streak": 1,
+  "best_day": {
+    "date": "2025-11-28",
+    "pnl": -6.43
+  },
+  "worst_day": {
+    "date": "2025-11-28",
+    "pnl": -6.43
+  },
+  "max_drawdown_pct": 0.04,
+  "daily_sharpe": 0.0,
+  "total_return_pct": -0.21
+}

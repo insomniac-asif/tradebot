@@ -1,0 +1,67 @@
+[
+  {
+    "pattern_id": "SIM06_open_30_Tue",
+    "sim_id": "SIM06",
+    "description": "during second 15min (9:45-10:00) on Tues",
+    "filters": {
+      "time_of_day": "open_30",
+      "day_of_week": "Tue"
+    },
+    "win_rate": 0.6667,
+    "profit_factor": 4.477,
+    "avg_pnl": 36.27,
+    "total_trades": 15,
+    "avg_hold_minutes": 214.5,
+    "trades_per_week": 0.13,
+    "sample_trades": [
+      {
+        "entry_time": "2024-09-03 09:47:00",
+        "exit_time": "2024-09-03 13:13:00",
+        "pnl": 168.52
+      },
+      {
+        "entry_time": "2024-11-12 09:59:00",
+        "exit_time": "2024-11-12 12:02:00",
+        "pnl": 120.28
+      },
+      {
+        "entry_time": "2024-07-30 09:51:00",
+        "exit_time": "2024-07-30 11:06:00",
+        "pnl": 117.21
+      },
+      {
+        "entry_time": "2025-08-19 09:57:00",
+        "exit_time": "2025-08-19 14:57:00",
+        "pnl": 89.88
+      },
+      {
+        "entry_time": "2024-01-30 09:55:00",
+        "exit_time": "2024-01-30 15:58:00",
+        "pnl": 74.88
+      }
+    ],
+    "recurrence_analysis": {
+      "primary_interval": "monthly",
+      "avg_gap_minutes": 60479.5,
+      "regularity_score": 0.279,
+      "hour_distribution": {
+        "9": 15
+      },
+      "day_distribution": {
+        "Tue": 15
+      },
+      "month_distribution": {
+        "Jan": 2,
+        "Feb": 1,
+        "Mar": 1,
+        "May": 2,
+        "Jul": 5,
+        "Aug": 1,
+        "Sep": 2,
+        "Nov": 1
+      },
+      "trend": "fading",
+      "total_occurrences": 15
+    }
+  }
+]

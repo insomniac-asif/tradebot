@@ -1,0 +1,76 @@
+[
+  {
+    "pattern_id": "SIM16_PUT_short",
+    "sim_id": "SIM16",
+    "description": "PUT trades held short",
+    "filters": {
+      "direction": "PUT",
+      "hold_bucket": "short"
+    },
+    "win_rate": 0.6452,
+    "profit_factor": 3.0261,
+    "avg_pnl": 27.5,
+    "total_trades": 31,
+    "avg_hold_minutes": 10.6,
+    "trades_per_week": 0.28,
+    "sample_trades": [
+      {
+        "entry_time": "2024-10-21 09:35:00",
+        "exit_time": "2024-10-21 09:44:00",
+        "pnl": 143.66
+      },
+      {
+        "entry_time": "2024-04-01 09:31:00",
+        "exit_time": "2024-04-01 09:38:00",
+        "pnl": 95.16
+      },
+      {
+        "entry_time": "2024-09-25 09:31:00",
+        "exit_time": "2024-09-25 09:46:00",
+        "pnl": 95.16
+      },
+      {
+        "entry_time": "2024-09-24 10:00:00",
+        "exit_time": "2024-09-24 10:11:00",
+        "pnl": 94.25
+      },
+      {
+        "entry_time": "2024-04-22 09:31:00",
+        "exit_time": "2024-04-22 09:42:00",
+        "pnl": 93.33
+      }
+    ],
+    "recurrence_analysis": {
+      "primary_interval": "monthly",
+      "avg_gap_minutes": 37248.2,
+      "regularity_score": 0.0,
+      "hour_distribution": {
+        "9": 26,
+        "10": 3,
+        "11": 2
+      },
+      "day_distribution": {
+        "Mon": 6,
+        "Tue": 6,
+        "Wed": 6,
+        "Thu": 6,
+        "Fri": 7
+      },
+      "month_distribution": {
+        "Jan": 3,
+        "Feb": 3,
+        "Mar": 4,
+        "Apr": 3,
+        "May": 4,
+        "Jun": 4,
+        "Jul": 1,
+        "Aug": 1,
+        "Sep": 4,
+        "Oct": 3,
+        "Nov": 1
+      },
+      "trend": "fading",
+      "total_occurrences": 31
+    }
+  }
+]

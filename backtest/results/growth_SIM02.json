@@ -1,0 +1,36 @@
+{
+  "sim_id": "SIM02",
+  "start_capital": 3000.0,
+  "end_capital": 148.64,
+  "target_reached": false,
+  "milestones": {
+    "1000": {
+      "date": "2024-01-18",
+      "trades": 1,
+      "days": 0
+    },
+    "2500": {
+      "date": "2024-01-18",
+      "trades": 1,
+      "days": 0
+    },
+    "5000": null
+  },
+  "deaths": 1,
+  "pdt_violations": 307,
+  "total_trades": 673,
+  "win_rate": 0.2912,
+  "best_win_streak": 4,
+  "worst_loss_streak": 19,
+  "best_day": {
+    "date": "2024-10-01",
+    "pnl": 330.26
+  },
+  "worst_day": {
+    "date": "2024-02-23",
+    "pnl": -88.82
+  },
+  "max_drawdown_pct": 0.9505,
+  "daily_sharpe": -4.27,
+  "total_return_pct": -95.05
+}
