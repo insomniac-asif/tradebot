@@ -56,6 +56,8 @@ class FreshnessMonitor:
         self.supervisor = risk_supervisor
         self._alerted: dict[str, bool] = {}
         self._last_heartbeat: float = 0.0
+        self._start_time: float = time.time()
+        self._broker_ever_ok: bool = False  # set True after first successful ping
 
     async def _ping_broker(self) -> bool:
         """Async broker heartbeat. Stamps health on success."""
@@ -66,6 +68,7 @@ class FreshnessMonitor:
         ok = await asyncio.to_thread(_broker_heartbeat_sync)
         if ok:
             self.supervisor.update_broker_health(time.time())
+            self._broker_ever_ok = True
         return ok
 
     async def run(self, send_alert_fn) -> None:
@@ -109,7 +112,10 @@ class FreshnessMonitor:
                     continue
 
                 # ── Broker panic ──────────────────────────────────────────
+                # Skip broker panic if we've never had a successful ping yet
+                # (grace period — heartbeat needs time to complete first call)
                 if (broker_age > _BROKER_PANIC_SEC
+                        and self._broker_ever_ok
                         and current != SystemState.PANIC_LOCKDOWN
                         and current != SystemState.BOOTING
                         and current != SystemState.RECONCILING):
