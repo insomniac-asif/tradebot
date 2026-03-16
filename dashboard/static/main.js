@@ -329,12 +329,19 @@ function updateWallPoster(sims) {
   if (!el) return;
   const enabled     = sims.filter(x => !x.is_disabled && x.sim_id !== 'SIM00');
   const totalPnl    = enabled.reduce((s, x) => s + (x.pnl_dollars || 0), 0);
+  const totalUpnl   = enabled.reduce((s, x) => s + (x.upnl || 0), 0);
   const activeCount = enabled.filter(x => x.open_count > 0).length;
   const sign = totalPnl >= 0 ? '+' : '';
   const pnlColor = totalPnl > 0 ? '#22c55e' : totalPnl < 0 ? '#ef4444' : '#6b4226';
   el.style.color = pnlColor;
+  let upnlLine = '';
+  if (activeCount > 0 && Math.abs(totalUpnl) > 0.01) {
+    const uSign = totalUpnl >= 0 ? '+' : '';
+    const uColor = totalUpnl >= 0 ? '#22c55e' : '#ef4444';
+    upnlLine = `<br><span style="font-size:60%;color:${uColor}">UPNL ${uSign}$${Math.abs(totalUpnl).toFixed(0)}</span>`;
+  }
   if (activeCount > 0) {
-    el.innerHTML = `${activeCount} OPEN<br>${sign}$${Math.abs(totalPnl).toFixed(0)}`;
+    el.innerHTML = `${activeCount} OPEN<br>${sign}$${Math.abs(totalPnl).toFixed(0)}${upnlLine}`;
   } else {
     el.innerHTML = `P&amp;L<br>${sign}$${Math.abs(totalPnl).toFixed(0)}`;
   }
@@ -707,6 +714,10 @@ function getPersonality(signalMode) {
 
 function buildBubbleText(sim) {
   if (sim.is_disabled) return 'z z z…';
+  if (sim.open_count > 0 && sim.upnl != null) {
+    const uSign = sim.upnl >= 0 ? '+' : '-';
+    return `📈 ${uSign}$${fmt2(Math.abs(sim.upnl))}`;
+  }
   if (sim.open_count > 0) return '📈 In trade!';
   if (sim.pnl_dollars > 50)  return '🎉 +$' + fmt2(sim.pnl_dollars);
   if (sim.pnl_dollars < -50) return '😬 -$' + fmt2(Math.abs(sim.pnl_dollars));
@@ -5319,6 +5330,16 @@ async function renderEquityCurve() {
       const aliveLabel = data.alive_count ? ` (${data.alive_count} sims)` : '';
       balEl.textContent = `$${data.total_balance.toLocaleString()}${aliveLabel}`;
       balEl.style.color = data.series.length && data.series[data.series.length - 1].pnl < 0 ? 'var(--loss-text)' : 'var(--win-text)';
+      // Show classroom UPNL from cached sims data
+      if (simsCache && simsCache.length) {
+        const en = simsCache.filter(x => !x.is_disabled && x.sim_id !== 'SIM00');
+        const classUpnl = en.reduce((s, x) => s + (x.upnl || 0), 0);
+        if (Math.abs(classUpnl) > 0.01) {
+          const uSign = classUpnl >= 0 ? '+' : '';
+          const uColor = classUpnl >= 0 ? 'var(--win-text)' : 'var(--loss-text)';
+          balEl.innerHTML += ` <span style="font-size:75%;color:${uColor}">UPNL ${uSign}$${Math.abs(classUpnl).toFixed(0)}</span>`;
+        }
+      }
     }
 
     if (!data.series || !data.series.length) {

@@ -223,16 +223,42 @@ def _compute_stats(sim_id: str, data: dict, profile: dict) -> dict:
         if dd > max_dd:
             max_dd = dd
 
-    # Current open trade summaries (all open positions)
+    # Current open trade summaries (all open positions) with UPNL estimate
     open_summary = None
     open_summaries = []
+    total_upnl = 0.0
     for t in open_trades:
+        entry_price = _safe_float(t.get("entry_price", 0))
+        qty = int(t.get("qty", 1) or 1)
+        delta = _safe_float(t.get("delta_at_entry", 0))
+        direction = (t.get("direction") or "").upper()
+        underlying = (t.get("symbol") or _parse_underlying(t.get("option_symbol", ""))).upper()
+        # Estimate UPNL: delta * underlying_move * qty * 100
+        upnl = None
+        upnl_pct = None
+        try:
+            from core.data_service import get_symbol_dataframe
+            _udf = get_symbol_dataframe(underlying)
+            if _udf is not None and len(_udf) > 0:
+                current_underlying = float(_udf.iloc[-1]["close"])
+                strike = _safe_float(t.get("strike", 0))
+                if delta and entry_price > 0 and strike > 0:
+                    # entry underlying ≈ strike (ATM assumption for simplicity)
+                    entry_underlying = strike
+                    underlying_move = current_underlying - entry_underlying
+                    option_move = delta * underlying_move
+                    est_current = max(entry_price + option_move, 0.01)
+                    upnl = round((est_current - entry_price) * qty * 100, 2)
+                    upnl_pct = round((est_current - entry_price) / entry_price * 100, 2) if entry_price > 0 else None
+                    total_upnl += upnl
+        except Exception:
+            pass
         s = {
             "direction": t.get("direction"),
             "option_symbol": t.get("option_symbol"),
-            "symbol": t.get("symbol") or _parse_underlying(t.get("option_symbol", "")),
-            "entry_price": t.get("entry_price"),
-            "qty": t.get("qty"),
+            "symbol": underlying,
+            "entry_price": entry_price,
+            "qty": qty,
             "entry_time": t.get("entry_time"),
             "strike": t.get("strike"),
             "expiry": t.get("expiry"),
@@ -240,6 +266,8 @@ def _compute_stats(sim_id: str, data: dict, profile: dict) -> dict:
             "time_bucket": t.get("time_of_day_bucket"),
             "signal_mode": t.get("signal_mode"),
             "structure_score": t.get("structure_score"),
+            "upnl": upnl,
+            "upnl_pct": upnl_pct,
         }
         open_summaries.append(s)
     if open_summaries:
@@ -307,6 +335,7 @@ def _compute_stats(sim_id: str, data: dict, profile: dict) -> dict:
         "daily_loss": round(daily_loss, 2),
         "open_count": len(open_trades),
         "open_trade": open_summary,
+        "upnl": round(total_upnl, 2) if open_trades else None,
         "open_trades": open_summaries,
         "best_trade": round(best, 2) if best is not None else None,
         "worst_trade": round(worst, 2) if worst is not None else None,
