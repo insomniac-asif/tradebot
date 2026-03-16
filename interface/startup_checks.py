@@ -175,6 +175,14 @@ def run_startup_phase_gates():
                 "Alpaca connectivity OK: status=%s equity=$%s",
                 _acct.status, _acct.equity,
             )
+            # Stamp broker health at startup so freshness monitor doesn't
+            # trigger PANIC_LOCKDOWN before the first heartbeat cycle
+            try:
+                import time as _t
+                from core.singletons import RISK_SUPERVISOR
+                RISK_SUPERVISOR.update_broker_health(_t.time())
+            except Exception:
+                pass
         except Exception as e:
             errors.append(f"alpaca_connectivity_failed:{e}")
             logging.error("ALPACA CONNECTIVITY FAILED: %s", e)
