@@ -93,8 +93,9 @@ workspace/daily_logs/*.md
 runbot.sh
 start_recorder.sh
 
-# ── Backtest cache ────────────────────────────────────────────────
+# ── Backtest cache and results ─────────────────────────────────────
 backtest/cache/
+backtest/results/
 
 # ── Research outputs ──────────────────────────────────────────────
 research/backtest_results.json
