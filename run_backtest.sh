@@ -1,79 +1,89 @@
 #!/usr/bin/env bash
-# run_backtest.sh — Standalone backtest runner with logging and memory tracking
+# run_backtest.sh — Run backtests on changed sims with progress tracking
 #
-# Usage:
-#   ./run_backtest.sh --start 2024-06-01 --end 2024-12-31
-#   ./run_backtest.sh --start 2024-06-01 --end 2024-12-31 --sims SIM03 SIM11
-#   ./run_backtest.sh --start 2024-01-01 --end 2024-12-31 --all-sims --adaptive
-#
-# Available backtest modules:
-#   backtest.runner          Main backtest engine (--start, --end, --sims, --symbol, etc.)
-#   backtest.optimizer       Parameter optimizer (--sim SIM_ID or --all)
-#   research.walk_forward    Walk-forward analysis (--sim SIM_ID, --sweep)
-#   research.pattern_pipeline Pattern discovery (--sim SIM_ID)
-#
-# To use a different module:
-#   BACKTEST_MODULE=backtest.optimizer ./run_backtest.sh --sim SIM03
-#   BACKTEST_MODULE=research.walk_forward ./run_backtest.sh --sim SIM03 --sweep
+# Monitor progress anytime:
+#   tail -f backtest/backtest_progress.log    (full output)
+#   cat backtest/backtest_status.txt          (one-line status)
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-# Activate venv
-if [ -f venv/bin/activate ]; then
-    source venv/bin/activate
-else
-    echo "ERROR: venv not found at $SCRIPT_DIR/venv"
-    echo "Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
-    exit 1
-fi
 
 # Load .env if present
 if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
-# Select module (default: backtest.runner)
-MODULE="${BACKTEST_MODULE:-backtest.runner}"
+# Activate venv
+if [ -f venv/Scripts/activate ]; then
+    source venv/Scripts/activate
+elif [ -f venv/bin/activate ]; then
+    source venv/bin/activate
+fi
 
-# Create logs directory
-mkdir -p logs
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-LOGFILE="logs/backtest_${TIMESTAMP}.log"
+LOGFILE="backtest/backtest_progress.log"
+STATUSFILE="backtest/backtest_status.txt"
 
-echo "═══════════════════════════════════════════════════════════"
-echo "  QQQBot Backtest Runner"
-echo "  Module:  $MODULE"
-echo "  Args:    $*"
-echo "  Log:     $LOGFILE"
-echo "  Started: $(date '+%Y-%m-%d %H:%M:%S')"
-echo "═══════════════════════════════════════════════════════════"
+SIMS=(SIM01 SIM02 SIM03 SIM09 SIM10 SIM12 SIM13 SIM14 SIM17 SIM19 SIM23 SIM24 SIM34 SIM35 SIM40 SIM41 SIM42 SIM43)
+SIM_COUNT=${#SIMS[@]}
+START="2024-01-01"
+END="2024-12-31"
 
+# Allow overriding sims and dates via args
+if [[ "${1:-}" == "--sims" ]]; then
+    shift
+    SIMS=()
+    while [[ $# -gt 0 && "${1:-}" != "--"* ]]; do
+        SIMS+=("$1"); shift
+    done
+    SIM_COUNT=${#SIMS[@]}
+fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --start) START="$2"; shift 2;;
+        --end)   END="$2"; shift 2;;
+        *)       shift;;
+    esac
+done
+
+echo "Backtest started: $(date)" > "$LOGFILE"
+echo "Sims: ${SIMS[*]}" >> "$LOGFILE"
+echo "Period: $START -> $END" >> "$LOGFILE"
+echo "========================================" >> "$LOGFILE"
+
+echo "RUNNING | 0/$SIM_COUNT complete | Started $(date '+%H:%M:%S')" > "$STATUSFILE"
+
+DONE=0
+FAILED=0
 START_SEC=$SECONDS
 
-# Run with /usr/bin/time for memory tracking (if available)
-if command -v /usr/bin/time &>/dev/null; then
-    /usr/bin/time -v python -m "$MODULE" "$@" 2>&1 | tee "$LOGFILE"
-    # /usr/bin/time output goes to stderr, capture it
-    {
-        echo ""
-        echo "═══════════════════════════════════════════════════════════"
-        ELAPSED=$(( SECONDS - START_SEC ))
-        printf "  Elapsed: %dh %dm %ds\n" $((ELAPSED/3600)) $((ELAPSED%3600/60)) $((ELAPSED%60))
-        echo "  Log:     $LOGFILE"
-        echo "═══════════════════════════════════════════════════════════"
-    } | tee -a "$LOGFILE"
-else
-    python -m "$MODULE" "$@" 2>&1 | tee "$LOGFILE"
-    {
-        echo ""
-        echo "═══════════════════════════════════════════════════════════"
-        ELAPSED=$(( SECONDS - START_SEC ))
-        printf "  Elapsed: %dh %dm %ds\n" $((ELAPSED/3600)) $((ELAPSED%3600/60)) $((ELAPSED%60))
-        echo "  Log:     $LOGFILE"
-        echo "  Note:    Install GNU time for memory stats: sudo apt install time"
-        echo "═══════════════════════════════════════════════════════════"
-    } | tee -a "$LOGFILE"
-fi
+for SIM in "${SIMS[@]}"; do
+    SIM_START=$SECONDS
+    echo "" >> "$LOGFILE"
+    echo ">>> Starting $SIM at $(date '+%H:%M:%S') ($DONE/$SIM_COUNT done)" >> "$LOGFILE"
+    echo "RUNNING $SIM | $DONE/$SIM_COUNT complete | Started $(date '+%H:%M:%S')" > "$STATUSFILE"
+
+    if PYTHONUNBUFFERED=1 python -m backtest.runner --sims "$SIM" --start "$START" --end "$END" 2>&1 >> "$LOGFILE"; then
+        SIM_ELAPSED=$(( SECONDS - SIM_START ))
+        DONE=$((DONE + 1))
+        echo ">>> Finished $SIM at $(date '+%H:%M:%S') (${SIM_ELAPSED}s) — $DONE/$SIM_COUNT done" >> "$LOGFILE"
+        echo "LAST DONE: $SIM (${SIM_ELAPSED}s) | $DONE/$SIM_COUNT complete | $(date '+%H:%M:%S')" > "$STATUSFILE"
+    else
+        SIM_ELAPSED=$(( SECONDS - SIM_START ))
+        DONE=$((DONE + 1))
+        FAILED=$((FAILED + 1))
+        echo ">>> FAILED $SIM at $(date '+%H:%M:%S') (${SIM_ELAPSED}s) — $DONE/$SIM_COUNT done" >> "$LOGFILE"
+        echo "LAST FAILED: $SIM (${SIM_ELAPSED}s) | $DONE/$SIM_COUNT complete | $(date '+%H:%M:%S')" > "$STATUSFILE"
+    fi
+done
+
+TOTAL_ELAPSED=$(( SECONDS - START_SEC ))
+HOURS=$((TOTAL_ELAPSED / 3600))
+MINS=$(( (TOTAL_ELAPSED % 3600) / 60 ))
+SECS=$((TOTAL_ELAPSED % 60))
+
+echo "" >> "$LOGFILE"
+echo "========================================" >> "$LOGFILE"
+echo "ALL DONE at $(date) — ${HOURS}h ${MINS}m ${SECS}s total, $FAILED failures" >> "$LOGFILE"
+echo "COMPLETE | $SIM_COUNT/$SIM_COUNT | ${HOURS}h ${MINS}m ${SECS}s | $FAILED failures | $(date '+%H:%M:%S')" > "$STATUSFILE"
