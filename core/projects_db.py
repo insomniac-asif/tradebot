@@ -159,7 +159,7 @@ def insert_trade(project: str, data: dict) -> int:
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 project,
-                data.get("timestamp", _now()),
+                data.get("timestamp") or _now(),
                 data.get("instrument"),
                 data.get("direction"),
                 data.get("side"),
@@ -187,7 +187,7 @@ def insert_signal(project: str, data: dict) -> int:
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 project,
-                data.get("timestamp", _now()),
+                data.get("timestamp") or _now(),
                 data.get("signal_type"),
                 data.get("instrument"),
                 data.get("direction"),
@@ -210,7 +210,7 @@ def insert_snapshot(project: str, data: dict) -> int:
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 project,
-                data.get("timestamp", _now()),
+                data.get("timestamp") or _now(),
                 data.get("daily_pnl", 0),
                 data.get("cumulative_pnl", 0),
                 data.get("win_rate"),
@@ -232,7 +232,7 @@ def insert_heartbeat(project: str, data: dict) -> int:
                VALUES (?,?,?,?,?,?)""",
             (
                 project,
-                data.get("timestamp", _now()),
+                data.get("timestamp") or _now(),
                 data.get("status", "online"),
                 data.get("version"),
                 data.get("uptime_seconds"),
