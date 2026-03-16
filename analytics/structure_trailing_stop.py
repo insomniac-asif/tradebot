@@ -63,19 +63,20 @@ def compute_structure_stop(
         closes = df[close_col].values
         n = len(highs)
 
-        # --- Find swing highs ---
+        # --- Find swing highs (only scan last 120 bars for speed) ---
+        scan_start = max(pivot_lookback, n - 120)
         swing_highs: list[tuple[int, float]] = []
-        for i in range(pivot_lookback, n - pivot_lookback):
+        for i in range(scan_start, n - pivot_lookback):
             window = highs[i - pivot_lookback: i + pivot_lookback + 1]
-            if highs[i] == max(window):
+            if highs[i] >= window.max():
                 swing_highs.append((i, float(highs[i])))
         swing_highs = swing_highs[-5:]  # keep last 5
 
         # --- Find swing lows ---
         swing_lows: list[tuple[int, float]] = []
-        for i in range(pivot_lookback, n - pivot_lookback):
+        for i in range(scan_start, n - pivot_lookback):
             window = lows[i - pivot_lookback: i + pivot_lookback + 1]
-            if lows[i] == min(window):
+            if lows[i] <= window.min():
                 swing_lows.append((i, float(lows[i])))
         swing_lows = swing_lows[-5:]  # keep last 5
 

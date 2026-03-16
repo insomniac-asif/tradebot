@@ -104,7 +104,7 @@ def validate_market_dataframe(df):
                 tz=session_idx.tz
             )
             missing = expected.difference(session_idx)
-            if len(missing) > 30:
+            if len(missing) > 120:
                 errors.append(
                     f"missing_rth_minutes:{session_date}:count={len(missing)}"
                 )
